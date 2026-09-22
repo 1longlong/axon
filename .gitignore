@@ -1,0 +1,59 @@
+# Dependencies and package-manager caches
+node_modules/
+.bun/
+.bun-cache/
+
+# Build and packaging outputs
+dist/
+out/
+build/
+release/
+.electron-vite/
+*.tsbuildinfo
+
+# Test and coverage outputs
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+
+# Runtime logs, crash dumps and temporary files
+logs/
+*.log
+*.log.*
+*.pid
+*.pid.lock
+*.stackdump
+*.dmp
+tmp/
+temp/
+.tmp/
+.cache/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Editor and IDE state
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+
+# Local Electron/Vite state
+.vite/
+.vite-temp/
+
+# Local package archives
+*.tgz
+
+# Project-level .axon/skills and .agents/skills are intentionally trackable.

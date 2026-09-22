@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "presets": [
+    {
+      "id": "filesystem",
+      "name": "filesystem",
+      "displayName": "工作区文件系统",
+      "description": "通过官方参考 Server 读取、搜索和修改当前项目工作区。",
+      "category": "workspace",
+      "transport": "stdio",
+      "config": {
+        "type": "stdio",
+        "enabled": true,
+        "required": false,
+        "startupTimeoutMs": 30000,
+        "requestTimeoutMs": 60000,
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "${workspace}"]
+      }
+    },
+    {
+      "id": "mcp-docs",
+      "name": "mcp-docs",
+      "displayName": "MCP 官方文档",
+      "description": "查询 Model Context Protocol 官方文档。",
+      "category": "reference",
+      "transport": "http",
+      "config": {
+        "type": "http",
+        "enabled": true,
+        "required": false,
+        "startupTimeoutMs": 30000,
+        "requestTimeoutMs": 60000,
+        "url": "https://modelcontextprotocol.io/mcp"
+      }
+    }
+  ]
+}
