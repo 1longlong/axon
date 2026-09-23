@@ -17,7 +17,7 @@
 - 除 `README.md` 与 `AGENTS.md` 外，项目 Markdown 文档已统一归档到 `docs/`，相关工程约定和 README 链接已同步更新。
 - 清理了不再使用的项目元数据字段和相关说明。
 - Git 仓库已初始化并关联 `origin/main`；本机尚未安装 GitHub CLI，GitHub Release 创建与产物上传待下一阶段完成。
-- macOS ARM64 打包链路已完成：根目录 `bun run package` 构建 renderer/main/preload，electron-builder 使用项目本地 Electron 生成 `.app` 和 ZIP，系统 `hdiutil` 生成 DMG，最后输出 `SHA256SUMS.txt`。
+- macOS ARM64 打包链路已完成：根目录 `bun run package` 构建 renderer/main/preload，electron-builder 使用项目本地 Electron 生成 `.app`、DMG、ZIP 和对应 blockmap，最后输出 `SHA256SUMS.txt`。
 - `release/` 与 `dist/` 保持为本地产物目录；运行时资源通过 `extraResources` 放入 `process.resourcesPath`。当前安装包未签名、未公证，适合开发测试，不作为正式公开分发版本。
 
 ## 迭代 21 最终实现
@@ -43,6 +43,7 @@
 - DMG 通过 `hdiutil verify`，ZIP 通过 `unzip -t`，两项产物均通过 `shasum -c`。
 - `.app` 的 bundle id 为 `com.axon.desktop`、版本为 `0.1.3`；主进程、preload、renderer、启动页和图标资源均已进入产物。
 - 真实启动打包后的 `Axon.app` 通过，主窗口、历史会话和工作区面板可加载。未配置 `AXON_ZIMA_PYTHON` 时 Zima 能力查询仍会提示未配置，属于当前已知发布限制。
+- electron-builder 的 DMG helper 重试下载成功，默认打包流程已改为直接生成 DMG，不再维护额外的 `hdiutil` 封装脚本；生成的 HFS DMG 再次通过 `hdiutil verify`。
 
 2026-09-21 迭代 21 集中验收：
 

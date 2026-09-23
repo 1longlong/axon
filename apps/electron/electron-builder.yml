@@ -23,6 +23,7 @@ mac:
   category: public.app-category.developer-tools
   icon: resources/axon-icon.svg
   target:
+    - dmg
     - zip
 
 artifactName: ${productName}-${version}-${arch}.${ext}
