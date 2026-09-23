@@ -12,6 +12,8 @@
     "dev": "bun run --filter='@axon/electron' dev",
     "electron:build": "bun run --filter='@axon/electron' build",
     "build": "bun run --filter='*' build",
+    "package": "bun run --filter='@axon/electron' package",
+    "package:dir": "bun run --filter='@axon/electron' package:dir",
     "typecheck": "bun run --filter='*' typecheck",
     "test": "bun test"
   },

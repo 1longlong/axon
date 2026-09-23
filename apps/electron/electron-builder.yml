@@ -1,0 +1,28 @@
+appId: com.axon.desktop
+productName: Axon
+
+asar: true
+electronDist: node_modules/electron/dist
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - dist/main.cjs
+  - dist/preload.cjs
+  - dist/renderer/**/*
+  - package.json
+
+# Axon 打包后通过 process.resourcesPath 读取这些文件
+extraResources:
+  - from: dist/resources
+    to: .
+
+mac:
+  category: public.app-category.developer-tools
+  icon: resources/axon-icon.svg
+  target:
+    - zip
+
+artifactName: ${productName}-${version}-${arch}.${ext}

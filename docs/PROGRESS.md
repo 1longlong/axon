@@ -16,7 +16,9 @@
 - 根目录 README 已调整为面向最终用户的产品说明，聚焦功能、启动、Runtime、项目能力、隐私和当前限制；开发架构与实施细节保留在设计文档。`.gitignore` 已覆盖 Bun/Electron/Vite 的常见本地产物，同时保持项目级 `.axon/skills` 和 `.agents/skills` 可提交。
 - 除 `README.md` 与 `AGENTS.md` 外，项目 Markdown 文档已统一归档到 `docs/`，相关工程约定和 README 链接已同步更新。
 - 清理了不再使用的项目元数据字段和相关说明。
-- 发布链现状已核对：当前目录尚未初始化 Git，系统未安装 GitHub CLI，应用只有 production build、尚无安装包和 GitHub Release 配置；后续按“仓库初始化 → 安装包 → Release 下载”分阶段实施。
+- Git 仓库已初始化并关联 `origin/main`；本机尚未安装 GitHub CLI，GitHub Release 创建与产物上传待下一阶段完成。
+- macOS ARM64 打包链路已完成：根目录 `bun run package` 构建 renderer/main/preload，electron-builder 使用项目本地 Electron 生成 `.app` 和 ZIP，系统 `hdiutil` 生成 DMG，最后输出 `SHA256SUMS.txt`。
+- `release/` 与 `dist/` 保持为本地产物目录；运行时资源通过 `extraResources` 放入 `process.resourcesPath`。当前安装包未签名、未公证，适合开发测试，不作为正式公开分发版本。
 
 ## 迭代 21 最终实现
 
@@ -34,6 +36,13 @@
 - Agent renderer：`agent-state-model.ts` → `agent-event-reducer.ts` → `agent-renderer-controller.ts`；Chat 保持独立状态机。
 
 ## 当前验证基线
+
+2026-09-23 macOS ARM64 打包验收：
+
+- `bun run package` 完整通过，生成 `Axon-0.1.3-arm64.dmg`、`Axon-0.1.3-arm64.zip`、blockmap 和 SHA-256 清单。
+- DMG 通过 `hdiutil verify`，ZIP 通过 `unzip -t`，两项产物均通过 `shasum -c`。
+- `.app` 的 bundle id 为 `com.axon.desktop`、版本为 `0.1.3`；主进程、preload、renderer、启动页和图标资源均已进入产物。
+- 真实启动打包后的 `Axon.app` 通过，主窗口、历史会话和工作区面板可加载。未配置 `AXON_ZIMA_PYTHON` 时 Zima 能力查询仍会提示未配置，属于当前已知发布限制。
 
 2026-09-21 迭代 21 集中验收：
 
@@ -55,8 +64,4 @@
 
 ## 下一步
 
-迭代 21 已收尾。下一轮由用户决定：
-
-1. 回到迭代 18 专属 GUI 端到端验收；或
-2. 开始新的核心功能迭代；或
-3. 明确恢复某项可扩展功能后，再建立对应实施计划。
+下一阶段继续发布链：提交并推送打包配置，然后创建 GitHub Release 并上传 DMG、ZIP 与 SHA-256 清单。正式公开分发前仍需配置 Apple Developer ID 签名和公证。
