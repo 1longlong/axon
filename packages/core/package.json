@@ -1,6 +1,6 @@
 {
   "name": "@axon/core",
-  "version": "0.1.3",
+  "version": "0.1.1",
   "description": "Axon Provider 适配层（LLM 渠道适配、SSE 解析等，迭代 2 起充实）",
   "type": "module",
   "main": "./src/index.ts",

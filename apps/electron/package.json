@@ -1,6 +1,6 @@
 {
   "name": "@axon/electron",
-  "version": "0.1.3",
+  "version": "0.1.1",
   "description": "Axon - 本地优先的 Electron AI 桌面 Agent",
   "main": "dist/main.cjs",
   "private": true,

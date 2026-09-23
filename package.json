@@ -1,6 +1,6 @@
 {
   "name": "axon",
-  "version": "0.1.3",
+  "version": "0.1.1",
   "description": "本地优先的 Electron AI 桌面 Agent（可插拔 Agent Runtime）",
   "type": "module",
   "private": true,

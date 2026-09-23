@@ -8,7 +8,7 @@
 - 迭代 18“全局快捷唤起现有会话”的核心功能与浮窗交互已实现；自动化测试、构建和 smoke 已通过，仍未执行该迭代专属的真实 GUI 端到端冒烟。
 - Agent 会话 Runtime 切换已归入可扩展功能，暂不实施。
 - 迭代 20“ToolSearch 与工具懒加载”已完成：仅 Pi 下官方 Anthropic Messages tool reference 与明确支持的 OpenAI Responses 模型启用；其他协议和 runtime 保持 MCP eager。
-- 迭代 21“多级 Skills 与 Axon 管理安装”已完成，版本为 `0.1.3`。当前 catalog provider 真实返回空目录，远程、市场和账号来源按计划后置。
+- 迭代 21“多级 Skills 与 Axon 管理安装”已完成。当前 catalog provider 真实返回空目录，远程、市场和账号来源按计划后置。
 - Pi 是新会话默认 runtime；Zima 已接入独立 artifact、恢复、工具权限、停止、压缩摘要和 thinking。受控 Python 分发仍待完成；Zima 子目录 AGENTS.md 自动加载受协议限制，当前标记为 manual。
 - Chat 不使用 Agent 系统提示词；Agent 使用全局选择的提示词预设。开发阶段配置与持久化格式变更不维护旧版本兼容。
 - 工程约定、核心设计文档和代码注释现只描述 Axon 自身与现行实现，不保留外部项目来源或仓库路径说明。
@@ -39,9 +39,9 @@
 
 2026-09-23 macOS ARM64 打包验收：
 
-- `bun run package` 完整通过，生成 `Axon-0.1.3-arm64.dmg`、`Axon-0.1.3-arm64.zip`、blockmap 和 SHA-256 清单。
+- `bun run package` 完整通过，生成 `Axon-0.1.1-arm64.dmg`、`Axon-0.1.1-arm64.zip`、blockmap 和 SHA-256 清单。
 - DMG 通过 `hdiutil verify`，ZIP 通过 `unzip -t`，两项产物均通过 `shasum -c`。
-- `.app` 的 bundle id 为 `com.axon.desktop`、版本为 `0.1.3`；主进程、preload、renderer、启动页和图标资源均已进入产物。
+- `.app` 的 bundle id 为 `com.axon.desktop`、发布版本为 `0.1.1`；主进程、preload、renderer、启动页和图标资源均已进入产物。
 - 真实启动打包后的 `Axon.app` 通过，主窗口、历史会话和工作区面板可加载。未配置 `AXON_ZIMA_PYTHON` 时 Zima 能力查询仍会提示未配置，属于当前已知发布限制。
 - electron-builder 的 DMG helper 重试下载成功，默认打包流程已改为直接生成 DMG，不再维护额外的 `hdiutil` 封装脚本；生成的 HFS DMG 再次通过 `hdiutil verify`。
 
