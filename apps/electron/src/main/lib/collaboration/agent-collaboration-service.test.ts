@@ -23,7 +23,9 @@ beforeEach(() => {
     sessionsDir: join(directory, 'sessions'), createId: () => `task-${tasks.list().length + 1}`, now: () => 1_000,
   })
   rootSessionId = sessions.create({
-    channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1', permissionMode: 'acceptEdits',
+    channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1',
+    sandboxMode: 'workspaceWrite',
+    approvalPolicy: 'onRequest', approvalReviewer: 'user',
     thinkingLevel: 'high',
   }).id
 })
@@ -64,7 +66,9 @@ describe('AgentCollaborationService', () => {
     expect(terminal).toMatchObject({ status: 'completed', resultSummary: '子 Agent 结论' })
     expect(sessions.get(terminal.childSessionId)).toMatchObject({
       rootSessionId, parentSessionId: rootSessionId, parentToolUseId: 'tool-1',
-      channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1', permissionMode: 'acceptEdits',
+      channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1',
+      sandboxMode: 'workspaceWrite',
+      approvalPolicy: 'onRequest', approvalReviewer: 'user',
       thinkingLevel: 'high',
     })
   })

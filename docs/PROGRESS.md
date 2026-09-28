@@ -4,65 +4,42 @@
 
 ## 当前状态
 
-- 核心迭代按 `../AGENTS.md` 清单推进；当前不实施的能力统一收口至 `axon-project-design.md` 文末的“可扩展功能迭代”。
-- 迭代 18“全局快捷唤起现有会话”的核心功能与浮窗交互已实现；自动化测试、构建和 smoke 已通过，仍未执行该迭代专属的真实 GUI 端到端冒烟。
-- Agent 会话 Runtime 切换已归入可扩展功能，暂不实施。
-- 迭代 20“ToolSearch 与工具懒加载”已完成：仅 Pi 下官方 Anthropic Messages tool reference 与明确支持的 OpenAI Responses 模型启用；其他协议和 runtime 保持 MCP eager。
-- 迭代 21“多级 Skills 与 Axon 管理安装”已完成。当前 catalog provider 真实返回空目录，远程、市场和账号来源按计划后置。
-- Pi 是新会话默认 runtime；Zima 已接入独立 artifact、恢复、工具权限、停止、压缩摘要和 thinking。受控 Python 分发仍待完成；Zima 子目录 AGENTS.md 自动加载受协议限制，当前标记为 manual。
-- Chat 不使用 Agent 系统提示词；Agent 使用全局选择的提示词预设。开发阶段配置与持久化格式变更不维护旧版本兼容。
-- 工程约定、核心设计文档和代码注释现只描述 Axon 自身与现行实现，不保留外部项目来源或仓库路径说明。
-- 核心设计文档已更名为 `axon-project-design.md`；核心迭代与暂不实现的扩展能力已分区，扩展部分只保留精简能力描述。
-- 根目录 README 已调整为面向最终用户的产品说明，聚焦功能、启动、Runtime、项目能力、隐私和当前限制；开发架构与实施细节保留在设计文档。`.gitignore` 已覆盖 Bun/Electron/Vite 的常见本地产物，同时保持项目级 `.axon/skills` 和 `.agents/skills` 可提交。
-- 除 `README.md` 与 `AGENTS.md` 外，项目 Markdown 文档已统一归档到 `docs/`，相关工程约定和 README 链接已同步更新。
-- 清理了不再使用的项目元数据字段和相关说明。
-- Git 仓库已初始化并关联 `origin/main`；本机尚未安装 GitHub CLI，GitHub Release 创建与产物上传待下一阶段完成。
-- macOS ARM64 打包链路已完成：根目录 `bun run package` 构建 renderer/main/preload，electron-builder 使用项目本地 Electron 生成 `.app`、DMG、ZIP 和对应 blockmap，最后输出 `SHA256SUMS.txt`。
-- `release/` 与 `dist/` 保持为本地产物目录；运行时资源通过 `extraResources` 放入 `process.resourcesPath`。当前安装包未签名、未公证，适合开发测试，不作为正式公开分发版本。
+- 主 Agent 会话的 Plan 模式已取消：会话不再保存协作模式，输入框不再展示“普通 / Plan”选择，运行时不再注入计划模式提示词或 `ExitPlanMode` 工具，也不再产生计划审批事件。
+- `plan` 子 Agent 保留；它是独立的只读规划角色，不属于主会话模式切换。
+- Pi Bash 审批已改为沙箱边界驱动：普通、未知和复合命令默认先进入 Seatbelt，不再因为未命中只读白名单而请求批准；显式禁止命令仍直接拒绝，真实文件/网络越界仍走精确升级审批。
+- 核心迭代清单中已实施的迭代全部收尾；当前等待用户指定下一项工作。
+- 迭代 18“全局快捷唤起现有会话”已完成：支持多条“快捷键 → 现有 Chat/Agent 会话”绑定、轻量浮窗发送与接收、共享历史、快捷来源标记、取消重置和发送后自动展开。
+- 迭代 22“macOS Seatbelt 工具沙箱与细粒度审批”已完成：Pi 七类内置工具进入宿主沙箱，文件与可归因 Bash 拒绝支持精确升级审批；Zima、完全自动模式和域名网络代理继续后置。
+- Pi 是新会话默认 runtime；Zima 已接入独立 artifact、恢复、工具权限、停止、压缩摘要和 thinking。受控 Python 分发仍待完成；Zima 子目录 AGENTS.md 自动加载受协议限制。
+- Runtime 切换、Automation、内嵌终端、完整发布链等仍属于 `axon-project-design.md` 文末的可扩展能力，不主动实施。
 
-## 迭代 21 最终实现
+## 本次交付：快捷会话浮窗支持拖拽定位
 
-- 发现顺序固定为：项目 `.axon/skills` > 项目 `.agents/skills` > `$HOME/.axon/skills` > `$HOME/.agents/skills`；同名低优先级定义保留为遮蔽诊断，不进入模型。
-- 四类 Skill 正文与引用文件统一由中立宿主工具 `SkillRead` 读取。工具拒绝绝对路径、路径穿越、符号链接逃逸、超限/二进制文件和未入选来源；只有成功读取 `SKILL.md` 才记录激活。
-- 主 Agent 与子 Agent 使用同一份有效 Skill 目录和 `SkillRead`，普通 Read/Bash 的工作区边界没有放宽。
-- Axon 管理安装目标固定为 `$HOME/.axon/skills`；安装包先验证名称、版本、哈希、frontmatter、路径、数量和大小，再同目录暂存并原子替换。实际安装清单与设置中的期望 catalog ID 独立持久化，支持修复、更新、卸载和失败回滚。
-- 设置链路为 shared DTO/IPC 常量 → main controller/handler → preload → renderer。Agent 设置页展示可安装项、逐项结果及全局发现的有效/被覆盖来源；通用 settings IPC 不能绕过安装服务修改选择。
-
-## 当前架构
-
-- 可插拔边界：编排、持久化和 renderer 只依赖 `AgentProviderAdapter` 与中立 `SDKMessage`；runtime SDK、session artifact 查找和 runtime 工具 shape 只能出现在对应 adapter 与唯一生产装配入口。
-- 主进程：`main/ipc.ts` 只装配领域 registrar；`main/lib` 按 core/settings/desktop/chat/channel/agent/project/memory/collaboration/mcp 分域。
-- shared Agent 契约：消息、会话、运行事件、IPC 和 Skill 安装契约分别维护，中立层不依赖 Pi/Zima 私有类型。
-- Agent renderer：`agent-state-model.ts` → `agent-event-reducer.ts` → `agent-renderer-controller.ts`；Chat 保持独立状态机。
+- 紧凑态整个输入胶囊都可按住拖动；手势超过 4px 才移动窗口，普通单击仍能聚焦输入，按钮和模型选择保持独立操作。
+- 紧凑胶囊固定为 70px 内容高度，阴影范围收敛在窗口透明边距内，不再因 BrowserWindow 底边裁切形成额外横线。
+- 展开态以会话历史顶部标题栏作为拖拽区域，移动后收起、再次唤起都沿用同一浮窗实例的当前位置。
+- renderer 只识别点击与拖动意图，主进程通过受控 IPC 更新窗口坐标并限制在当前显示器工作区；展开态继续使用 Electron 原生 drag hit-test。
 
 ## 当前验证基线
 
-2026-09-23 macOS ARM64 打包验收：
+2026-09-28：
 
-- `bun run package` 完整通过，生成 `Axon-0.1.1-arm64.dmg`、`Axon-0.1.1-arm64.zip`、blockmap 和 SHA-256 清单。
-- DMG 通过 `hdiutil verify`，ZIP 通过 `unzip -t`，两项产物均通过 `shasum -c`。
-- `.app` 的 bundle id 为 `com.axon.desktop`、发布版本为 `0.1.1`；主进程、preload、renderer、启动页和图标资源均已进入产物。
-- 真实启动打包后的 `Axon.app` 通过，主窗口、历史会话和工作区面板可加载。未配置 `AXON_ZIMA_PYTHON` 时 Zima 能力查询仍会提示未配置，属于当前已知发布限制。
-- electron-builder 的 DMG helper 重试下载成功，默认打包流程已改为直接生成 DMG，不再维护额外的 `hdiutil` 封装脚本；生成的 HFS DMG 再次通过 `hdiutil verify`。
-
-2026-09-21 迭代 21 集中验收：
-
-- 全仓测试：480 项通过、0 失败、1714 次断言。
+- 全仓 88 个测试文件共 530 项通过、0 失败、1854 次断言。
 - 全仓 typecheck 通过。
-- production build 通过；仅有既有 renderer 大 chunk 提示。
-- Desktop、Channel、Chat、Agent 四个真实 Electron smoke 全部通过。
-- Agent smoke 覆盖项目工作区、Skills、MCP、记忆、子 Agent、用量、Diff、流式消息和重载恢复；同步更新了 MCP“保存后保持弹窗、由 X 关闭”的当前交互断言。
-- 真实开发版 GUI 验证通过：Agent 设置页正确显示空 catalog，并发现 `$HOME/.agents/skills` 中的用户级 Skill，来源和有效状态正确；验证过程未修改用户配置。
+- production build 通过；仅保留既有 renderer 大 chunk 提示。
+- 快捷会话真实 Electron 冒烟通过：从紧凑态真实 input 发起阈值拖拽，展开态存在原生拖拽区域；移动位置可跨展开、收起和再次唤起保留，紧凑截图底行保持透明。
+- `git diff --check` 通过。
 
 ## 当前关键决定
 
+- 全局快捷键的 OS 注册由 Electron `globalShortcut` 负责；专属 GUI 冒烟不合成 macOS 键盘事件，避免要求辅助功能权限，而是确定性触发已注册回调。回调之后的窗口、IPC、模型与持久化均为真实链路。
+- 快捷浮窗不是独立会话：发送仍进入原 Chat/Agent controller 和同一份持久化历史，主窗口重新读取即可看到所有入口的消息。
 - 不实现会话分叉、回退、跨项目移动、运行中消息注入和同项目并发互斥。
 - Chat 暂不接工具；Agent 提供工具、Skills、MCP、项目指令、记忆和子 Agent。
 - 项目必须有工作区；未选择本地目录时使用应用管理目录。项目下会话共享唯一工作区。
-- 记忆只提供给 Agent，并由项目级开关控制；每轮只扫描 memory 文件元信息。
-- 可扩展功能统一标记为暂不实现；只有用户明确恢复后才重新拆分范围和实施计划。
-- 重要流程函数保留简洁中文函数级注释，复杂阶段只注释顺序、契约和失败边界。
+- 开发阶段配置与持久化格式变更不维护旧版本兼容；重要流程函数保留简洁中文注释。
+- 修复权限问题时以稳定安全边界和完整调用链为依据，不为单一命令不断扩充特例白名单。
 
 ## 下一步
 
-下一阶段继续发布链：提交并推送打包配置，然后创建 GitHub Release 并上传 DMG、ZIP 与 SHA-256 清单。正式公开分发前仍需配置 Apple Developer ID 签名和公证。
+等待用户在真实桌面中验证紧凑态和展开态拖拽手感；后续工作由用户指定。正式公开分发前仍需配置 Apple Developer ID 签名和公证。

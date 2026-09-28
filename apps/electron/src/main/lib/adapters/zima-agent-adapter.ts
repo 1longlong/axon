@@ -8,10 +8,12 @@ import type {
   AgentProviderAdapter,
   AgentCustomToolDefinition,
   AgentErrorCategory,
-  AgentPermissionMode,
+  AgentExecutionPolicy,
   AgentQueryInput,
   AgentReasoningCapability,
   AgentReasoningCapabilityInput,
+  AgentSandboxCapability,
+  AgentSandboxCapabilityInput,
   AgentStreamPayload,
   AgentTypedError,
   SDKContentBlock,
@@ -231,7 +233,7 @@ interface ActiveZimaRun {
   runId: string
   runtimeSessionId: string
   abortRequested: boolean
-  permissionMode: AgentPermissionMode
+  executionPolicy: AgentExecutionPolicy
 }
 
 function zimaProvider(provider: NonNullable<AgentQueryInput['connection']>['provider']): string {
@@ -570,6 +572,16 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
 
   constructor(private readonly pythonExecutable: string, private readonly clientVersion: string) { }
 
+  /** Zima v2 尚未把全部内置文件/命令工具委托给宿主，因此无法施加完整 Seatbelt 边界。 */
+  getSandboxCapability(_input: AgentSandboxCapabilityInput): AgentSandboxCapability {
+    return {
+      supported: false,
+      modes: [],
+      sandboxedTools: [],
+      limitation: 'runtimeToolDelegationUnavailable',
+    }
+  }
+
   /** Zima v2 接受完整中立等级，并由自身 Provider 边界编码，不借用 Pi 模型目录。 */
   getReasoningCapability(_input: AgentReasoningCapabilityInput): AgentReasoningCapability {
     return {
@@ -593,7 +605,7 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
           ? await input.canUseTool(name, permissionInput(name, args), {
             signal: input.abortSignal,
             toolUseId: toolCallId,
-            permissionMode: run.permissionMode,
+            executionPolicy: run.executionPolicy,
           })
           : { behavior: 'deny', message: '当前会话没有工具授权能力' }
       } catch {
@@ -673,7 +685,11 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
       if (input.abortSignal?.aborted) throw new Error('Zima 查询已取消')
       const run: ActiveZimaRun = {
         transport, runId, runtimeSessionId: input.resumeSessionId ?? input.sessionId,
-        abortRequested: false, permissionMode: input.permissionMode ?? 'default',
+        abortRequested: false,
+        executionPolicy: input.executionPolicy ?? {
+          sandboxMode: 'workspaceWrite',
+          approvalPolicy: 'onRequest', approvalReviewer: 'user',
+        },
       }
       this.active.set(input.sessionId, run)
       onAbort = () => this.abort(input.sessionId)
@@ -861,16 +877,6 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
     void run.transport.request('session.abort', {
       session_id: run.runtimeSessionId, run_id: run.runId, reason: '用户停止',
     }).catch(() => { })
-  }
-
-  /** 计划批准后只热切换宿主权限判定；Zima 的工具 schema 保持本轮不变。 */
-  async setPermissionMode(sessionId: string, mode: string): Promise<void> {
-    const run = this.active.get(sessionId)
-    if (!run) throw new Error('Zima 会话当前没有运行')
-    if (!['default', 'acceptEdits', 'bypassPermissions', 'plan'].includes(mode)) {
-      throw new Error('Zima 权限模式无效')
-    }
-    run.permissionMode = mode as AgentPermissionMode
   }
 
   dispose(): void {

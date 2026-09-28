@@ -150,7 +150,9 @@ export class AgentCollaborationService {
       channelId: parent.channelId,
       modelId: parent.modelId,
       projectId: parent.projectId,
-      permissionMode: parent.permissionMode,
+      sandboxMode: parent.sandboxMode,
+      approvalPolicy: parent.approvalPolicy,
+      approvalReviewer: parent.approvalReviewer,
       thinkingLevel: parent.thinkingLevel,
       parentSessionId: parent.id,
       rootSessionId: lineage.rootSessionId,
@@ -199,7 +201,7 @@ export class AgentCollaborationService {
   }
 
   /**
-   * 权限、追问和计划审批开始时把子任务标为 blocked；最后一个等待项解决后恢复 running。
+   * 权限或追问开始时把子任务标为 blocked；最后一个等待项解决后恢复 running。
    * 请求 ID 集合处理 runtime 并行发出多个交互的情况，避免过早释放调度槽语义。
    */
   handleInteractionEvent(event: AgentGenerationEvent): void {
@@ -207,16 +209,12 @@ export class AgentCollaborationService {
       ? 'permission'
       : event.type === 'ask_user_request'
         ? 'ask_user'
-        : event.type === 'exit_plan_mode_request'
-          ? 'plan_approval'
-          : undefined
+        : undefined
     const requestId = event.type === 'permission_request'
       || event.type === 'ask_user_request'
-      || event.type === 'exit_plan_mode_request'
       ? event.request.requestId
       : event.type === 'permission_resolved'
         || event.type === 'ask_user_resolved'
-        || event.type === 'exit_plan_mode_resolved'
         ? event.requestId
         : undefined
     if (!requestId) return

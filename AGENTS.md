@@ -66,16 +66,17 @@ Axon 是一个本地优先、支持可插拔 Agent Runtime 的 Electron AI 桌�
 - [x] 迭代 3：Chat 完整体验（2026-09-06；Markdown、附件、系统提示词、上下文摘要、标题生成与草稿持久化完成）
 - [x] 迭代 5：Agent Runtime MVP（2026-09-08；完成 runtime adapter、双轨会话持久化、Agent IPC/renderer、权限确认、消息工具展示、环境检测与真实 Electron 冒烟）
 - [x] 迭代 6：Agent 工作区与会话完整化（2026-09-11；项目级唯一工作区、项目会话树、文件树/监听/预览、双侧栏、上下文用量、thinking 等级、文件变更汇总和只读 Diff 完成）
-- [x] 迭代 7：Agent 交互高级（2026-09-12；排队、追问、计划审批、停止、错误处理、恢复、外部运行与 Git 归因完成）
+- [x] 迭代 7：Agent 交互高级（2026-09-12；排队、追问、停止、错误处理、恢复、外部运行与 Git 归因完成）
 - [x] 迭代 8：Skills 与项目指令（2026-09-13；项目 AGENTS.md、子目录作用域、项目 Skills 发现、渐进加载与激活记录完成）
 - [x] 迭代 9：MCP（2026-09-13；项目级 stdio/Streamable HTTP 配置、安全持久化、SDK Client 桥接、中立工具注入与连接测试完成）
 - [x] 迭代 10：记忆系统（2026-09-13；Agent 项目级开关、安全 Markdown 存储、Memory 工具、动态索引、变更提醒与编辑面板完成）
 - [x] 迭代 12：协作子 Agent / Task（2026-09-14；完成统一 Agent/Task 契约、前后台结果交付、固定一层角色与权限边界、根会话 state/JSONL 聚合存储、Task IPC/实时投影/详情 UI 与真实 Electron 恢复验证）
 - [x] 迭代 14：桌面体验包（2026-09-15；托盘生命周期、关闭/退出语义、单实例唤起、macOS Dock 状态及应用图标完成）
 - [x] 迭代 17：Zima Agent Runtime 接入（2026-09-17；默认 Pi、创建时可选 Zima、独立 artifact、工具授权、停止、恢复、真实模型及 Electron 冒烟通过；子目录 AGENTS.md 自动加载受 Zima v1 协议限制，受控 Python 分发待完成）
-- [ ] 迭代 18：全局快捷唤起现有会话（核心功能与浮窗交互已完成；专属真实 GUI 端到端验收待完成）
+- [x] 迭代 18：全局快捷唤起现有会话（2026-09-27；多快捷键绑定、轻量浮窗、共享历史、来源标记与真实 GUI 验收完成）
 - [x] 迭代 20：ToolSearch 与工具懒加载（2026-09-20；仅 Pi 下官方 Anthropic Messages tool reference 与模型目录明确支持的 OpenAI Responses 动态工具启用；其他协议/runtime 保持 MCP eager，检索、能力协商、权限及恢复契约完成）
 - [x] 迭代 21：多级 Skills 与 Axon 管理安装（2026-09-21；完成四级优先级发现、统一 `SkillRead`、受控原子安装、专用 IPC、Agent Skills 设置 UI、主/子 Agent 继承与真实 Electron 验证；catalog provider 按计划保留为空，远程/市场来源后置）
+- [x] 迭代 22：macOS Seatbelt 工具沙箱与细粒度审批（2026-09-27；Pi 内置工具宿主委托、基础沙箱、命令规则、文件/网络升级审批、精确 Grant、权限 UI 与真实 Electron 验收完成；Zima、完全自动和域名网络代理按计划后置）
 
 ## 可扩展功能迭代（暂不实现）
 
@@ -90,5 +91,6 @@ Axon 是一个本地优先、支持可插拔 Agent Runtime 的 Electron AI 桌�
 - [ ] Chat 记忆、普通项目文件陈旧监听及记忆维护自动化。
 - [ ] 语音、悬浮状态窗、自动更新、通知声音、截图与其他桌面扩展。
 - [ ] 远程/市场 Skill 目录与可视化 Skill 编辑。
+- [ ] Zima 宿主工具委托、严格工作区只读 profile、域名网络代理、危险全访问模式及 Linux/Windows 工具沙箱。
 
 （每完成一个核心迭代在这里勾选并注明日期；扩展项只有用户明确恢复后才拆分为正式迭代。）

@@ -77,7 +77,9 @@ describe('AgentSessionManager 会话索引', () => {
     const updated = sessions.update(first.id, {
       sdkSessionId: 'sdk-session-1',
       runtimeSessionFile: '/data/runtime/session-1.jsonl',
-      permissionMode: 'acceptEdits',
+      sandboxMode: 'readOnly',
+      approvalPolicy: 'onRequest',
+      approvalReviewer: 'user',
       thinkingLevel: 'high',
       projectId: 'project-2',
       memoryFileStates: { 'MEMORY.md': { updatedAt: 12.5, size: 42 } },
@@ -85,7 +87,9 @@ describe('AgentSessionManager 会话索引', () => {
     expect(updated).toMatchObject({
       sdkSessionId: 'sdk-session-1',
       runtimeSessionFile: '/data/runtime/session-1.jsonl',
-      permissionMode: 'acceptEdits',
+      sandboxMode: 'readOnly',
+      approvalPolicy: 'onRequest',
+      approvalReviewer: 'user',
       thinkingLevel: 'high',
       projectId: 'project-2',
       memoryFileStates: { 'MEMORY.md': { updatedAt: 12.5, size: 42 } },
@@ -99,11 +103,12 @@ describe('AgentSessionManager 会话索引', () => {
     expect(reloaded.update(first.id, { projectId: null }).projectId).toBeUndefined()
   })
 
-  test('拒绝非法输入：坏 ID、坏权限模式、空白标题', async () => {
+  test('拒绝非法输入：坏 ID、坏执行策略、空白标题', async () => {
     const sessions = manager()
     await expectError(() => sessions.get('../escape'), 'invalid_input')
     await expectError(() => sessions.create({ title: '   ' }), 'invalid_input')
-    await expectError(() => sessions.create({ permissionMode: 'yolo' as never }), 'invalid_input')
+    await expectError(() => sessions.create({ sandboxMode: 'dangerFullAccess' as never }), 'invalid_input')
+    await expectError(() => sessions.create({ approvalReviewer: 'unknown' as never }), 'invalid_input')
     await expectError(() => sessions.create({ thinkingLevel: 'extreme' as never }), 'invalid_input')
     await expectError(() => sessions.update('missing', { title: 'x' }), 'not_found')
     const created = sessions.create({})

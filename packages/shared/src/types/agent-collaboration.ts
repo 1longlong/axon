@@ -22,7 +22,7 @@ export type AgentDelegationStatus =
   | 'interrupted'
 
 /** blocked 只表示需要父页面承接的交互，普通模型/API 等待仍属于 running。 */
-export type AgentDelegationBlockReason = 'permission' | 'ask_user' | 'plan_approval'
+export type AgentDelegationBlockReason = 'permission' | 'ask_user'
 
 /**
  * 一次父 Agent → 子 Agent 的稳定关联记录。

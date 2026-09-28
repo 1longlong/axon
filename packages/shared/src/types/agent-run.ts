@@ -1,7 +1,7 @@
 /** Agent 命令 DTO、交互请求与跨进程运行事件。 */
 
 import type { AgentStreamPayload, AgentTypedError, SDKMessageUsage, SDKResultMessage } from './agent-message'
-import type { AgentPermissionMode } from './agent-session'
+import type { AgentSandboxEscalation } from './agent-sandbox'
 
 /** renderer 提交给主进程的一轮 Agent 输入。 */
 export interface AgentSendInput {
@@ -65,6 +65,8 @@ export interface AgentPermissionRequest {
   description: string
   dangerLevel: AgentPermissionDangerLevel
   allowAlways: boolean
+  /** 沙箱升级请求存在时，批准范围只能是其中声明的最小权限。 */
+  sandboxEscalation?: AgentSandboxEscalation
   createdAt: number
   expiresAt: number
 }
@@ -100,22 +102,6 @@ export interface AgentAskUserRequest {
 export type AgentAskUserResponse =
   | { requestId: string; behavior: 'answer'; answers: Record<string, string> }
   | { requestId: string; behavior: 'cancel' }
-
-/** ExitPlanMode 暂停执行后投影给 renderer 的计划审批请求。 */
-export interface AgentExitPlanRequest {
-  requestId: string
-  sessionId: string
-  runStartedAt: number
-  plan: string
-  allowedOperations: string[]
-}
-
-export type AgentExecutionPermissionMode = Exclude<AgentPermissionMode, 'plan'>
-
-export type AgentExitPlanResponse =
-  | { requestId: string; action: 'approve'; targetMode: AgentExecutionPermissionMode }
-  | { requestId: string; action: 'feedback'; feedback: string }
-  | { requestId: string; action: 'reject' }
 
 export interface AgentEnvironmentCheckInput {
   /** 由主进程解析项目的唯一工作区，renderer 不传绝对路径。 */
@@ -207,27 +193,6 @@ export type AgentGenerationEvent =
       runStartedAt: number
       requestId: string
       reason: 'answered' | 'canceled' | 'aborted' | 'owner_gone'
-    }
-  | {
-      type: 'exit_plan_mode_request'
-      sessionId: string
-      runStartedAt: number
-      request: AgentExitPlanRequest
-    }
-  | {
-      type: 'exit_plan_mode_resolved'
-      sessionId: string
-      runStartedAt: number
-      requestId: string
-      reason: 'approved' | 'feedback' | 'rejected' | 'aborted' | 'owner_gone'
-    }
-  | {
-      type: 'plan_mode_changed'
-      sessionId: string
-      runStartedAt: number
-      active: boolean
-      mode: AgentPermissionMode
-      source: 'initial' | 'approval'
     }
   | {
       type: 'run_finished'

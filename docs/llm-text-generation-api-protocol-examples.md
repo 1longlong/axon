@@ -1653,7 +1653,11 @@ renderer 只发送业务标识与本次文本：
     "apiKey": "仅存在于主进程内"
   },
   "systemPrompt": "你是 Axon Agent……",
-  "permissionMode": "default",
+  "executionPolicy": {
+    "sandboxMode": "workspaceWrite",
+    "approvalPolicy": "onRequest",
+    "approvalReviewer": "user"
+  },
   "resumeSessionId": "runtime_session_001",
   "runtimeSessionFile": "/absolute/runtime/session.jsonl"
 }

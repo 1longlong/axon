@@ -4,7 +4,6 @@ import { atom } from 'jotai'
 import type {
   AgentAskUserRequest,
   AgentCompactionStatus,
-  AgentExitPlanRequest,
   AgentPermissionRequest,
   AgentProject,
   AgentQueuedMessage,
@@ -44,7 +43,6 @@ export interface AgentRendererState {
   streamingAssistantUuidBySession: Record<string, string>
   pendingPermissionsBySession: Record<string, AgentPermissionRequest[]>
   pendingAskUsersBySession: Record<string, AgentAskUserRequest[]>
-  pendingExitPlansBySession: Record<string, AgentExitPlanRequest[]>
   queuedMessagesBySession: Record<string, AgentQueuedMessage[]>
   lastError: AgentRendererError | null
 }
@@ -65,7 +63,6 @@ export function createInitialAgentRendererState(): AgentRendererState {
     streamingAssistantUuidBySession: {},
     pendingPermissionsBySession: {},
     pendingAskUsersBySession: {},
-    pendingExitPlansBySession: {},
     queuedMessagesBySession: {},
     lastError: null,
   }

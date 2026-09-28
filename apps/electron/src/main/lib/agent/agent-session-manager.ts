@@ -21,9 +21,11 @@ import {
   MAX_AGENT_SESSION_TITLE_LENGTH,
 } from '@axon/shared'
 import type {
+  AgentApprovalPolicy,
+  AgentApprovalReviewer,
   AgentMemoryFileStates,
-  AgentPermissionMode,
   AgentRuntimeId,
+  AgentSandboxMode,
   AgentSessionCreateInput,
   AgentSessionMeta,
   AgentSubagentType,
@@ -34,11 +36,13 @@ import type {
 import { readJsonFileSafe, writeJsonFileAtomic, writeTextFileAtomic } from '../core/safe-file'
 import { AgentRootStateStore } from './agent-root-state-store'
 
-const INDEX_VERSION = 5
+const INDEX_VERSION = 6
 const MAX_SESSION_MESSAGES = 100_000
 const MAX_SESSIONS_FILE_BYTES = 128 * 1024 * 1024
 const MAX_MESSAGE_LINE_BYTES = 8 * 1024 * 1024
-const PERMISSION_MODES: readonly AgentPermissionMode[] = ['default', 'acceptEdits', 'bypassPermissions', 'plan']
+const SANDBOX_MODES: readonly AgentSandboxMode[] = ['readOnly', 'workspaceWrite']
+const APPROVAL_POLICIES: readonly AgentApprovalPolicy[] = ['onRequest']
+const APPROVAL_REVIEWERS: readonly AgentApprovalReviewer[] = ['user', 'autoReview']
 const THINKING_LEVELS: readonly AgentThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const SUBAGENT_TYPES: readonly AgentSubagentType[] = ['coder', 'explore', 'plan']
 const RUNTIME_IDS: readonly AgentRuntimeId[] = ['pi', 'zima']
@@ -112,12 +116,28 @@ function normalizeTitle(value: unknown): string {
   return value.trim().slice(0, MAX_AGENT_SESSION_TITLE_LENGTH)
 }
 
-function normalizePermissionMode(value: unknown): AgentPermissionMode | undefined {
+function normalizeSandboxMode(value: unknown): AgentSandboxMode | undefined {
   if (value === undefined || value === null) return undefined
-  if (typeof value !== 'string' || !PERMISSION_MODES.includes(value as AgentPermissionMode)) {
-    throw new AgentSessionManagerError('invalid_input', '权限模式无效')
+  if (typeof value !== 'string' || !SANDBOX_MODES.includes(value as AgentSandboxMode)) {
+    throw new AgentSessionManagerError('invalid_input', '沙箱模式无效')
   }
-  return value as AgentPermissionMode
+  return value as AgentSandboxMode
+}
+
+function normalizeApprovalPolicy(value: unknown): AgentApprovalPolicy | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || !APPROVAL_POLICIES.includes(value as AgentApprovalPolicy)) {
+    throw new AgentSessionManagerError('invalid_input', '审批策略无效')
+  }
+  return value as AgentApprovalPolicy
+}
+
+function normalizeApprovalReviewer(value: unknown): AgentApprovalReviewer | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || !APPROVAL_REVIEWERS.includes(value as AgentApprovalReviewer)) {
+    throw new AgentSessionManagerError('invalid_input', '审批者无效')
+  }
+  return value as AgentApprovalReviewer
 }
 
 function normalizeThinkingLevel(value: unknown): AgentThinkingLevel | undefined {
@@ -194,7 +214,9 @@ function normalizeMeta(value: unknown): AgentSessionMeta {
   const projectId = normalizeOptionalId(meta.projectId, '项目 ID', 128)
   const sdkSessionId = normalizeOptionalId(meta.sdkSessionId, 'runtime 会话 ID', 512)
   const runtimeSessionFile = normalizeOptionalId(meta.runtimeSessionFile, 'runtime 会话文件', 1024)
-  const permissionMode = normalizePermissionMode(meta.permissionMode)
+  const sandboxMode = normalizeSandboxMode(meta.sandboxMode) ?? 'workspaceWrite'
+  const approvalPolicy = normalizeApprovalPolicy(meta.approvalPolicy) ?? 'onRequest'
+  const approvalReviewer = normalizeApprovalReviewer(meta.approvalReviewer) ?? 'user'
   const thinkingLevel = normalizeThinkingLevel(meta.thinkingLevel)
   const memoryFileStates = normalizeMemoryFileStates(meta.memoryFileStates)
   const lineage = normalizeLineage(meta, id)
@@ -211,7 +233,9 @@ function normalizeMeta(value: unknown): AgentSessionMeta {
     ...(projectId === undefined ? {} : { projectId }),
     ...(sdkSessionId === undefined ? {} : { sdkSessionId }),
     ...(runtimeSessionFile === undefined ? {} : { runtimeSessionFile }),
-    ...(permissionMode === undefined ? {} : { permissionMode }),
+    sandboxMode,
+    approvalPolicy,
+    approvalReviewer,
     ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
     ...(memoryFileStates === undefined ? {} : { memoryFileStates }),
     ...(lineage.parentSessionId === undefined ? {} : { parentSessionId: lineage.parentSessionId }),
@@ -333,7 +357,9 @@ export class AgentSessionManager {
     const channelId = normalizeOptionalId(input.channelId, '渠道 ID', 100)
     const modelId = normalizeOptionalId(input.modelId, '模型 ID', 512)
     const projectId = normalizeOptionalId(input.projectId, '项目 ID', 128)
-    const permissionMode = normalizePermissionMode(input.permissionMode)
+    const sandboxMode = normalizeSandboxMode(input.sandboxMode) ?? 'workspaceWrite'
+    const approvalPolicy = normalizeApprovalPolicy(input.approvalPolicy) ?? 'onRequest'
+    const approvalReviewer = normalizeApprovalReviewer(input.approvalReviewer) ?? 'user'
     const requestedThinkingLevel = normalizeThinkingLevel(input.thinkingLevel)
     const id = this.createUniqueId(this.list())
     const lineage = normalizeLineage(input as Record<string, unknown>, id)
@@ -363,7 +389,9 @@ export class AgentSessionManager {
       ...(channelId === undefined ? {} : { channelId }),
       ...(modelId === undefined ? {} : { modelId }),
       ...(projectId === undefined ? {} : { projectId }),
-      ...(permissionMode === undefined ? {} : { permissionMode }),
+      sandboxMode,
+      approvalPolicy,
+      approvalReviewer,
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(lineage.parentSessionId === undefined ? {} : { parentSessionId: lineage.parentSessionId }),
       ...(lineage.rootSessionId === undefined ? {} : { rootSessionId: lineage.rootSessionId }),
@@ -411,9 +439,15 @@ export class AgentSessionManager {
     const projectId = input.projectId === undefined
       ? existing.projectId
       : normalizeOptionalId(input.projectId, '项目 ID', 128)
-    const permissionMode = input.permissionMode === undefined
-      ? existing.permissionMode
-      : normalizePermissionMode(input.permissionMode)
+    const sandboxMode = input.sandboxMode === undefined
+      ? existing.sandboxMode ?? 'workspaceWrite'
+      : normalizeSandboxMode(input.sandboxMode) ?? 'workspaceWrite'
+    const approvalPolicy = input.approvalPolicy === undefined
+      ? existing.approvalPolicy ?? 'onRequest'
+      : normalizeApprovalPolicy(input.approvalPolicy) ?? 'onRequest'
+    const approvalReviewer = input.approvalReviewer === undefined
+      ? existing.approvalReviewer ?? 'user'
+      : normalizeApprovalReviewer(input.approvalReviewer) ?? 'user'
     const thinkingLevel = input.thinkingLevel === undefined
       ? existing.thinkingLevel
       : normalizeThinkingLevel(input.thinkingLevel)
@@ -436,7 +470,9 @@ export class AgentSessionManager {
       ...(projectId === undefined ? {} : { projectId }),
       ...(sdkSessionId === undefined ? {} : { sdkSessionId }),
       ...(runtimeSessionFile === undefined ? {} : { runtimeSessionFile }),
-      ...(permissionMode === undefined ? {} : { permissionMode }),
+      sandboxMode,
+      approvalPolicy,
+      approvalReviewer,
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(memoryFileStates === undefined ? {} : { memoryFileStates }),
       ...(existing.parentSessionId === undefined ? {} : { parentSessionId: existing.parentSessionId }),

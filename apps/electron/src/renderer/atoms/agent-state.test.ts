@@ -53,7 +53,6 @@ function createApi(overrides: Partial<AgentRendererApi> = {}): AgentRendererApi 
     send: async () => ({ success: true, disposition: 'started' }),
     stop: async () => false,
     respondAskUser: async () => false,
-    respondExitPlan: async () => false,
     listQueuedMessages: async () => [],
     cancelQueuedMessage: async () => false,
     moveQueuedMessage: async () => false,

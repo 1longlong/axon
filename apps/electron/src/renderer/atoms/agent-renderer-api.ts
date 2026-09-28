@@ -5,7 +5,6 @@ import type {
   AgentAskUserResponse,
   AgentEnvironmentCheckInput,
   AgentEnvironmentCheckResult,
-  AgentExitPlanResponse,
   AgentGenerationEvent,
   AgentMemoryChangedEvent,
   AgentMemoryFile,
@@ -43,7 +42,6 @@ export interface AgentRendererApi {
   stop(sessionId: string): Promise<boolean>
   respondPermission?(response: AgentPermissionResponse): Promise<boolean>
   respondAskUser(response: AgentAskUserResponse): Promise<boolean>
-  respondExitPlan(response: AgentExitPlanResponse): Promise<boolean>
   listQueuedMessages(sessionId: string): Promise<AgentQueuedMessage[]>
   cancelQueuedMessage(input: AgentQueuedMessageControlInput): Promise<boolean>
   moveQueuedMessage(input: AgentMoveQueuedMessageInput): Promise<boolean>

@@ -10,10 +10,11 @@ import { RichTextInput } from '@/components/chat/RichTextInput'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import { AgentMessageQueue } from './AgentMessageQueue'
 import { AGENT_RUNTIME_CAPABILITIES } from '@axon/shared'
-import type { AgentPermissionMode, AgentReasoningCapability, AgentThinkingLevel } from '@axon/shared'
+import type { AgentReasoningCapability, AgentThinkingLevel } from '@axon/shared'
 
 const MAX_AGENT_INPUT_LENGTH = 100_000
 const THINKING_LEVELS: readonly AgentThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+type AgentPermissionProfile = 'askApproval' | 'approveForMe' | 'fullAccess'
 
 /** 与 adapter 的档位收窄方向一致，保证模型切换时选择框显示实际生效值。 */
 function visibleThinkingLevel(level: AgentThinkingLevel, available: readonly AgentThinkingLevel[]): AgentThinkingLevel {
@@ -37,10 +38,8 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
   const setSettingsTab = useSetAtom(settingsTabAtom)
   const [value, setValue] = React.useState('')
   const [savingModel, setSavingModel] = React.useState(false)
-  const [savingPermissionMode, setSavingPermissionMode] = React.useState(false)
   const [savingThinkingLevel, setSavingThinkingLevel] = React.useState(false)
   const [modelError, setModelError] = React.useState<string | undefined>(undefined)
-  const [permissionModeError, setPermissionModeError] = React.useState<string | undefined>(undefined)
   const [thinkingLevelError, setThinkingLevelError] = React.useState<string | undefined>(undefined)
   const [reasoningCapability, setReasoningCapability] = React.useState<{
     key: string
@@ -63,7 +62,8 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
     : ''
   const hasModel = modelOptions.some((option) => encodeChatModelOption(option.channelId, option.modelId) === currentModel)
   const unavailable = !session?.projectId || !hasModel
-  const permissionMode = session?.permissionMode ?? 'default'
+  const permissionProfile: AgentPermissionProfile = session?.approvalReviewer === 'autoReview'
+    ? 'approveForMe' : 'askApproval'
   const thinkingLevel = session?.thinkingLevel ?? 'medium'
   const modelKey = session?.channelId && session.modelId && runtimeCapabilities?.thinkingLevel
     ? `${session.runtimeId}\0${session.channelId}\0${session.modelId}` : undefined
@@ -97,20 +97,6 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
     }
   }, [controller, session])
 
-  /** 模式保存到会话元数据；运行期间禁用切换，保证本轮 prompt 与权限边界一致。 */
-  const selectPermissionMode = React.useCallback(async (nextMode: AgentPermissionMode): Promise<void> => {
-    if (!session) return
-    setSavingPermissionMode(true)
-    setPermissionModeError(undefined)
-    try {
-      await controller.updateSession(session.id, { permissionMode: nextMode })
-    } catch {
-      setPermissionModeError('更新模式失败')
-    } finally {
-      setSavingPermissionMode(false)
-    }
-  }, [controller, session])
-
   /** 思考等级按会话持久化；下一轮由 adapter 映射到 runtime 当前模型支持的等级。 */
   const selectThinkingLevel = React.useCallback(async (nextLevel: AgentThinkingLevel): Promise<void> => {
     if (!session) return
@@ -132,16 +118,16 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
 
   const send = React.useCallback(() => {
     const text = value.trim()
-    if (!text || text.length > MAX_AGENT_INPUT_LENGTH || externalRunning || savingModel || savingPermissionMode || savingThinkingLevel || unavailable) return
+    if (!text || text.length > MAX_AGENT_INPUT_LENGTH || externalRunning || savingModel || savingThinkingLevel || unavailable) return
     setValue('')
     void controller.send({ sessionId, text })
-  }, [controller, externalRunning, savingModel, savingPermissionMode, savingThinkingLevel, sessionId, unavailable, value])
+  }, [controller, externalRunning, savingModel, savingThinkingLevel, sessionId, unavailable, value])
 
-  const inputError = modelError ?? permissionModeError ?? thinkingLevelError ?? (value.length > MAX_AGENT_INPUT_LENGTH ? `输入超过 ${MAX_AGENT_INPUT_LENGTH.toLocaleString()} 字` : undefined)
+  const inputError = modelError ?? thinkingLevelError ?? (value.length > MAX_AGENT_INPUT_LENGTH ? `输入超过 ${MAX_AGENT_INPUT_LENGTH.toLocaleString()} 字` : undefined)
 
   return <div className="shrink-0 px-4 pb-4 pt-2">
     <AgentMessageQueue sessionId={sessionId} messages={queuedMessages} />
-    <div className={`mx-auto max-w-3xl rounded-xl border bg-[hsl(var(--input-surface))] p-2 shadow-sm ${permissionMode === 'plan' ? 'border-dashed border-primary/70' : ''}`}>
+    <div className="mx-auto max-w-3xl rounded-xl border bg-[hsl(var(--input-surface))] p-2 shadow-sm">
       <RichTextInput value={value} disabled={externalRunning || unavailable} onChange={setValue} onSubmit={send} />
       <div className="flex items-center justify-between gap-3 px-1 pt-1">
         <div className="flex min-w-0 items-center gap-1.5">
@@ -153,29 +139,30 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
             aria-label="选择 Agent 思考等级"
             title="选择 Agent 思考等级"
             value={visibleThinkingLevel(thinkingLevel, capability.levels)}
-            disabled={running || savingModel || savingPermissionMode || savingThinkingLevel}
+            disabled={running || savingModel || savingThinkingLevel}
             onChange={(event) => void selectThinkingLevel(event.target.value as AgentThinkingLevel)}
             className="h-8 rounded-md border bg-background px-2 text-xs text-foreground outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
           >
             {capability.levels.map((level) => <option key={level} value={level}>{level}</option>)}
           </select> : null}
           <select
-            aria-label="选择 Agent 权限模式"
-            title="选择 Agent 权限模式"
-            value={permissionMode}
-            disabled={running || savingModel || savingPermissionMode || savingThinkingLevel}
-            onChange={(event) => void selectPermissionMode(event.target.value as AgentPermissionMode)}
+            aria-label="选择 Agent 权限预设"
+            title={session?.runtimeId === 'zima'
+              ? 'Zima 暂不支持操作系统沙箱，仅保留人工工具审批'
+              : '权限预设由沙箱、审批策略和审批者共同组成'}
+            value={permissionProfile}
+            disabled={running || savingModel || savingThinkingLevel}
+            onChange={() => {}}
             className="h-8 rounded-md border bg-background px-2 text-xs text-foreground outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
           >
-            <option value="default">操作确认</option>
-            <option value="acceptEdits">允许编辑</option>
-            <option value="bypassPermissions">完全自动</option>
-            <option value="plan">计划模式</option>
+            <option value="askApproval">请求批准</option>
+            <option value="approveForMe" disabled>帮我批准（待实现）</option>
+            <option value="fullAccess" disabled>完全访问权限（暂不支持）</option>
           </select>
           {modelOptions.length > 0 ? <select
             aria-label="选择 Agent 渠道和模型"
             value={hasModel ? currentModel : ''}
-            disabled={running || savingModel || savingPermissionMode || savingThinkingLevel}
+            disabled={running || savingModel || savingThinkingLevel}
             onChange={(event) => void selectModel(event.target.value)}
             className="h-8 w-48 max-w-[55%] rounded-md border bg-background px-2 text-xs text-foreground outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
           >
@@ -191,8 +178,8 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
           </button>}
           {running ? externalRunning
             ? <span className="flex h-8 items-center gap-1.5 rounded-md border px-3 text-xs text-muted-foreground"><Loader2 size={12} className="animate-spin" />外部运行中</span>
-            : <><button type="button" onClick={send} disabled={!value.trim() || savingModel || savingPermissionMode || savingThinkingLevel} className="flex h-8 items-center rounded-md bg-primary px-3 text-xs text-primary-foreground disabled:opacity-40">排队</button><button type="button" onClick={() => void controller.stop(sessionId)} className="flex h-8 items-center gap-1.5 rounded-md bg-destructive px-3 text-xs text-destructive-foreground"><Square size={12} fill="currentColor" />停止</button></>
-            : <button type="button" onClick={send} disabled={!value.trim() || savingModel || savingPermissionMode || savingThinkingLevel || unavailable} className="flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs text-primary-foreground disabled:opacity-40"><Loader2 size={12} className="hidden" />发送</button>}
+            : <><button type="button" onClick={send} disabled={!value.trim() || savingModel || savingThinkingLevel} className="flex h-8 items-center rounded-md bg-primary px-3 text-xs text-primary-foreground disabled:opacity-40">排队</button><button type="button" onClick={() => void controller.stop(sessionId)} className="flex h-8 items-center gap-1.5 rounded-md bg-destructive px-3 text-xs text-destructive-foreground"><Square size={12} fill="currentColor" />停止</button></>
+            : <button type="button" onClick={send} disabled={!value.trim() || savingModel || savingThinkingLevel || unavailable} className="flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs text-primary-foreground disabled:opacity-40"><Loader2 size={12} className="hidden" />发送</button>}
         </div>
       </div>
     </div>

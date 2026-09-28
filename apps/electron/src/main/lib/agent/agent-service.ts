@@ -6,14 +6,14 @@ import type {
   AgentActiveRun,
   AgentCanUseTool,
   AgentCustomToolDefinition,
-  AgentExecutionPermissionMode,
+  AgentExecutionPolicy,
   AgentMemoryFileStates,
   AgentTypedError,
   AgentProviderAdapter,
-  AgentPermissionMode,
   AgentQueryInput,
   AgentRunSource,
   AgentRuntimeId,
+  AgentSandboxPolicy,
   AgentSendInput,
   AgentSessionMeta,
   AgentSubagentType,
@@ -31,7 +31,7 @@ import type { AgentEventBus } from './agent-event-bus'
 import { createUserStoppedResult, normalizePayloadAfterUserStop } from './agent-stop-policy'
 import { buildAgentCompletionPayload } from './agent-completion-payload'
 import { buildRecoveryPrompt } from './agent-session-context-prompt'
-import { buildPlanModeSystemPrompt } from './agent-plan-mode'
+import { buildAgentSandboxPolicy } from './agent-sandbox-policy'
 import {
   buildProjectInstructionSystemPrompt,
   type ProjectInstructionManifest,
@@ -103,7 +103,7 @@ export interface AgentCustomToolContext {
   projectId: string
   runStartedAt: number
   runSignal: AbortSignal
-  permissionMode: AgentPermissionMode
+  executionPolicy: AgentExecutionPolicy
 }
 
 interface ActiveAgentRun {
@@ -260,7 +260,14 @@ export class AgentService {
     } catch (error) {
       throw new AgentServiceError('runtime_error', error instanceof Error ? error.message : 'Agent Runtime 不可用')
     }
-    const permissionMode = session.permissionMode ?? 'default'
+    const executionPolicy: AgentExecutionPolicy = {
+      sandboxMode: session.sandboxMode ?? 'workspaceWrite',
+      approvalPolicy: session.approvalPolicy ?? 'onRequest',
+      approvalReviewer: session.approvalReviewer ?? 'user',
+    }
+    if (executionPolicy.approvalReviewer === 'autoReview') {
+      throw new AgentServiceError('runtime_error', '自动审批 Agent 尚未接入')
+    }
 
     // Date.now 可能在同一毫秒重复；强制单调递增，renderer 才能可靠区分新旧流。
     const runStartedAt = Math.max(this.now(), this.lastRunStartedAt + 1)
@@ -291,12 +298,6 @@ export class AgentService {
         type: 'run_started', sessionId: input.sessionId,
         runStartedAt: active.runStartedAt, source: active.source,
       })
-      if (permissionMode === 'plan') {
-        this.options.eventBus.emit({
-          type: 'plan_mode_changed', sessionId: input.sessionId,
-          runStartedAt: active.runStartedAt, active: true, mode: 'plan', source: 'initial',
-        })
-      }
       this.emitStream(input.sessionId, active, { kind: 'sdk_message', message: persistedUser })
 
       if (!session.channelId || !session.modelId) {
@@ -326,6 +327,19 @@ export class AgentService {
       try { resolvedCwd = this.options.resolveProjectCwd(session.projectId) }
       catch { throw new AgentServiceError('workspace_unavailable', 'Agent 项目或工作区不可用') }
       if (!resolvedCwd) throw new AgentServiceError('workspace_unavailable', 'Agent 项目无法解析运行目录')
+
+      // 先协商 runtime 能否让宿主接管全部工具执行；未明确支持时绝不宣称已启用 OS 沙箱。
+      let sandboxPolicy: AgentSandboxPolicy | undefined
+      const sandboxCapability = await adapter.getSandboxCapability?.({ platform: 'macos' })
+      if (sandboxCapability && (sandboxCapability.supported || sandboxCapability.sandboxedTools.length > 0)) {
+        if (!sandboxCapability.modes.includes(executionPolicy.sandboxMode)) {
+          throw new AgentServiceError('runtime_error', '当前 Runtime 不支持会话选择的沙箱模式')
+        }
+        sandboxPolicy = buildAgentSandboxPolicy({
+          projectRoot: resolvedCwd,
+          mode: executionPolicy.sandboxMode,
+        })
+      }
 
       // 项目指令是可选上下文：读取失败不能吞掉用户消息或阻断模型请求。
       let systemPrompt = this.options.getSystemPrompt?.(session) ?? ''
@@ -388,7 +402,7 @@ export class AgentService {
             projectId: session.projectId,
             runStartedAt: active.runStartedAt,
             runSignal: active.controller.signal,
-            permissionMode,
+            executionPolicy,
           })
         } catch (error) {
           if (active.controller.signal.aborted) throw error
@@ -429,7 +443,7 @@ export class AgentService {
         },
         // 动态 reminder 放在最终提示词末尾，使文件变化不会被前面的静态说明淹没。
         systemPrompt: appendDeferredToolCatalogPrompt([
-          buildPlanModeSystemPrompt(systemPrompt, permissionMode),
+          systemPrompt.trim(),
           memoryPrompt.trim(),
         ].filter(Boolean).join('\n\n'), customTools ?? []),
         ...(projectInstructionManifest
@@ -443,7 +457,8 @@ export class AgentService {
         ...(allowedSubagentBuiltinTools(session.subagentType)
           ? { allowedBuiltinTools: allowedSubagentBuiltinTools(session.subagentType) }
           : {}),
-        permissionMode,
+        executionPolicy,
+        ...(sandboxPolicy ? { sandboxPolicy } : {}),
         ...(AGENT_RUNTIME_CAPABILITIES[session.runtimeId].thinkingLevel
           ? { thinkingLevel: session.thinkingLevel ?? 'medium' }
           : {}),
@@ -630,28 +645,6 @@ export class AgentService {
       this.idleWaiters.set(sessionId, waiters)
       if (!this.activeRuns.has(sessionId)) this.resolveIdleWaiters(sessionId)
     })
-  }
-
-  /** 计划审批先热切换活跃 adapter，再写会话索引；持久化失败时回滚运行态。 */
-  async setPermissionMode(sessionId: string, mode: AgentExecutionPermissionMode): Promise<void> {
-    const active = this.activeRuns.get(sessionId)
-    const session = this.options.sessionManager.get(sessionId)
-    if (!active || !session) throw new AgentServiceError('not_found', 'Agent 运行或会话不存在')
-    if (!active.adapter.setPermissionMode) {
-      throw new AgentServiceError('runtime_error', '当前 Agent Runtime 不支持运行中切换权限模式')
-    }
-    const previousMode = session.permissionMode ?? 'default'
-    await active.adapter.setPermissionMode(sessionId, mode)
-    if (this.activeRuns.get(sessionId) !== active || active.controller.signal.aborted) {
-      await active.adapter.setPermissionMode(sessionId, previousMode).catch(() => {})
-      throw new AgentServiceError('runtime_error', 'Agent 运行已停止，无法批准计划')
-    }
-    try {
-      this.options.sessionManager.update(sessionId, { permissionMode: mode })
-    } catch (error) {
-      await active.adapter.setPermissionMode(sessionId, previousMode).catch(() => {})
-      throw error
-    }
   }
 
   /** 返回不含 AbortController 的运行快照，供新打开或重载的窗口恢复运行标记。 */

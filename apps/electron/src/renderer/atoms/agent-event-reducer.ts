@@ -142,11 +142,9 @@ export function reduceAgentGenerationEvent(
   const isDetachedChildRequest = (
     event.type === 'permission_request'
     || event.type === 'ask_user_request'
-    || event.type === 'exit_plan_mode_request'
   ) && event.request.sessionId !== event.sessionId
   const isInteractionResolution = event.type === 'permission_resolved'
     || event.type === 'ask_user_resolved'
-    || event.type === 'exit_plan_mode_resolved'
   if (currentRun !== event.runStartedAt && !isDetachedChildRequest && !isInteractionResolution) return state
 
   if (event.type === 'permission_request') {
@@ -192,38 +190,6 @@ export function reduceAgentGenerationEvent(
         ...state.pendingAskUsersBySession,
         [event.sessionId]: pending.filter((item) => item.requestId !== event.requestId),
       },
-    }
-  }
-
-  if (event.type === 'exit_plan_mode_request') {
-    const pending = state.pendingExitPlansBySession[event.sessionId] ?? []
-    if (pending.some((item) => item.requestId === event.request.requestId)) return state
-    return {
-      ...state,
-      pendingExitPlansBySession: {
-        ...state.pendingExitPlansBySession,
-        [event.sessionId]: [...pending, event.request],
-      },
-    }
-  }
-
-  if (event.type === 'exit_plan_mode_resolved') {
-    const pending = state.pendingExitPlansBySession[event.sessionId] ?? []
-    return {
-      ...state,
-      pendingExitPlansBySession: {
-        ...state.pendingExitPlansBySession,
-        [event.sessionId]: pending.filter((item) => item.requestId !== event.requestId),
-      },
-    }
-  }
-
-  if (event.type === 'plan_mode_changed') {
-    return {
-      ...state,
-      sessions: state.sessions.map((session) => session.id === event.sessionId
-        ? { ...session, permissionMode: event.mode }
-        : session),
     }
   }
 
@@ -327,7 +293,6 @@ export function reduceAgentGenerationEvent(
   const streamingAssistantUuids = { ...state.streamingAssistantUuidBySession }
   const pendingPermissions = { ...state.pendingPermissionsBySession }
   const pendingAskUsers = { ...state.pendingAskUsersBySession }
-  const pendingExitPlans = { ...state.pendingExitPlansBySession }
   delete activeRuns[event.sessionId]
   delete activeRunSources[event.sessionId]
   delete retryStatuses[event.sessionId]
@@ -336,7 +301,6 @@ export function reduceAgentGenerationEvent(
   delete streamingAssistantUuids[event.sessionId]
   delete pendingPermissions[event.sessionId]
   delete pendingAskUsers[event.sessionId]
-  delete pendingExitPlans[event.sessionId]
   return {
     ...state,
     activeRunsBySession: activeRuns,
@@ -347,6 +311,5 @@ export function reduceAgentGenerationEvent(
     streamingAssistantUuidBySession: streamingAssistantUuids,
     pendingPermissionsBySession: pendingPermissions,
     pendingAskUsersBySession: pendingAskUsers,
-    pendingExitPlansBySession: pendingExitPlans,
   }
 }

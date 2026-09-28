@@ -19,6 +19,7 @@
     "typecheck": "tsc --noEmit",
     "test:channels:smoke": "bun run build && esbuild scripts/smoke-channels.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-channels.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-channels.cjs",
     "test:chat:smoke": "bun run build && esbuild scripts/smoke-chat.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-chat.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-chat.cjs",
+    "test:quick-chat:smoke": "bun run build && esbuild scripts/smoke-quick-chat.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-quick-chat.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-quick-chat.cjs",
     "test:agent:smoke": "bun run build && esbuild scripts/smoke-agent.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-agent.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-agent.cjs",
     "test:agent:zima:live": "esbuild scripts/smoke-zima-live.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-zima-live.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-zima-live.cjs",
     "test:desktop:smoke": "bun run build:main && esbuild scripts/smoke-desktop.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-desktop.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-desktop.cjs"

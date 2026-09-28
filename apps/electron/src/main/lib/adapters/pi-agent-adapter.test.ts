@@ -1,9 +1,19 @@
 import { describe, expect, test } from 'bun:test'
-import type { AgentCustomToolDefinition, SDKAssistantMessage, SDKMessage } from '@axon/shared'
+import type {
+  AgentCustomToolDefinition,
+  AgentHostToolExecutionPort,
+  AgentSandboxCommandRequest,
+  AgentSandboxPolicy,
+  SDKAssistantMessage,
+  SDKMessage,
+} from '@axon/shared'
+import { AgentSandboxEscalationError } from '@axon/shared'
 import {
   convertPiMessage,
   convertPiCompactionEnd,
   convertResultMessage,
+  createPiSandboxedBashOperations,
+  createPiSandboxedFileToolOptions,
   dropTrailingAbortedAssistant,
   getPiAssistantErrorDetails,
   getPiReasoningCapability,
@@ -17,7 +27,66 @@ import type { PiAgentQueryOptions } from './pi-agent-adapter'
 import { resolveProjectInstructions } from '../project/project-instruction-resolver'
 import { createAgentToolSearchTool } from '../agent/agent-tool-search'
 
+const DEFAULT_EXECUTION_POLICY = {
+  sandboxMode: 'workspaceWrite',
+  approvalPolicy: 'onRequest', approvalReviewer: 'user',
+} as const
+
+const SANDBOX_POLICY: AgentSandboxPolicy = {
+  platform: 'macos',
+  mode: 'workspaceWrite',
+  workingDirectory: '/tmp/project',
+  readAccess: { type: 'fullAccess' },
+  writableRoots: ['/tmp/project'],
+  protectedReadOnlyRoots: ['/tmp/project/.git'],
+  networkAccess: false,
+}
+
+function hostToolPort(
+  overrides: Partial<AgentHostToolExecutionPort> = {},
+): AgentHostToolExecutionPort {
+  return {
+    executeCommand: async () => ({
+      exitCode: 0, timedOut: false, aborted: false, stdout: '', stderr: '',
+      stdoutTruncated: false, stderrTruncated: false,
+    }),
+    readFile: async () => Buffer.from(''),
+    assertFileAccess: async () => {},
+    writeFile: async () => {},
+    createDirectory: async () => {},
+    pathExists: async () => true,
+    statPath: async () => ({ isDirectory: false, size: 0 }),
+    readDirectory: async () => [],
+    glob: async () => [],
+    searchText: async () => ({ matches: [], limitReached: false }),
+    detectImageMimeType: async () => undefined,
+    ...overrides,
+  }
+}
+
 describe('Agent 模型思考能力', () => {
+  test('Seatbelt 执行器接管工具前不宣称支持 OS 沙箱', () => {
+    const adapter = new PiAgentAdapter()
+    expect(adapter.getSandboxCapability({ platform: 'macos' })).toEqual({
+      supported: false,
+      modes: [],
+      sandboxedTools: [],
+      limitation: 'hostExecutorUnavailable',
+    })
+    adapter.dispose()
+  })
+
+  test('宿主端口覆盖全部内置工具时才报告完整支持', () => {
+    const hostTools = hostToolPort()
+    const adapter = new PiAgentAdapter(undefined, hostTools)
+    expect(adapter.getSandboxCapability({ platform: 'macos' })).toEqual({
+      supported: true,
+      modes: ['readOnly', 'workspaceWrite'],
+      sandboxedTools: ['bash', 'read', 'write', 'edit', 'grep', 'glob', 'ls'],
+    })
+    adapter.dispose()
+  })
+
   test('Pi adapter 通过自身模型目录回答能力', async () => {
     const adapter = new PiAgentAdapter()
     expect(await adapter.getReasoningCapability({ provider: 'custom', model: 'axon-unknown-model' })).toBeUndefined()
@@ -42,6 +111,90 @@ describe('Agent 模型思考能力', () => {
       levels: ['off', 'minimal', 'low', 'medium', 'high', 'max'], defaultLevel: 'high',
     })
     expect(await getPiReasoningCapability('openai', 'gpt-4o')).toBeUndefined()
+  })
+})
+
+describe('Pi Bash 宿主委托', () => {
+  test('只在 adapter 边界把命令翻译为绝对 shell argv，并保留流、环境、超时和取消', async () => {
+    let received: AgentSandboxCommandRequest | undefined
+    const output: string[] = []
+    const controller = new AbortController()
+    const operations = createPiSandboxedBashOperations(hostToolPort({
+      executeCommand: async (request, handlers) => {
+        received = request
+        handlers?.onStdout?.('标准输出')
+        handlers?.onStderr?.('错误输出')
+        return {
+          exitCode: 0, timedOut: false, aborted: false, stdout: '', stderr: '',
+          stdoutTruncated: false, stderrTruncated: false,
+        }
+      },
+    }), SANDBOX_POLICY)
+
+    expect(await operations.exec('printf ok', '/tmp/project', {
+      onData: (chunk) => output.push(chunk.toString('utf8')),
+      signal: controller.signal,
+      timeout: 2,
+      env: { AXON_TEST: '1' },
+    })).toEqual({ exitCode: 0 })
+    expect(received).toMatchObject({
+      argv: ['/bin/zsh', '-lc', 'printf ok'],
+      cwd: '/tmp/project',
+      policy: SANDBOX_POLICY,
+      grants: [],
+      timeoutMs: 2_000,
+      environment: { AXON_TEST: '1' },
+      abortSignal: controller.signal,
+    })
+    expect(output).toEqual(['标准输出', '错误输出'])
+  })
+
+  test('把宿主超时和中止还原为 Pi Bash 工具认识的错误', async () => {
+    const result = (timedOut: boolean, aborted: boolean) => ({
+      exitCode: null, timedOut, aborted, stdout: '', stderr: '',
+      stdoutTruncated: false, stderrTruncated: false,
+    })
+    const timeout = createPiSandboxedBashOperations(hostToolPort({
+      executeCommand: async () => result(true, false),
+    }), SANDBOX_POLICY)
+    await expect(timeout.exec('sleep 5', '/tmp/project', { onData: () => {}, timeout: 3 }))
+      .rejects.toThrow('timeout:3')
+
+    const aborted = createPiSandboxedBashOperations(hostToolPort({
+      executeCommand: async () => result(false, true),
+    }), SANDBOX_POLICY)
+    await expect(aborted.exec('sleep 5', '/tmp/project', { onData: () => {} }))
+      .rejects.toThrow('aborted')
+  })
+})
+
+describe('Pi 文件工具宿主委托', () => {
+  test('官方文件 operations 只做字段映射，所有实际 IO 都进入中立宿主端口', async () => {
+    const calls: string[] = []
+    const options = createPiSandboxedFileToolOptions(hostToolPort({
+      readFile: async (path) => { calls.push(`read:${path}`); return Buffer.from('content') },
+      assertFileAccess: async (path, access) => { calls.push(`access:${access}:${path}`) },
+      writeFile: async (path, content) => { calls.push(`write:${path}:${content}`) },
+      createDirectory: async (path) => { calls.push(`mkdir:${path}`) },
+      glob: async (pattern, cwd) => { calls.push(`glob:${cwd}:${pattern}`); return ['/project/a.ts'] },
+      readDirectory: async (path) => { calls.push(`ls:${path}`); return ['a.ts'] },
+    }), SANDBOX_POLICY)
+
+    expect((await options.read?.operations?.readFile('/project/a.ts'))?.toString()).toBe('content')
+    await options.edit?.operations?.access('/project/a.ts')
+    await options.write?.operations?.mkdir('/project/src')
+    await options.write?.operations?.writeFile('/project/a.ts', 'next')
+    expect(await options.find?.operations?.glob('**/*.ts', '/project', { ignore: [], limit: 10 }))
+      .toEqual(['/project/a.ts'])
+    expect(await options.ls?.operations?.readdir('/project')).toEqual(['a.ts'])
+    expect(calls).toEqual([
+      'read:/project/a.ts',
+      'access:read:/project/a.ts',
+      'mkdir:/project/src',
+      'write:/project/a.ts:next',
+      'glob:/project:**/*.ts',
+      'ls:/project',
+    ])
   })
 })
 
@@ -102,7 +255,25 @@ describe('convertPiMessage', () => {
     } as unknown as RuntimeMessage, 'session-1') as { error?: { message?: string; errorType?: string } }
 
     expect(nonTerminal.error).toBeUndefined()
-    expect(terminalError.error).toMatchObject({ code: 'provider_endpoint_not_found', category: 'configuration', retryable: false })
+    expect(terminalError.error).toMatchObject({ code: 'network_error', category: 'network', retryable: true })
+  })
+
+  test('只有明确的永久域名解析错误才归为渠道配置错误', () => {
+    const terminalError = convertPiMessage({
+      role: 'assistant', content: [], stopReason: 'error',
+      errorMessage: 'getaddrinfo ENOTFOUND nonexistent.invalid',
+    } as unknown as RuntimeMessage, 'session-1') as { error?: { code?: string; category?: string; retryable?: boolean } }
+    const temporaryDnsError = convertPiMessage({
+      role: 'assistant', content: [], stopReason: 'error',
+      errorMessage: 'getaddrinfo EAI_AGAIN api.example.test',
+    } as unknown as RuntimeMessage, 'session-1') as { error?: { code?: string; category?: string; retryable?: boolean } }
+
+    expect(terminalError.error).toMatchObject({
+      code: 'provider_endpoint_not_found', category: 'configuration', retryable: false,
+    })
+    expect(temporaryDnsError.error).toMatchObject({
+      code: 'network_error', category: 'network', retryable: true,
+    })
   })
 
   test('上游 JSON 解析失败归类为 service_error', () => {
@@ -288,6 +459,8 @@ interface RuntimeHarness {
     initialToolNames?: string[]
     nextToolNames?: string[]
     thinkingLevel?: string
+    sandboxedToolOptionsSeen?: boolean
+    settingsOverrides: unknown[]
   }
 }
 
@@ -296,6 +469,7 @@ interface RuntimeHarnessOptions {
   toolInput?: Record<string, unknown>
   waitForAbort?: boolean
   emitCompaction?: boolean
+  errorMessage?: string
 }
 
 interface RuntimeHarnessTool {
@@ -308,12 +482,12 @@ function createRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarne
   const listeners = new Set<Listener>()
   let tools: RuntimeHarnessTool[] = []
   let finishPrompt: (() => void) | undefined
-  const state: RuntimeHarness['state'] = { disposed: false }
-  const assistant = runtimeMessage({
-    role: 'assistant',
-    content: [{ type: 'text', text: '完成' }],
-    stopReason: 'stop',
-    model: 'test-model',
+  const state: RuntimeHarness['state'] = { disposed: false, settingsOverrides: [] }
+  const assistant = runtimeMessage(options.errorMessage ? {
+    role: 'assistant', content: [], stopReason: 'error',
+    errorMessage: options.errorMessage, model: 'test-model',
+  } : {
+    role: 'assistant', content: [{ type: 'text', text: '完成' }], stopReason: 'stop', model: 'test-model',
   })
   const agentState = { tools: [] as RuntimeHarnessTool[], messages: [] as unknown[] }
   const session = {
@@ -362,12 +536,14 @@ function createRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarne
           },
         })
       }
-      const partial = runtimeMessage({ role: 'assistant', content: [{ type: 'text', text: '完' }] })
-      for (const listener of listeners) listener({
-        type: 'message_update',
-        message: partial,
-        assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: '完', partial },
-      })
+      if (!options.errorMessage) {
+        const partial = runtimeMessage({ role: 'assistant', content: [{ type: 'text', text: '完' }] })
+        for (const listener of listeners) listener({
+          type: 'message_update',
+          message: partial,
+          assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: '完', partial },
+        })
+      }
       for (const listener of listeners) listener({ type: 'message_end', message: assistant })
       for (const listener of listeners) listener({ type: 'agent_end', messages: [assistant], willRetry: false })
       for (const listener of listeners) listener({ type: 'agent_settled', messages: [assistant] })
@@ -395,12 +571,60 @@ function createRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarne
       create() { return {} },
       open(path: string) { state.openedSessionFile = path; return {} },
     },
-    SettingsManager: { inMemory() { return {} } },
+    SettingsManager: {
+      inMemory() {
+        return { applyOverrides: (value: unknown) => state.settingsOverrides.push(value) }
+      },
+    },
     DefaultResourceLoader: class {
       constructor(config: Record<string, unknown>) { state.resourceLoaderConfig = config }
       async reload() {}
     },
     createCodingTools() { return [] },
+    createReadTool(_cwd: string, toolOptions?: unknown) {
+      state.sandboxedToolOptionsSeen ||= Boolean(toolOptions)
+      return { name: 'read', execute: async () => ({ content: [] }) }
+    },
+    createBashTool(cwd: string, toolOptions?: {
+      operations?: {
+        exec(command: string, cwd: string, options: { onData(data: Buffer): void; signal?: AbortSignal }): Promise<{
+          exitCode: number | null
+        }>
+      }
+    }) {
+      state.sandboxedToolOptionsSeen ||= Boolean(toolOptions)
+      return {
+        name: 'bash',
+        execute: async (_toolUseId: string, input: { command: string }, signal?: AbortSignal) => {
+          await toolOptions?.operations?.exec(input.command, cwd, { onData: () => {}, signal })
+          return { content: [] }
+        },
+      }
+    },
+    createEditTool(_cwd: string, toolOptions?: unknown) {
+      state.sandboxedToolOptionsSeen ||= Boolean(toolOptions)
+      return { name: 'edit', execute: async () => ({ content: [] }) }
+    },
+    createWriteTool(_cwd: string, toolOptions?: {
+      operations?: { writeFile(path: string, content: string): Promise<void> }
+    }) {
+      state.sandboxedToolOptionsSeen ||= Boolean(toolOptions)
+      return {
+        name: 'write',
+        execute: async (_toolUseId: string, input: { path: string; content?: string }) => {
+          await toolOptions?.operations?.writeFile(input.path, input.content ?? '')
+          return { content: [] }
+        },
+      }
+    },
+    createFindTool(_cwd: string, toolOptions?: unknown) {
+      state.sandboxedToolOptionsSeen ||= Boolean(toolOptions)
+      return { name: 'find', execute: async () => ({ content: [] }) }
+    },
+    createLsTool(_cwd: string, toolOptions?: unknown) {
+      state.sandboxedToolOptionsSeen ||= Boolean(toolOptions)
+      return { name: 'ls', execute: async () => ({ content: [] }) }
+    },
     async createAgentSession(input: { customTools?: RuntimeHarnessTool[]; thinkingLevel?: string }) {
       tools = input.customTools ?? []
       agentState.tools = [...tools]
@@ -415,6 +639,202 @@ function createRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarne
 }
 
 describe('PiAgentAdapter 查询主链', () => {
+  test('泛化连接错误只做终态归类，不覆盖 runtime 自身的重试设置', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const directory = mkdtempSync(join(tmpdir(), 'axon-pi-connection-error-'))
+    const harness = createRuntimeHarness({ errorMessage: 'Connection error.' })
+    const adapter = new PiAgentAdapter(harness.load)
+    try {
+      const payloads = []
+      const query: PiAgentQueryOptions = {
+        sessionId: 'connection-error', prompt: '继续', model: 'test-model',
+        apiKey: 'secret', baseUrl: 'https://example.test/v1', provider: 'openai',
+        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY,
+        runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
+      }
+      for await (const payload of adapter.query(query)) payloads.push(payload)
+
+      expect(harness.state.settingsOverrides).toEqual([])
+      expect(payloads.at(-1)).toMatchObject({
+        kind: 'sdk_message',
+        message: {
+          type: 'result', subtype: 'error_during_execution',
+          error: { code: 'network_error', category: 'network', retryable: true },
+        },
+      })
+    } finally {
+      adapter.dispose()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('宿主端口存在时注册七个受控内置工具，Grep 不再调用 Pi 的直接 rg 路径', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const directory = mkdtempSync(join(tmpdir(), 'axon-pi-sandboxed-tools-'))
+    const harness = createRuntimeHarness({
+      executeTool: 'grep',
+      toolInput: { pattern: 'Axon', path: '.' },
+    })
+    let searchedPath = ''
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort({
+      searchText: async (path) => {
+        searchedPath = path
+        return {
+          matches: [{ path: 'src/a.ts', line: 2, text: 'Axon', before: [], after: [] }],
+          limitReached: false,
+        }
+      },
+    }))
+    try {
+      const sandboxPolicy: AgentSandboxPolicy = {
+        ...SANDBOX_POLICY,
+        workingDirectory: directory,
+        writableRoots: [directory],
+        protectedReadOnlyRoots: [join(directory, '.git')],
+      }
+      const query: PiAgentQueryOptions = {
+        sessionId: 'sandboxed-tools', prompt: '搜索', model: 'test-model',
+        apiKey: 'secret', baseUrl: 'https://example.test/v1', provider: 'openai',
+        cwd: directory, systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy,
+        runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
+      }
+      for await (const _payload of adapter.query(query)) {}
+      expect(harness.state.initialToolNames).toEqual(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
+      expect(harness.state.sandboxedToolOptionsSeen).toBe(true)
+      expect(searchedPath).toBe(directory)
+      expect(harness.state.toolResult).toMatchObject({
+        content: [{ type: 'text', text: 'src/a.ts:2: Axon' }],
+      })
+    } finally {
+      adapter.dispose()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('文件越界由宿主升级请求进入审批，批准 Grant 只注入同一次工具重试', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const directory = mkdtempSync(join(tmpdir(), 'axon-pi-sandbox-grant-'))
+    const outside = join(directory, '..', 'outside.txt')
+    const harness = createRuntimeHarness({
+      executeTool: 'write',
+      toolInput: { path: outside, content: 'approved' },
+    })
+    const receivedGrants: unknown[] = []
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort({
+      writeFile: async (_path, _content, context) => {
+        receivedGrants.push(context.grants)
+        if (context.grants.length === 0) {
+          throw new AgentSandboxEscalationError({
+            reason: 'filesystemWriteOutsideWorkspace',
+            permission: { type: 'filesystemWrite', roots: [outside] },
+            target: outside,
+            message: '文件写入目标越过沙箱可写根',
+          })
+        }
+      },
+    }))
+    const permissionCalls: Array<{ escalation?: unknown }> = []
+    try {
+      const query: PiAgentQueryOptions = {
+        sessionId: 'sandbox-grant', prompt: '写入', model: 'test-model',
+        apiKey: 'secret', baseUrl: 'https://example.test/v1', provider: 'openai',
+        cwd: directory, systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY,
+        sandboxPolicy: {
+          ...SANDBOX_POLICY,
+          workingDirectory: directory,
+          writableRoots: [directory],
+          protectedReadOnlyRoots: [join(directory, '.git')],
+        },
+        runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
+        canUseTool: async (_name, input, permission) => {
+          expect(input.file_path).toBe(outside)
+          permissionCalls.push({ escalation: permission.sandboxEscalation })
+          return permission.sandboxEscalation
+            ? {
+                behavior: 'allow',
+                sandboxGrants: [{ scope: 'once', permission: permission.sandboxEscalation.permission }],
+              }
+            : { behavior: 'allow' }
+        },
+      }
+      for await (const _payload of adapter.query(query)) {}
+      expect(permissionCalls).toEqual([
+        { escalation: undefined },
+        { escalation: expect.objectContaining({ reason: 'filesystemWriteOutsideWorkspace', target: outside }) },
+      ])
+      expect(receivedGrants).toEqual([
+        [],
+        [{ scope: 'once', permission: { type: 'filesystemWrite', roots: [outside] } }],
+      ])
+      expect(harness.state.toolResult).toMatchObject({ content: [] })
+    } finally {
+      adapter.dispose()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('Bash Seatbelt 拒绝沿用结构化审批，并携带网络 Grant 重试原命令', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const directory = mkdtempSync(join(tmpdir(), 'axon-pi-bash-grant-'))
+    const harness = createRuntimeHarness({
+      executeTool: 'bash',
+      toolInput: { command: 'curl https://example.com' },
+    })
+    const receivedGrants: unknown[] = []
+    const escalation = new AgentSandboxEscalationError({
+      reason: 'networkAccess', permission: { type: 'network' },
+      message: '命令的网络访问被基础沙箱拒绝',
+    })
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort({
+      executeCommand: async (request) => {
+        receivedGrants.push(request.grants)
+        if (request.grants.length === 0) throw escalation
+        return {
+          exitCode: 0, timedOut: false, aborted: false, stdout: '', stderr: '',
+          stdoutTruncated: false, stderrTruncated: false,
+        }
+      },
+    }))
+    const permissionCalls: Array<{ escalation?: unknown }> = []
+    try {
+      const query: PiAgentQueryOptions = {
+        sessionId: 'bash-grant', prompt: '联网', model: 'test-model',
+        apiKey: 'secret', baseUrl: 'https://example.test/v1', provider: 'openai',
+        cwd: directory, systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY,
+        sandboxPolicy: {
+          ...SANDBOX_POLICY, workingDirectory: directory, writableRoots: [directory],
+          protectedReadOnlyRoots: [join(directory, '.git')],
+        },
+        runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
+        canUseTool: async (_name, input, permission) => {
+          expect(input.command).toBe('curl https://example.com')
+          permissionCalls.push({ escalation: permission.sandboxEscalation })
+          return permission.sandboxEscalation
+            ? { behavior: 'allow', sandboxGrants: [{ scope: 'once', permission: { type: 'network' } }] }
+            : { behavior: 'allow' }
+        },
+      }
+      for await (const _payload of adapter.query(query)) {}
+      expect(permissionCalls).toEqual([
+        { escalation: undefined },
+        { escalation: expect.objectContaining({ reason: 'networkAccess' }) },
+      ])
+      expect(receivedGrants).toEqual([[], [{ scope: 'once', permission: { type: 'network' } }]])
+      expect(harness.state.toolResult).toMatchObject({ content: [] })
+    } finally {
+      adapter.dispose()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   test('压缩开始和结束进入瞬时 UI 状态流，完成边界仍作为系统消息落盘', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs')
     const { tmpdir } = await import('node:os')
@@ -426,7 +846,7 @@ describe('PiAgentAdapter 查询主链', () => {
       const query: PiAgentQueryOptions = {
         sessionId: 'compaction-session', prompt: '继续', model: 'test-model',
         apiKey: 'secret', baseUrl: 'https://example.test/v1', provider: 'openai',
-        systemPrompt: '测试', permissionMode: 'default',
+        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY,
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
       }
       for await (const payload of adapter.query(query)) payloads.push(payload)
@@ -469,7 +889,7 @@ describe('PiAgentAdapter 查询主链', () => {
       const query: PiAgentQueryOptions = {
         sessionId: 'tool-search-session', prompt: '查询问题', model: 'gpt-5.4',
         apiKey: 'secret', baseUrl: 'https://api.openai.com/v1', provider: 'openai-responses',
-        systemPrompt: '测试延迟工具', permissionMode: 'default',
+        systemPrompt: '测试延迟工具', executionPolicy: DEFAULT_EXECUTION_POLICY,
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
         customTools: [deferredTool, createAgentToolSearchTool([deferredTool])],
       }
@@ -504,7 +924,7 @@ describe('PiAgentAdapter 查询主链', () => {
       const query: PiAgentQueryOptions = {
         sessionId: 'anthropic-tool-search', prompt: '查询问题', model: 'claude-sonnet-4-6',
         apiKey: 'secret', baseUrl: 'https://api.anthropic.com', provider: 'anthropic',
-        systemPrompt: '测试延迟工具', permissionMode: 'default',
+        systemPrompt: '测试延迟工具', executionPolicy: DEFAULT_EXECUTION_POLICY,
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
         customTools: [deferredTool, createAgentToolSearchTool([deferredTool])],
       }
@@ -530,7 +950,7 @@ describe('PiAgentAdapter 查询主链', () => {
       const query: PiAgentQueryOptions = {
         sessionId: 'deepseek-session', prompt: '你好', model: 'deepseek-v4-pro',
         apiKey: 'test', baseUrl: 'https://example.test', provider: 'anthropic-compatible',
-        systemPrompt: '测试', permissionMode: 'default', thinkingLevel: 'xhigh',
+        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY, thinkingLevel: 'xhigh',
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
       }
       for await (const _payload of adapter.query(query)) { /* 创建资源加载器后再检查扩展。 */ }
@@ -558,7 +978,7 @@ describe('PiAgentAdapter 查询主链', () => {
       const query: PiAgentQueryOptions = {
         sessionId: 'thinking-session', prompt: '你好', model: 'gpt-5.6-smoke',
         apiKey: 'test', baseUrl: 'https://example.test/v1', provider: 'openai-responses',
-        systemPrompt: '测试', permissionMode: 'default', thinkingLevel: 'minimal',
+        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY, thinkingLevel: 'minimal',
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
       }
       for await (const _payload of adapter.query(query)) { /* 消费完整查询流，断言注册结果。 */ }
@@ -590,7 +1010,7 @@ describe('PiAgentAdapter 查询主链', () => {
         baseUrl: 'https://example.test/v1',
         provider: 'openai',
         systemPrompt: '你是工程助手',
-        permissionMode: 'default',
+        executionPolicy: DEFAULT_EXECUTION_POLICY,
         thinkingLevel: 'xhigh',
         runtimeAgentDir: join(directory, 'agent'),
         runtimeSessionDir: join(directory, 'sessions'),
@@ -642,7 +1062,7 @@ describe('PiAgentAdapter 查询主链', () => {
         baseUrl: 'https://example.test/v1',
         provider: 'openai-responses',
         systemPrompt: '继续任务',
-        permissionMode: 'default',
+        executionPolicy: DEFAULT_EXECUTION_POLICY,
         runtimeAgentDir: join(directory, 'agent'),
         runtimeSessionDir: join(directory, 'sessions'),
         resumeSessionId: 'runtime-session-1',
@@ -672,7 +1092,7 @@ describe('PiAgentAdapter 查询主链', () => {
       baseUrl: 'https://example.test/v1',
       provider: 'custom',
       systemPrompt: '测试工具',
-      permissionMode: 'default',
+      executionPolicy: DEFAULT_EXECUTION_POLICY,
       runtimeAgentDir: join(directory, 'agent'),
       runtimeSessionDir: join(directory, 'sessions'),
       canUseTool: async () => ({ behavior: 'deny', message: '本次不允许' }),
@@ -716,12 +1136,12 @@ describe('PiAgentAdapter 查询主链', () => {
       baseUrl: 'https://example.test',
       provider: 'anthropic-compatible',
       systemPrompt: '测试权限参数',
-      permissionMode: 'acceptEdits',
+      executionPolicy: DEFAULT_EXECUTION_POLICY,
       runtimeAgentDir: join(directory, 'agent'),
       runtimeSessionDir: join(directory, 'sessions'),
       canUseTool: async (_name, input, permission) => {
         expect(input.file_path).toBe('before.txt')
-        expect(permission.permissionMode).toBe('acceptEdits')
+        expect(permission.executionPolicy).toEqual(DEFAULT_EXECUTION_POLICY)
         return { behavior: 'allow', updatedInput: { file_path: 'after.txt' } }
       },
       customTools: [{
@@ -764,7 +1184,7 @@ describe('PiAgentAdapter 查询主链', () => {
       baseUrl: 'https://example.test/v1',
       provider: 'openai',
       systemPrompt: '当前系统提示词\n根规则',
-      permissionMode: 'default',
+      executionPolicy: DEFAULT_EXECUTION_POLICY,
       runtimeAgentDir: join(directory, '.runtime'),
       runtimeSessionDir: join(directory, '.runtime', 'sessions'),
       projectInstructionScope: { projectRoot: directory, initialSources: initial.sources },
@@ -803,7 +1223,7 @@ describe('PiAgentAdapter 查询主链', () => {
       baseUrl: 'https://example.test/v1',
       provider: 'openai',
       systemPrompt: '测试停止',
-      permissionMode: 'default',
+      executionPolicy: DEFAULT_EXECUTION_POLICY,
       runtimeAgentDir: join(directory, 'agent'),
       runtimeSessionDir: join(directory, 'sessions'),
     }
@@ -847,7 +1267,7 @@ describe('PiAgentAdapter 查询主链', () => {
       baseUrl: 'http://127.0.0.1:11434/v1',
       provider: 'custom',
       systemPrompt: '',
-      permissionMode: 'default',
+      executionPolicy: DEFAULT_EXECUTION_POLICY,
       runtimeAgentDir: join(directory, 'agent'),
       runtimeSessionDir: join(directory, 'sessions'),
     }

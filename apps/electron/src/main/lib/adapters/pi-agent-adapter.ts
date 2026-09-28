@@ -9,6 +9,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
@@ -25,11 +26,16 @@ import type {
   AgentCustomToolDefinition,
   AgentCustomToolResult,
   AgentDeferredToolCapabilityInput,
-  AgentPermissionMode,
+  AgentExecutionPolicy,
+  AgentHostToolExecutionPort,
   AgentProviderAdapter,
   AgentQueryInput,
   AgentReasoningCapability,
   AgentReasoningCapabilityInput,
+  AgentSandboxCapability,
+  AgentSandboxCapabilityInput,
+  AgentSandboxGrant,
+  AgentSandboxPolicy,
   AgentStreamPayload,
   AgentThinkingLevel,
   AgentTypedError,
@@ -38,10 +44,13 @@ import type {
   SDKMessageUsage,
   SDKSystemMessage,
 } from '@axon/shared'
+import { AgentSandboxEscalationError } from '@axon/shared'
 import { createUserStoppedResult } from '../agent/agent-stop-policy'
 import { PiProjectInstructionScope } from './pi-project-instruction-scope'
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent')
+type PiBashOperations = import('@earendil-works/pi-coding-agent').BashOperations
+type PiToolsOptions = import('@earendil-works/pi-coding-agent').ToolsOptions
 type PiCompat = Pick<typeof import('@earendil-works/pi-ai/compat'),
   'isContextOverflow' | 'isRetryableAssistantError' | 'getModels' | 'getProviders' | 'getSupportedThinkingLevels' | 'clampThinkingLevel'>
 type PiCatalogModel = ReturnType<PiCompat['getModels']>[number]
@@ -243,7 +252,7 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   baseUrl: string
   provider: 'openai' | 'openai-responses' | 'anthropic' | 'anthropic-compatible' | 'google' | 'custom'
   systemPrompt: string
-  permissionMode: AgentPermissionMode
+  executionPolicy: AgentExecutionPolicy
   runtimeAgentDir: string
   runtimeSessionDir: string
   resumeSessionId?: string
@@ -256,7 +265,7 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
 interface ActivePiSession {
   session?: AgentSession
   abortRequested: boolean
-  permissionMode: AgentPermissionMode
+  executionPolicy: AgentExecutionPolicy
 }
 
 /** 将中立查询字段收口成当前 runtime 的必需输入，并在触碰文件或网络前校验。 */
@@ -268,9 +277,9 @@ function resolvePiQueryInput(input: AgentQueryInput): PiAgentQueryOptions {
   const runtimeAgentDir = input.runtimeConfigDir ?? legacy.runtimeAgentDir
   const runtimeSessionDir = input.runtimeSessionDir ?? legacy.runtimeSessionDir
   const systemPrompt = input.systemPrompt ?? legacy.systemPrompt
-  const permissionMode = input.permissionMode ?? legacy.permissionMode
+  const executionPolicy = input.executionPolicy ?? legacy.executionPolicy
   const thinkingLevel = input.thinkingLevel ?? legacy.thinkingLevel ?? 'medium'
-  if (apiKey === undefined || !baseUrl || !provider || !runtimeAgentDir || !runtimeSessionDir || systemPrompt === undefined || !permissionMode) {
+  if (apiKey === undefined || !baseUrl || !provider || !runtimeAgentDir || !runtimeSessionDir || systemPrompt === undefined || !executionPolicy) {
     throw new Error('Agent runtime 查询配置不完整')
   }
   return {
@@ -281,7 +290,7 @@ function resolvePiQueryInput(input: AgentQueryInput): PiAgentQueryOptions {
     runtimeAgentDir,
     runtimeSessionDir,
     systemPrompt,
-    permissionMode,
+    executionPolicy,
     thinkingLevel,
     customTools: input.customTools ?? legacy.customTools,
     canUseTool: input.canUseTool ?? legacy.canUseTool,
@@ -537,8 +546,9 @@ const PROVIDER_SERVER_PATTERN =
   /\b(?:500|502|503|504|524|529)\b|overloaded|service.?unavailable|server.?error|internal.?error|provider.?returned.?error/i
 const PROVIDER_REQUEST_PATTERN =
   /\b(?:400|405|409|413|415|422)\b|bad request|invalid (?:request|parameter|argument)|unsupported (?:parameter|media|operation)|malformed request/i
-const PROVIDER_ENDPOINT_UNREACHABLE_PATTERN =
-  /(?:^|\b)(?:ENOTFOUND|EAI_AGAIN|ERR_NAME_NOT_RESOLVED|getaddrinfo|fetch failed|connection refused|could not resolve host)(?:\b|$)|^connection error(?:\.|\s).*/i
+// 只有明确的永久域名解析证据才归为配置错误；笼统连接失败和临时 DNS 故障仍属于可重试网络错误。
+const PROVIDER_ENDPOINT_CONFIGURATION_PATTERN =
+  /\b(?:ENOTFOUND|ERR_NAME_NOT_RESOLVED)\b|could not resolve host|nodename nor servname provided/i
 
 /**
  * 将最终 AssistantMessage 分类成中立错误：先匹配不可恢复的
@@ -583,7 +593,7 @@ function createPiTypedError(assistant: AssistantMessage): AgentTypedError {
     message: '模型服务地址或请求路径不存在，请检查 Base URL',
     retryable: false,
   }
-  if (PROVIDER_ENDPOINT_UNREACHABLE_PATTERN.test(message)) return {
+  if (PROVIDER_ENDPOINT_CONFIGURATION_PATTERN.test(message)) return {
     code: 'provider_endpoint_not_found',
     category: 'configuration',
     message: '模型服务地址无法连接，请检查 Base URL、域名和端口配置',
@@ -1032,42 +1042,67 @@ function wrapToolWithPermission(
   active: ActivePiSession,
   emit: (payload: AgentStreamPayload) => void,
   projectInstructionScope?: PiProjectInstructionScope,
+  sandboxGrantStorage?: AsyncLocalStorage<AgentSandboxGrant[]>,
 ): ToolDefinition {
   if (!input.canUseTool && !projectInstructionScope) return definition
   return {
     ...definition,
     async execute(toolUseId, rawInput, signal, onUpdate, context) {
       const original = rawInput as Record<string, unknown>
+      const denied = (message: string) => {
+        emit({
+          kind: 'sdk_message',
+          message: {
+            type: 'system',
+            subtype: 'permission_denied',
+            tool_name: displayToolName(definition.name, original),
+            tool_use_id: toolUseId,
+            message,
+          },
+        })
+        return { content: [{ type: 'text' as const, text: message }], details: undefined, isError: true }
+      }
       let updatedInput: Record<string, unknown> | undefined
+      let initialGrants: AgentSandboxGrant[] = []
       if (input.canUseTool) {
         const permission = await input.canUseTool(
           displayToolName(definition.name, original),
           normalizePermissionInput(definition.name, original),
-          { signal, toolUseId, permissionMode: active.permissionMode },
+          { signal, toolUseId, executionPolicy: active.executionPolicy },
         )
         if (permission.behavior === 'deny') {
-          emit({
-            kind: 'sdk_message',
-            message: {
-              type: 'system',
-              subtype: 'permission_denied',
-              tool_name: displayToolName(definition.name, original),
-              tool_use_id: toolUseId,
-              message: permission.message ?? '用户拒绝了工具执行',
-            },
-          })
-          return {
-            content: [{ type: 'text', text: permission.message ?? '用户拒绝了工具执行' }],
-            details: undefined,
-            isError: true,
-          }
+          return denied(permission.message ?? '用户拒绝了工具执行')
         }
         updatedInput = permission.updatedInput
+        initialGrants = permission.sandboxGrants ?? []
       }
       const restored = restorePiInput(definition.name, original, updatedInput)
       projectInstructionScope?.observeRead(definition.name, restored)
-      const result = await definition.execute(toolUseId, restored, signal, onUpdate, context)
-      return result
+      const execute = (toolInput: Record<string, unknown>, grants: AgentSandboxGrant[]) => (
+        sandboxGrantStorage
+          ? sandboxGrantStorage.run(grants, () => definition.execute(toolUseId, toolInput, signal, onUpdate, context))
+          : definition.execute(toolUseId, toolInput, signal, onUpdate, context)
+      )
+      try {
+        return await execute(restored, initialGrants)
+      } catch (error) {
+        if (!(error instanceof AgentSandboxEscalationError) || !input.canUseTool || !sandboxGrantStorage) throw error
+        const escalationPermission = await input.canUseTool(
+          displayToolName(definition.name, restored),
+          normalizePermissionInput(definition.name, restored),
+          {
+            signal,
+            toolUseId,
+            executionPolicy: active.executionPolicy,
+            sandboxEscalation: error.escalation,
+          },
+        )
+        if (escalationPermission.behavior === 'deny') {
+          return denied(escalationPermission.message ?? '用户拒绝了沙箱权限升级')
+        }
+        const retryInput = restorePiInput(definition.name, restored, escalationPermission.updatedInput)
+        return await execute(retryInput, escalationPermission.sandboxGrants ?? [])
+      }
     },
   } as ToolDefinition
 }
@@ -1085,6 +1120,150 @@ function convertCustomTool(tool: AgentCustomToolDefinition): ToolDefinition {
 }
 
 /**
+ * 把 Pi BashOperations 翻译成中立宿主命令端口。
+ * Pi 继续负责工具 schema、增量展示和结果截断；宿主只负责受 Seatbelt 约束的进程执行。
+ */
+export function createPiSandboxedBashOperations(
+  hostTools: AgentHostToolExecutionPort,
+  policy: AgentSandboxPolicy,
+  getGrants: () => AgentSandboxGrant[] = () => [],
+): PiBashOperations {
+  return {
+    async exec(command, cwd, options) {
+      const timeoutMs = options.timeout === undefined ? undefined : options.timeout * 1_000
+      const result = await hostTools.executeCommand({
+        argv: ['/bin/zsh', '-lc', command],
+        cwd,
+        policy,
+        grants: getGrants(),
+        environment: options.env,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        ...(options.signal ? { abortSignal: options.signal } : {}),
+      }, {
+        onStdout: (chunk) => options.onData(Buffer.from(chunk, 'utf8')),
+        onStderr: (chunk) => options.onData(Buffer.from(chunk, 'utf8')),
+      })
+      if (result.aborted) throw new Error('aborted')
+      if (result.timedOut) throw new Error(`timeout:${options.timeout ?? 120}`)
+      return { exitCode: result.exitCode }
+    },
+  }
+}
+
+/** Pi 官方文件 operations 全部转发到同一个中立宿主端口，adapter 只处理字段形状。 */
+export function createPiSandboxedFileToolOptions(
+  hostTools: AgentHostToolExecutionPort,
+  policy: AgentSandboxPolicy,
+  getGrants: () => AgentSandboxGrant[] = () => [],
+): PiToolsOptions {
+  const context = () => ({ policy, grants: getGrants() })
+  return {
+    read: {
+      operations: {
+        readFile: (path) => hostTools.readFile(path, context()),
+        access: (path) => hostTools.assertFileAccess(path, 'read', context()),
+        detectImageMimeType: (path) => hostTools.detectImageMimeType(path, context()),
+      },
+    },
+    write: {
+      operations: {
+        writeFile: (path, content) => hostTools.writeFile(path, content, context()),
+        mkdir: (path) => hostTools.createDirectory(path, context()),
+      },
+    },
+    edit: {
+      operations: {
+        readFile: (path) => hostTools.readFile(path, context()),
+        writeFile: (path, content) => hostTools.writeFile(path, content, context()),
+        // Pi 会把 access 异常包装成普通 Error；这里只校验可读性，由实际 writeFile 保留结构化越界升级。
+        access: (path) => hostTools.assertFileAccess(path, 'read', context()),
+      },
+    },
+    find: {
+      operations: {
+        exists: (path) => hostTools.pathExists(path, context()),
+        glob: (pattern, cwd, options) => hostTools.glob(pattern, cwd, options, context()),
+      },
+    },
+    ls: {
+      operations: {
+        exists: (path) => hostTools.pathExists(path, context()),
+        stat: async (path) => {
+          const result = await hostTools.statPath(path, context())
+          return { isDirectory: () => result.isDirectory }
+        },
+        readdir: (path) => hostTools.readDirectory(path, context()),
+      },
+    },
+  }
+}
+
+interface PiGrepInput {
+  pattern: string
+  path?: string
+  glob?: string
+  ignoreCase?: boolean
+  literal?: boolean
+  context?: number
+  limit?: number
+}
+
+/** Grep 的 Pi operations 仍会私自 spawn rg，因此使用同名定义完整委托给宿主搜索端口。 */
+function createPiSandboxedGrepTool(
+  cwd: string,
+  hostTools: AgentHostToolExecutionPort,
+  policy: AgentSandboxPolicy,
+): ToolDefinition {
+  const execute: ToolDefinition['execute'] = async (_toolUseId, rawInput, signal) => {
+    const input = rawInput as PiGrepInput
+    const searchPath = resolve(cwd, input.path?.trim() || '.')
+    const limit = Math.max(1, Math.min(input.limit ?? 100, 1_000))
+    const result = await hostTools.searchText(searchPath, {
+      pattern: input.pattern,
+      ...(input.glob ? { glob: input.glob } : {}),
+      ...(input.ignoreCase === undefined ? {} : { ignoreCase: input.ignoreCase }),
+      ...(input.literal === undefined ? {} : { literal: input.literal }),
+      ...(input.context === undefined ? {} : { context: input.context }),
+      limit,
+    }, { policy, grants: [], ...(signal ? { abortSignal: signal } : {}) })
+    if (result.matches.length === 0) {
+      return { content: [{ type: 'text', text: 'No matches found' }], details: undefined }
+    }
+    const lines: string[] = []
+    for (const match of result.matches) {
+      const beforeStart = match.line - match.before.length
+      match.before.forEach((text, index) => lines.push(`${match.path}-${beforeStart + index}- ${text}`))
+      lines.push(`${match.path}:${match.line}: ${match.text}`)
+      match.after.forEach((text, index) => lines.push(`${match.path}-${match.line + index + 1}- ${text}`))
+    }
+    return {
+      content: [{ type: 'text', text: lines.join('\n') }],
+      details: result.limitReached ? { matchLimitReached: limit } : undefined,
+    }
+  }
+  return {
+    name: 'grep',
+    label: 'grep',
+    description: 'Search file contents for a pattern. Returns matching lines with file paths and line numbers.',
+    promptSnippet: 'Search file contents for patterns',
+    parameters: {
+      type: 'object',
+      required: ['pattern'],
+      properties: {
+        pattern: { type: 'string', description: 'Search pattern (regex or literal string)' },
+        path: { type: 'string', description: 'Directory or file to search' },
+        glob: { type: 'string', description: 'Optional file glob filter' },
+        ignoreCase: { type: 'boolean' },
+        literal: { type: 'boolean' },
+        context: { type: 'number' },
+        limit: { type: 'number' },
+      },
+    },
+    execute,
+  } as unknown as ToolDefinition
+}
+
+/**
  * 进程内 Agent Runtime 适配器：接收编排层的中立输入，创建/恢复 runtime 会话，
  * 再把运行事件转换成下游唯一认识的 AgentStreamPayload。
  */
@@ -1093,7 +1272,25 @@ export class PiAgentAdapter implements AgentProviderAdapter {
 
   constructor(
     private readonly loadRuntime: () => Promise<PiSdk> = () => import('@earendil-works/pi-coding-agent'),
+    private readonly hostTools?: AgentHostToolExecutionPort,
   ) {}
+
+  /** 逐项报告真实覆盖范围；只有全部本地工具委托完成后才能标记完整支持。 */
+  getSandboxCapability(_input: AgentSandboxCapabilityInput): AgentSandboxCapability {
+    if (this.hostTools) {
+      return {
+        supported: true,
+        modes: ['readOnly', 'workspaceWrite'],
+        sandboxedTools: ['bash', 'read', 'write', 'edit', 'grep', 'glob', 'ls'],
+      }
+    }
+    return {
+      supported: false,
+      modes: [],
+      sandboxedTools: [],
+      limitation: 'hostExecutorUnavailable',
+    }
+  }
 
   getReasoningCapability(input: AgentReasoningCapabilityInput): Promise<AgentReasoningCapability | undefined> {
     return getPiReasoningCapability(input.provider, input.model)
@@ -1109,7 +1306,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
 
     const active: ActivePiSession = {
       abortRequested: false,
-      permissionMode: input.permissionMode,
+      executionPolicy: input.executionPolicy,
     }
     const queue = createAsyncQueue<AgentStreamPayload>()
     const runStartedAt = Date.now()
@@ -1180,13 +1377,40 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       const allowedBuiltinTools = input.allowedBuiltinTools
         ? new Set(input.allowedBuiltinTools)
         : undefined
+      const sandboxGrantStorage = this.hostTools && input.sandboxPolicy
+        ? new AsyncLocalStorage<AgentSandboxGrant[]>()
+        : undefined
+      const currentSandboxGrants = (): AgentSandboxGrant[] => sandboxGrantStorage?.getStore() ?? []
+      const sandboxedToolOptions = this.hostTools && input.sandboxPolicy
+        ? {
+            ...createPiSandboxedFileToolOptions(this.hostTools, input.sandboxPolicy, currentSandboxGrants),
+            bash: {
+              operations: createPiSandboxedBashOperations(
+                this.hostTools,
+                input.sandboxPolicy,
+                currentSandboxGrants,
+              ),
+            },
+          }
+        : undefined
+      const builtinTools = sandboxedToolOptions
+        ? [
+            sdk.createReadTool(cwd, sandboxedToolOptions.read),
+            sdk.createBashTool(cwd, sandboxedToolOptions.bash),
+            sdk.createEditTool(cwd, sandboxedToolOptions.edit),
+            sdk.createWriteTool(cwd, sandboxedToolOptions.write),
+            createPiSandboxedGrepTool(cwd, this.hostTools!, input.sandboxPolicy!),
+            sdk.createFindTool(cwd, sandboxedToolOptions.find),
+            sdk.createLsTool(cwd, sandboxedToolOptions.ls),
+          ].map((tool) => tool as unknown as ToolDefinition)
+        : sdk.createCodingTools(cwd).map((tool) => tool as unknown as ToolDefinition)
       const tools = [
-        ...sdk.createCodingTools(cwd)
+        ...builtinTools
           .filter((tool) => !allowedBuiltinTools || allowedBuiltinTools.has(displayToolName(tool.name)))
           .map((tool) => tool as unknown as ToolDefinition),
         ...(input.customTools ?? []).map(convertCustomTool),
       ].map((tool) => wrapToolWithPermission(
-        tool, input, active, emit, projectInstructionScope,
+        tool, input, active, emit, projectInstructionScope, sandboxGrantStorage,
       ))
       const supportsDeferredTools = await supportsPiDeferredTools(input.provider, input.model?.trim() || 'default')
       const deferredToolNames = new Set(supportsDeferredTools
@@ -1297,13 +1521,6 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         }
         if (event.type === 'message_end') {
           const assistant = isAssistantPiMessage(event.message) ? event.message : undefined
-          // 地址解析/连接失败属于确定性配置问题；在 runtime 决定重试前关闭自动重试。
-          // 不能调用 session.setAutoRetryEnabled：runtime 该方法只更新 globalSettings，
-          // 而当前判断读取的是 settings 快照；applyOverrides 才会更新实际读取对象。
-          // 超时、连接重置等未命中该模式的瞬时故障仍保留 runtime 重试能力。
-          if (assistant?.stopReason === 'error' && PROVIDER_ENDPOINT_UNREACHABLE_PATTERN.test(assistant.errorMessage ?? '')) {
-            settingsManager.applyOverrides({ retry: { enabled: false } })
-          }
           if (assistant?.stopReason === 'aborted') {
             assistantUuid = randomUUID()
             return
@@ -1333,12 +1550,6 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         if (event.type === 'agent_end') {
           // continue/retry 每次只返回本段新消息，累计后 result 才能覆盖整轮用量。
           settledAgentMessages.push(...event.messages)
-          // 某些 runtime 版本可能在 message_end 后异步汇总错误；在 agent_end
-          // 再兜底更新同一个 settings 快照，确保 _prepareRetry() 前不会启动重试。
-          const lastAssistant = [...event.messages].reverse().find(isAssistantPiMessage)
-          if (lastAssistant?.stopReason === 'error' && PROVIDER_ENDPOINT_UNREACHABLE_PATTERN.test(lastAssistant.errorMessage ?? '')) {
-            settingsManager.applyOverrides({ retry: { enabled: false } })
-          }
           if (event.willRetry) {
             discardedAssistantUuid = pendingFailedAssistant && 'uuid' in pendingFailedAssistant
               ? typeof pendingFailedAssistant.uuid === 'string' ? pendingFailedAssistant.uuid : undefined
@@ -1463,15 +1674,6 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     void active.session?.abort().catch(() => {
       console.warn('[pi-adapter] 中止 runtime 失败，将由查询 finally 继续清理')
     })
-  }
-
-  async setPermissionMode(sessionId: string, mode: string): Promise<void> {
-    const active = this.activeSessions.get(sessionId)
-    if (!active) throw new Error('Agent 会话当前未运行')
-    if (mode !== 'default' && mode !== 'acceptEdits' && mode !== 'bypassPermissions' && mode !== 'plan') {
-      throw new Error(`未知权限模式：${mode}`)
-    }
-    active.permissionMode = mode
   }
 
   /** 释放所有活跃 runtime；用于应用退出或 adapter 替换。 */

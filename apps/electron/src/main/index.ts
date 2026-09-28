@@ -11,7 +11,6 @@ import {
   getAgentService,
   stopAllAgentRuns,
 } from './lib/agent/agent-service-instance'
-import { getAgentExitPlanService } from './lib/agent/agent-exit-plan-service'
 import { getAgentPermissionService } from './lib/agent/agent-permission-service'
 import { getAgentSessionManager } from './lib/agent/agent-session-manager-instance'
 import { stopAllChatGenerations } from './lib/chat/chat-service-instance'
@@ -140,7 +139,6 @@ function setupDockFeedback(): void {
     getAgentEventBus().subscribe((event) => dockFeedback?.handleEvent(event)),
     getAgentPermissionService().subscribe((event) => dockFeedback?.handleEvent(event)),
     getAgentAskUserService().subscribe((event) => dockFeedback?.handleEvent(event)),
-    getAgentExitPlanService().subscribe((event) => dockFeedback?.handleEvent(event)),
   ]
   disposeDockFeedbackSubscriptions = () => {
     for (const unsubscribe of subscriptions) unsubscribe()

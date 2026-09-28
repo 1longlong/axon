@@ -34,7 +34,6 @@ function passiveAgent(
     stop: () => false,
     isActive: () => false,
     listActiveRuns: () => [],
-    setPermissionMode: async () => {},
     ...overrides,
   }
 }
@@ -75,14 +74,23 @@ describe('AgentIpcController CRUD 与输入边界', () => {
     expect(controller.deleteSession(created.id).id).toBe(created.id)
   })
 
-  test('拒绝未知字段、恢复凭据注入、错误权限模式与运行中删除', () => {
+  test('拒绝未知字段、恢复凭据注入、错误执行策略与运行中删除', () => {
     const created = sessions.create()
     const controller = new AgentIpcController({
       sessions,
       agent: passiveAgent({ isActive: (id) => id === created.id }),
       events: new AgentEventBus(),
     })
-    for (const value of [null, [], { hidden: true }, { sdkSessionId: 'injected' }, { permissionMode: 'all' }, { thinkingLevel: 'extreme' }]) {
+    for (const value of [
+      null,
+      [],
+      { hidden: true },
+      { sdkSessionId: 'injected' },
+      { sandboxMode: 'dangerFullAccess' },
+      { approvalPolicy: 'never' },
+      { approvalReviewer: 'autoReview' },
+      { thinkingLevel: 'extreme' },
+    ]) {
       expect(() => controller.createSession(value)).toThrow(
         expect.objectContaining({ code: 'invalid_input' }),
       )

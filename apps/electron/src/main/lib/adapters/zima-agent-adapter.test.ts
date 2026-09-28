@@ -42,6 +42,15 @@ function messages(events: AgentStreamPayload[], type: string): AgentStreamPayloa
 }
 
 describe('Zima adapter 离线协议契约', () => {
+  test('未委托全部内置工具时明确报告不支持宿主 OS 沙箱', () => {
+    expect(adapter.getSandboxCapability({ platform: 'macos' })).toEqual({
+      supported: false,
+      modes: [],
+      sandboxedTools: [],
+      limitation: 'runtimeToolDelegationUnavailable',
+    })
+  })
+
   test('思考等级由 Zima 协议能力提供，不依赖 Pi 模型目录', () => {
     expect(adapter.getReasoningCapability({ provider: 'custom', model: 'agnes-unknown-model' })).toEqual({
       levels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],

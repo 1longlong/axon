@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type {
   AgentProviderAdapter,
+  AgentSandboxCapability,
   AgentCustomToolDefinition,
   AgentQueryInput,
   AgentStreamPayload,
@@ -63,11 +64,21 @@ class FakeAdapter implements AgentProviderAdapter {
   stream: AgentStreamPayload[] = []
   waitForAbort = false
   deferredToolsSupported = false
+  sandboxCapability: AgentSandboxCapability = {
+    supported: false,
+    modes: [],
+    sandboxedTools: [],
+    limitation: 'hostExecutorUnavailable',
+  }
   onQuery?: (input: AgentQueryInput) => void | Promise<void>
   emitRuntimeSession = true
 
   supportsDeferredTools(): boolean {
     return this.deferredToolsSupported
+  }
+
+  getSandboxCapability(): AgentSandboxCapability {
+    return this.sandboxCapability
   }
 
   async *query(input: AgentQueryInput): AsyncIterable<AgentStreamPayload> {
@@ -231,7 +242,8 @@ describe('AgentService 消息编排主链', () => {
       channelId: 'channel-1',
       modelId: 'model-1',
       projectId: 'project-1',
-      permissionMode: 'acceptEdits',
+      sandboxMode: 'workspaceWrite',
+      approvalPolicy: 'onRequest',
       thinkingLevel: 'high',
     })
     const adapter = new FakeAdapter()
@@ -251,10 +263,14 @@ describe('AgentService 消息编排主链', () => {
       model: 'model-1',
       cwd: directory,
       systemPrompt: '全局规则',
-      permissionMode: 'acceptEdits',
+      executionPolicy: {
+        sandboxMode: 'workspaceWrite',
+        approvalPolicy: 'onRequest', approvalReviewer: 'user',
+      },
       thinkingLevel: 'high',
       connection: { provider: 'openai', baseUrl: 'https://example.test/v1', apiKey: 'secret' },
     })
+    expect(adapter.input?.sandboxPolicy).toBeUndefined()
     expect(sessions.get('session-1')).toMatchObject({
       sdkSessionId: 'runtime-1',
       runtimeSessionFile: join(directory, 'runtime', 'sessions', 'runtime-1.jsonl'),
@@ -315,9 +331,46 @@ describe('AgentService 消息编排主链', () => {
     expect(failingAdapter.input).toBeUndefined()
   })
 
-  test('项目 AGENTS.md 在全局规则之后、计划模式之前注入 system prompt', async () => {
+  test('runtime 明确接管部分工具时也接收策略，但能力仍不能标记完整支持', async () => {
     sessions.create({
-      channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1', permissionMode: 'plan',
+      channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1',
+      sandboxMode: 'workspaceWrite',
+    })
+    const adapter = new FakeAdapter()
+    adapter.sandboxCapability = {
+      supported: false,
+      modes: ['readOnly', 'workspaceWrite'],
+      sandboxedTools: ['bash'],
+      limitation: 'partialToolDelegation',
+    }
+    adapter.stream = [{
+      kind: 'sdk_message',
+      message: { type: 'result', subtype: 'success', usage: { input_tokens: 1 } },
+    }]
+    const { service } = createService(adapter)
+
+    await service.sendMessage({ sessionId: 'session-1', text: '检查沙箱策略' })
+    const canonicalDirectory = realpathSync(directory)
+
+    expect(adapter.input?.sandboxPolicy).toEqual({
+      platform: 'macos',
+      mode: 'workspaceWrite',
+      workingDirectory: canonicalDirectory,
+      readAccess: { type: 'fullAccess' },
+      writableRoots: [canonicalDirectory],
+      protectedReadOnlyRoots: [
+        join(canonicalDirectory, '.git'),
+        join(canonicalDirectory, '.axon'),
+        join(canonicalDirectory, '.agents'),
+      ],
+      networkAccess: false,
+    })
+  })
+
+  test('项目 AGENTS.md 在全局规则之后注入 system prompt', async () => {
+    sessions.create({
+      channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1',
+      sandboxMode: 'readOnly', approvalPolicy: 'onRequest',
     })
     writeFileSync(join(directory, 'AGENTS.md'), '使用 Bun，不使用 npm。')
     const adapter = new FakeAdapter()
@@ -333,7 +386,6 @@ describe('AgentService 消息编排主链', () => {
 
     const prompt = adapter.input?.systemPrompt ?? ''
     expect(prompt.indexOf('全局规则')).toBeLessThan(prompt.indexOf('## 项目指令'))
-    expect(prompt.indexOf('## 项目指令')).toBeLessThan(prompt.indexOf('## 计划模式'))
     expect(prompt).toContain('使用 Bun，不使用 npm。')
   })
 
@@ -418,7 +470,8 @@ describe('AgentService 消息编排主链', () => {
 
   test('记忆上下文逐轮取得并追加在最终提示词末尾，变化时持久化会话基线', async () => {
     sessions.create({
-      channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1', permissionMode: 'plan',
+      channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1',
+      sandboxMode: 'readOnly', approvalPolicy: 'onRequest',
     })
     const adapter = new FakeAdapter()
     adapter.stream = [{
@@ -442,7 +495,6 @@ describe('AgentService 消息编排主链', () => {
 
     expect(receivedPrevious).toBeUndefined()
     const prompt = adapter.input?.systemPrompt ?? ''
-    expect(prompt).toContain('## 计划模式')
     expect(prompt.endsWith('<system-reminder>最新索引</system-reminder>')).toBe(true)
     expect(sessions.get('session-1')?.memoryFileStates).toEqual({
       'MEMORY.md': { updatedAt: 20, size: 8 },
@@ -571,6 +623,21 @@ describe('AgentService 并发、停止与输入边界', () => {
     const { service } = createService(adapter)
     await expectServiceError(() => service.sendMessage({ sessionId: '', text: 'hi' }), 'invalid_input')
     await expectServiceError(() => service.sendMessage({ sessionId: 'missing', text: 'hi' }), 'not_found')
+    expect(adapter.input).toBeUndefined()
+  })
+
+  test('自动审批执行器未接入时在落盘前失败关闭', async () => {
+    sessions.create({
+      channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1',
+      approvalReviewer: 'autoReview',
+    })
+    const adapter = new FakeAdapter()
+    const { service } = createService(adapter)
+    await expectServiceError(
+      () => service.sendMessage({ sessionId: 'session-1', text: '执行修改' }),
+      'runtime_error',
+    )
+    expect(sessions.getMessages('session-1')).toEqual([])
     expect(adapter.input).toBeUndefined()
   })
 })

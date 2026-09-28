@@ -2,10 +2,10 @@
 
 import type {
   AgentAskUserResponse,
-  AgentExitPlanResponse,
+  AgentApprovalPolicy,
+  AgentApprovalReviewer,
   AgentGenerationEvent,
   AgentMoveQueuedMessageInput,
-  AgentPermissionMode,
   AgentPermissionResponse,
   AgentQueueSnapshot,
   AgentQueuedMessageControlInput,
@@ -13,6 +13,7 @@ import type {
   AgentSendResult,
   AgentSessionCreateInput,
   AgentSessionUpdateInput,
+  AgentSandboxMode,
   AgentThinkingLevel,
 } from '@axon/shared'
 import type { AgentEventBus } from './agent-event-bus'
@@ -22,7 +23,6 @@ import type { AgentRunContext, AgentService } from './agent-service'
 import type { AgentSessionManager } from './agent-session-manager'
 import { AgentQueueCoordinator } from './agent-queue-coordinator'
 import type { AgentAskUserService } from './agent-ask-user-service'
-import type { AgentExitPlanService } from './agent-exit-plan-service'
 
 export interface AgentIpcControllerOptions {
   sessions: Pick<
@@ -31,7 +31,7 @@ export interface AgentIpcControllerOptions {
   >
   agent: Pick<
     AgentService,
-    'stop' | 'isActive' | 'listActiveRuns' | 'setPermissionMode'
+    'stop' | 'isActive' | 'listActiveRuns'
   > & Partial<Pick<AgentService, 'waitUntilIdle'>> & {
     /** IPC 只关心执行是否结束；结构化 outcome 由协作编排层消费。 */
     sendMessage: (
@@ -45,7 +45,6 @@ export interface AgentIpcControllerOptions {
     'subscribe' | 'bindOwner' | 'unbindOwner' | 'respond' | 'clearSessionWhitelist'
   >
   askUsers?: Pick<AgentAskUserService, 'subscribe' | 'bindOwner' | 'unbindOwner' | 'respond' | 'cancelSession'>
-  exitPlans?: Pick<AgentExitPlanService, 'subscribe' | 'bindOwner' | 'unbindOwner' | 'respond' | 'cancelSession'>
   /** 创建前检查目标 runtime 可用性，不修改已有会话归属。 */
   validateCreate?: (input: AgentSessionCreateInput) => void
 }
@@ -57,12 +56,10 @@ interface RunOwner {
   runStartedAt?: number
 }
 
-const PERMISSION_MODES: readonly AgentPermissionMode[] = [
-  'default',
-  'acceptEdits',
-  'bypassPermissions',
-  'plan',
-]
+const SANDBOX_MODES: readonly AgentSandboxMode[] = ['readOnly', 'workspaceWrite']
+const APPROVAL_POLICIES: readonly AgentApprovalPolicy[] = ['onRequest']
+// autoReview 进入中立契约，但在独立审查 Agent 落地前不接受 renderer 开启。
+const APPROVAL_REVIEWERS: readonly AgentApprovalReviewer[] = ['user']
 const THINKING_LEVELS: readonly AgentThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 function invalid(): never {
@@ -82,7 +79,11 @@ function parseSessionInput(
   if (value === undefined && !allowNull) return {}
   if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
   const input = value as Record<string, unknown>
-  const allowed = ['title', 'channelId', 'modelId', 'projectId', 'cwd', 'permissionMode', 'thinkingLevel', ...(!allowNull ? ['runtimeId'] : [])]
+  const allowed = [
+    'title', 'channelId', 'modelId', 'projectId', 'cwd',
+    'sandboxMode', 'approvalPolicy', 'approvalReviewer', 'thinkingLevel',
+    ...(!allowNull ? ['runtimeId'] : []),
+  ]
   if (Object.keys(input).some((key) => !allowed.includes(key))) return invalid()
   if (input.title !== undefined && typeof input.title !== 'string') return invalid()
   for (const key of ['channelId', 'modelId', 'projectId', 'cwd']) {
@@ -93,9 +94,19 @@ function parseSessionInput(
     ) return invalid()
   }
   if (
-    input.permissionMode !== undefined
-    && !(allowNull && input.permissionMode === null)
-    && !PERMISSION_MODES.includes(input.permissionMode as AgentPermissionMode)
+    input.sandboxMode !== undefined
+    && !(allowNull && input.sandboxMode === null)
+    && !SANDBOX_MODES.includes(input.sandboxMode as AgentSandboxMode)
+  ) return invalid()
+  if (
+    input.approvalPolicy !== undefined
+    && !(allowNull && input.approvalPolicy === null)
+    && !APPROVAL_POLICIES.includes(input.approvalPolicy as AgentApprovalPolicy)
+  ) return invalid()
+  if (
+    input.approvalReviewer !== undefined
+    && !(allowNull && input.approvalReviewer === null)
+    && !APPROVAL_REVIEWERS.includes(input.approvalReviewer as AgentApprovalReviewer)
   ) return invalid()
   if (
     input.thinkingLevel !== undefined
@@ -166,23 +177,6 @@ function parseAskUserResponse(value: unknown): AgentAskUserResponse {
   return { requestId: parseId(input.requestId), behavior: 'answer', answers: answers as Record<string, string> }
 }
 
-function parseExitPlanResponse(value: unknown): AgentExitPlanResponse {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
-  const input = value as Record<string, unknown>
-  if (input.action === 'approve') {
-    if (Object.keys(input).some((key) => !['requestId', 'action', 'targetMode'].includes(key))) return invalid()
-    if (input.targetMode !== 'default' && input.targetMode !== 'acceptEdits' && input.targetMode !== 'bypassPermissions') return invalid()
-    return { requestId: parseId(input.requestId), action: 'approve', targetMode: input.targetMode }
-  }
-  if (input.action === 'feedback') {
-    if (Object.keys(input).some((key) => !['requestId', 'action', 'feedback'].includes(key))) return invalid()
-    if (typeof input.feedback !== 'string' || !input.feedback.trim() || input.feedback.length > 10_000) return invalid()
-    return { requestId: parseId(input.requestId), action: 'feedback', feedback: input.feedback.trim() }
-  }
-  if (input.action !== 'reject' || Object.keys(input).some((key) => !['requestId', 'action'].includes(key))) return invalid()
-  return { requestId: parseId(input.requestId), action: 'reject' }
-}
-
 function failed(error: unknown): AgentSendResult {
   if (error instanceof AgentServiceError) {
     return { success: false, code: error.code, message: error.message }
@@ -235,7 +229,6 @@ export class AgentIpcController {
     const removed = this.options.sessions.delete(sessionId)
     this.options.permissions?.clearSessionWhitelist(sessionId)
     this.options.askUsers?.cancelSession(sessionId)
-    this.options.exitPlans?.cancelSession(sessionId)
     return removed
   }
 
@@ -283,12 +276,6 @@ export class AgentIpcController {
       this.owners.delete(sessionId)
       return failed(new AgentServiceError('already_active', '该 Agent 会话的追问通道已属于其他窗口'))
     }
-    if (this.options.exitPlans && !this.options.exitPlans.bindOwner(sessionId, owner)) {
-      this.options.askUsers?.unbindOwner(sessionId, owner)
-      this.options.permissions?.unbindOwner(sessionId, owner)
-      this.owners.delete(sessionId)
-      return failed(new AgentServiceError('already_active', '该 Agent 会话的计划审批通道已属于其他窗口'))
-    }
     const unsubscribeRun = this.options.events.subscribe((event) => {
       if (event.sessionId !== sessionId || this.owners.get(sessionId) !== ownership) return
       // 标题走常驻元数据广播；这里跳过，避免生成恰好完成时向 owner 重复投递。
@@ -300,9 +287,6 @@ export class AgentIpcController {
       this.emitInteractionToOwner(sessionId, ownership, event, emit)
     }) ?? (() => {})
     const unsubscribeAskUser = this.options.askUsers?.subscribe((event) => {
-      this.emitInteractionToOwner(sessionId, ownership, event, emit)
-    }) ?? (() => {})
-    const unsubscribeExitPlan = this.options.exitPlans?.subscribe((event) => {
       this.emitInteractionToOwner(sessionId, ownership, event, emit)
     }) ?? (() => {})
     try {
@@ -329,10 +313,8 @@ export class AgentIpcController {
       unsubscribeRun()
       unsubscribePermission()
       unsubscribeAskUser()
-      unsubscribeExitPlan()
       this.options.permissions?.unbindOwner(sessionId, owner)
       this.options.askUsers?.unbindOwner(sessionId, owner)
-      this.options.exitPlans?.unbindOwner(sessionId, owner)
       // 身份判断防止旧请求的 finally 清掉未来重新开始的运行。
       if (this.owners.get(sessionId) === ownership) {
         this.owners.delete(sessionId)
@@ -375,13 +357,11 @@ export class AgentIpcController {
       if (!session?.parentSessionId || !session.rootSessionId) return
       // 父发送链仍在时已有定向订阅负责路由，常驻订阅不能重复投递。
       if (this.owners.has(session.rootSessionId)) return
-      if (event.type === 'plan_mode_changed') return
       emit({ ...event, sessionId: session.rootSessionId })
     }
     const releases = [
       this.options.permissions?.subscribe(route),
       this.options.askUsers?.subscribe(route),
-      this.options.exitPlans?.subscribe(route),
     ].filter((release): release is () => void => Boolean(release))
     return () => { for (const release of releases) release() }
   }
@@ -420,18 +400,6 @@ export class AgentIpcController {
   respondAskUser(owner: number, value: unknown): boolean {
     try { return this.options.askUsers?.respond(owner, parseAskUserResponse(value)) ?? false }
     catch { return false }
-  }
-
-  /** 计划审批由当前 owner 发起；服务先切换运行态和会话元数据，再唤醒模型。 */
-  async respondExitPlan(owner: number, value: unknown): Promise<boolean> {
-    try {
-      const response = parseExitPlanResponse(value)
-      return await this.options.exitPlans?.respond(
-        owner,
-        response,
-        (sessionId, mode) => this.options.agent.setPermissionMode(sessionId, mode),
-      ) ?? false
-    } catch { return false }
   }
 
   /** 只有发起运行的 renderer 可以停止，其他窗口不能越权取消。 */
@@ -512,8 +480,6 @@ export class AgentIpcController {
       emit(event)
       return
     }
-    // 子会话计划获批只更新子会话元数据；不能把父页面的权限模式一起改掉。
-    if (event.type === 'plan_mode_changed') return
     emit({
       ...event,
       sessionId: visibleSessionId,

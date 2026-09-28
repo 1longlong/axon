@@ -4,21 +4,24 @@ import { DESKTOP_IPC_CHANNELS } from '../../../types'
 import type { QuickChatShortcutBinding } from '../../../types'
 import { getIsQuitting } from './app-lifecycle'
 import { registerQuickChatWindowOwner, unregisterQuickChatWindowOwner } from './quick-chat-window-owner'
+import { QUICK_CHAT_COMPACT_HEIGHT, setQuickChatWindowExpanded } from './quick-chat-window-layout'
 
-const COMPACT_HEIGHT = 104
+export interface QuickChatWindowManagerOptions {
+  /** 真实桌面冒烟可直接加载已构建 renderer；生产环境不传时仍按 dev/packaged 规则选择入口。 */
+  rendererFilePath?: string
+}
 
 /** 管理全局快捷键浮窗；同一会话复用窗口，失焦只隐藏，退出时统一销毁。 */
 export class QuickChatWindowManager {
   private readonly windows = new Map<string, BrowserWindow>()
 
+  constructor(private readonly options: QuickChatWindowManagerOptions = {}) {}
+
   show(binding: QuickChatShortcutBinding, title: string): void {
     const key = `${binding.sessionType}:${binding.sessionId}`
     const existing = this.windows.get(key)
     if (existing && !existing.isDestroyed()) {
-      const bounds = existing.getBounds()
-      if (bounds.height !== COMPACT_HEIGHT) {
-        existing.setBounds({ ...bounds, y: bounds.y + bounds.height - COMPACT_HEIGHT, height: COMPACT_HEIGHT })
-      }
+      setQuickChatWindowExpanded(existing, false)
       if (existing.isMinimized()) existing.restore()
       existing.webContents.send(DESKTOP_IPC_CHANNELS.QUICK_CHAT_OPENED)
       existing.show()
@@ -29,9 +32,9 @@ export class QuickChatWindowManager {
     const resourcesDir = app.isPackaged ? process.resourcesPath : join(__dirname, 'resources')
     const window = new BrowserWindow({
       width: 860,
-      height: COMPACT_HEIGHT,
+      height: QUICK_CHAT_COMPACT_HEIGHT,
       minWidth: 800,
-      minHeight: COMPACT_HEIGHT,
+      minHeight: QUICK_CHAT_COMPACT_HEIGHT,
       show: false,
       frame: false,
       transparent: true,
@@ -91,7 +94,9 @@ export class QuickChatWindowManager {
 
     const query = { quick: '1', sessionType: binding.sessionType, sessionId: binding.sessionId }
     const rendererPath = join(__dirname, 'renderer', 'index.html')
-    const load = app.isPackaged
+    const load = this.options.rendererFilePath
+      ? window.loadFile(this.options.rendererFilePath, { query })
+      : app.isPackaged
       ? window.loadFile(rendererPath, { query })
       : window.loadURL(`http://127.0.0.1:5173/?${new URLSearchParams(query).toString()}`)
     void load.catch((error) => {

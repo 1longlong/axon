@@ -12,11 +12,11 @@ export interface DockAgentFeedbackOptions {
 }
 
 type InteractionRequestEvent = Extract<AgentGenerationEvent, {
-  type: 'permission_request' | 'ask_user_request' | 'exit_plan_mode_request'
+  type: 'permission_request' | 'ask_user_request'
 }>
 
 type InteractionResolvedEvent = Extract<AgentGenerationEvent, {
-  type: 'permission_resolved' | 'ask_user_resolved' | 'exit_plan_mode_resolved'
+  type: 'permission_resolved' | 'ask_user_resolved'
 }>
 
 function runKey(sessionId: string, runStartedAt: number): string {
@@ -63,7 +63,6 @@ export class DockAgentFeedbackController {
     if (
       event.type === 'permission_request'
       || event.type === 'ask_user_request'
-      || event.type === 'exit_plan_mode_request'
     ) {
       this.pendingInteractions.add(requestId(event))
       this.renderBadge()
@@ -74,7 +73,6 @@ export class DockAgentFeedbackController {
     if (
       event.type === 'permission_resolved'
       || event.type === 'ask_user_resolved'
-      || event.type === 'exit_plan_mode_resolved'
     ) {
       this.pendingInteractions.delete(requestId(event))
       this.renderBadge()

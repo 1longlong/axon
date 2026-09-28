@@ -11,7 +11,6 @@ import {
 import { getAgentSessionManager } from './lib/agent/agent-session-manager-instance'
 import { getAgentPermissionService } from './lib/agent/agent-permission-service'
 import { getAgentAskUserService } from './lib/agent/agent-ask-user-service'
-import { getAgentExitPlanService } from './lib/agent/agent-exit-plan-service'
 import { getAttachmentService } from './lib/chat/attachment-service-instance'
 import { ChatIpcController } from './lib/chat/chat-ipc-handlers'
 import { getChannelManager } from './lib/channel/channel-manager-instance'
@@ -62,7 +61,6 @@ export function registerIpcHandlers(shortcuts?: QuickChatShortcutService): void 
     events: getAgentEventBus(),
     permissions: getAgentPermissionService(),
     askUsers: getAgentAskUserService(),
-    exitPlans: getAgentExitPlanService(),
     validateCreate: validateAgentRuntimeCreate,
   })
   // 后台子任务结束时由当前主窗口承接隐藏续跑；无窗口时保留任务结果供稍后查询。

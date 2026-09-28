@@ -103,7 +103,6 @@ export function registerAgentIpcHandlers(
   handle(AGENT_IPC_CHANNELS.MOVE_QUEUED_MESSAGE, (event, input) => controller.moveQueuedMessage(event.sender.id, input))
   handle(AGENT_IPC_CHANNELS.PERMISSION_RESPOND, (event, response) => controller.respondPermission(event.sender.id, response))
   handle(AGENT_IPC_CHANNELS.ASK_USER_RESPOND, (event, response) => controller.respondAskUser(event.sender.id, response))
-  handle(AGENT_IPC_CHANNELS.EXIT_PLAN_MODE_RESPOND, (event, response) => controller.respondExitPlan(event.sender.id, response))
   handle(AGENT_IPC_CHANNELS.SEND, (event, input) => {
     const sender = event.sender
     watchOwner(sender)

@@ -24,7 +24,6 @@ import type {
 import { buildAgentSystemPrompt } from './agent-git-attribution'
 import { buildAgentToolGuidance } from './agent-tool-guidance'
 import { getAgentAskUserService } from './agent-ask-user-service'
-import { getAgentExitPlanService } from './agent-exit-plan-service'
 import { resolveProjectInstructions } from '../project/project-instruction-resolver'
 import { discoverAgentSkills } from '../project/project-skill-discovery'
 import { getMcpToolProvider } from '../mcp/mcp-tool-provider-instance'
@@ -39,12 +38,14 @@ import {
 } from '../collaboration/agent-collaboration-tools'
 import { createAgentTitleGenerator } from './agent-title-generator'
 import { withAgentToolSearch } from './agent-tool-search'
+import { AgentSandboxCommandService } from './agent-sandbox-command-service'
 
 let adapter: PiAgentAdapter | null = null
 let zimaAdapter: ZimaAgentAdapter | null = null
 let eventBus: AgentEventBus | null = null
 let service: AgentService | null = null
 let collaborationService: AgentCollaborationService | null = null
+let sandboxCommandService: AgentSandboxCommandService | null = null
 
 /** 只接受开发者显式配置的解释器；同一检查用于创建前校验和真正运行。 */
 function getZimaPythonExecutable(): string {
@@ -79,7 +80,13 @@ export function getAgentEventBus(): AgentEventBus {
 
 /** 生产环境唯一的 runtime 路由入口；查询能力与真正执行必须落到同一个 adapter。 */
 export function getAgentProviderAdapter(runtimeId: AgentRuntimeId): AgentProviderAdapter {
-  adapter ??= new PiAgentAdapter()
+  if (!adapter) {
+    sandboxCommandService ??= new AgentSandboxCommandService()
+    adapter = new PiAgentAdapter(
+      undefined,
+      sandboxCommandService.getCapability().available ? sandboxCommandService : undefined,
+    )
+  }
   if (runtimeId === 'pi') return adapter
   // 开发环境必须显式指定受控虚拟环境解释器，不能退回 PATH 或在线安装。
   const executable = getZimaPythonExecutable()
@@ -116,7 +123,7 @@ export function getAgentService(): AgentService {
         ? buildSubagentSystemPrompt(base, session.subagentType)
         : buildAgentCollaborationSystemPrompt(base)
     },
-    getCustomTools: async ({ sessionId, projectId, runStartedAt, runSignal, permissionMode }) => {
+    getCustomTools: async ({ sessionId, projectId, runStartedAt, runSignal, executionPolicy }) => {
       const project = getAgentProjectManager().get(projectId)
       const currentSession = getAgentSessionManager().get(sessionId)
       const subagentType = currentSession?.subagentType
@@ -151,9 +158,6 @@ export function getAgentService(): AgentService {
         ...(!subagentType
           ? [getAgentAskUserService().createTool(sessionId, runStartedAt, runSignal)]
           : []),
-        ...(!subagentType && permissionMode === 'plan'
-          ? [getAgentExitPlanService().createTool(sessionId, runStartedAt, runSignal)]
-          : []),
         ...collaborationTools,
         ...memoryTools,
         ...(subagentType === 'explore' || subagentType === 'plan'
@@ -177,7 +181,6 @@ export function getAgentService(): AgentService {
   if (!collaborationService) {
     const permissions = getAgentPermissionService()
     const askUsers = getAgentAskUserService()
-    const exitPlans = getAgentExitPlanService()
     collaborationService = new AgentCollaborationService({
       sessions: getAgentSessionManager(),
       delegations: getAgentDelegationManager(),
@@ -191,13 +194,7 @@ export function getAgentService(): AgentService {
           permissions.unbindOwner(childSessionId, owner)
           throw new Error('追问 owner 冲突')
         }
-        if (!exitPlans.bindOwner(childSessionId, owner)) {
-          askUsers.unbindOwner(childSessionId, owner)
-          permissions.unbindOwner(childSessionId, owner)
-          throw new Error('计划审批 owner 冲突')
-        }
         return () => {
-          exitPlans.unbindOwner(childSessionId, owner)
           askUsers.unbindOwner(childSessionId, owner)
           permissions.unbindOwner(childSessionId, owner)
         }
@@ -205,7 +202,6 @@ export function getAgentService(): AgentService {
     })
     permissions.subscribe((event) => collaborationService?.handleInteractionEvent(event))
     askUsers.subscribe((event) => collaborationService?.handleInteractionEvent(event))
-    exitPlans.subscribe((event) => collaborationService?.handleInteractionEvent(event))
   }
   return service
 }

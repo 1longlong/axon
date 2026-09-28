@@ -9,7 +9,6 @@ import { AgentMessages } from './AgentMessages'
 import { PermissionBanner } from './PermissionBanner'
 import { AgentSidePanel } from './AgentSidePanel'
 import { AskUserBanner } from './AskUserBanner'
-import { ExitPlanModeBanner } from './ExitPlanModeBanner'
 import { AgentHeader } from './AgentHeader'
 import { QuickConversationLayout, type QuickConversationLayoutOptions } from '@/components/app-shell/QuickConversationLayout'
 import { QuickComposer } from '@/components/app-shell/QuickComposer'
@@ -59,7 +58,6 @@ export function AgentViewShell({ sessionId, compact = false, quick }: { sessionI
         {!session.projectId && <Notice>请先创建或选择项目，再发送 Agent 任务。</Notice>}
         {(!session.channelId || !session.modelId) && <Notice>请先选择渠道和模型，再发送 Agent 任务。</Notice>}
         <AskUserBanner sessionId={session.id} />
-        <ExitPlanModeBanner sessionId={session.id} />
         <PermissionBanner sessionId={session.id} />
       </>}
       <QuickComposer key={quick.resetEpoch} sessionType="agent" sessionId={session.id} expanded={quick.expanded} onSent={quick.onSent} />
@@ -75,7 +73,6 @@ export function AgentViewShell({ sessionId, compact = false, quick }: { sessionI
       {(!session.channelId || !session.modelId)
         && <Notice>请先选择渠道和模型，再发送 Agent 任务。</Notice>}
       <AskUserBanner sessionId={session.id} />
-      <ExitPlanModeBanner sessionId={session.id} />
       <AgentMessages sessionId={session.id} />
       <PermissionBanner sessionId={session.id} />
       <AgentInput sessionId={session.id} />

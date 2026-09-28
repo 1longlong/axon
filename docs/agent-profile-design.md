@@ -54,7 +54,9 @@ interface AgentProfileRevision {
   channelId?: string
   modelId?: string
   thinkingLevel?: AgentThinkingLevel
-  permissionMode: AgentPermissionMode
+  sandboxMode: AgentSandboxMode
+  approvalPolicy: AgentApprovalPolicy
+  approvalReviewer: AgentApprovalReviewer
   builtinToolPolicy: AgentToolPolicy
   skillBindings: AgentSkillBinding[]
   mcpBindings: AgentMcpBinding[]

@@ -7,13 +7,16 @@ import type {
   AgentPermissionDangerLevel,
   AgentPermissionRequest,
   AgentPermissionResponse,
+  AgentSandboxEscalation,
+  AgentSandboxGrant,
   AgentToolPermissionResult,
   AgentSubagentType,
 } from '@axon/shared'
-import { AGENT_MEMORY_EDIT_TOOL_NAMES, AGENT_MEMORY_SAFE_TOOL_NAMES } from '../memory/agent-memory-tools'
+import { AGENT_MEMORY_SAFE_TOOL_NAMES } from '../memory/agent-memory-tools'
 import { AGENT_COLLABORATION_SAFE_TOOL_NAMES } from '../collaboration/agent-collaboration-tools'
 import { AGENT_TOOL_SEARCH_NAME } from './agent-tool-search'
 import { AGENT_SKILL_READ_TOOL_NAME } from '../project/agent-skill-read-tool'
+import { evaluateAgentCommandRule } from './agent-command-rules'
 
 const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1_000
 const SAFE_TOOLS = new Set([
@@ -21,11 +24,10 @@ const SAFE_TOOLS = new Set([
   ...AGENT_MEMORY_SAFE_TOOL_NAMES,
   ...AGENT_COLLABORATION_SAFE_TOOL_NAMES,
 ])
-const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', ...AGENT_MEMORY_EDIT_TOOL_NAMES])
-const PLAN_MODE_DENIAL = '计划模式只允许读取和分析；请先提交计划并等待用户批准'
 const SUBAGENT_READ_TOOLS = new Set([
   'Read', 'Glob', 'Grep', 'LS', 'MemoryList', 'MemoryRead', AGENT_SKILL_READ_TOOL_NAME,
 ])
+const SANDBOX_ATTEMPT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit'])
 
 type PermissionEvent = Extract<
   AgentGenerationEvent,
@@ -62,15 +64,6 @@ function hasShellRisk(command: string): boolean {
     || command.includes('$(')
 }
 
-function isSafeReadOnlyCommand(command: string): boolean {
-  if (!command || hasShellRisk(command)) return false
-  if (/^find(?:\s|$)/.test(command) && /(?:^|\s)-(?:delete|exec|execdir|ok|okdir)(?:\s|$)/.test(command)) return false
-  return /^(?:pwd|whoami|uname|ls|head|tail|cat|grep|rg|wc|file|stat|du|df|find|which)(?:\s|$)/.test(command)
-    || /^git\s+(?:status|log|diff|show|rev-parse|ls-files|grep)(?:\s|$)/.test(command)
-    || /^git\s+(?:branch|tag)(?:\s+(?:--list|-a|-r|-v|-vv|--show-current))*\s*$/.test(command)
-    || /^git\s+remote(?:\s+(?:-v|show|get-url)(?:\s+[^\s]+)?)?\s*$/.test(command)
-}
-
 function assessDanger(toolName: string, input: Record<string, unknown>): AgentPermissionDangerLevel {
   if (SAFE_TOOLS.has(toolName)) return 'safe'
   if (toolName === 'Bash' && hasShellRisk(commandFrom(input))) return 'dangerous'
@@ -90,6 +83,34 @@ function describe(toolName: string, input: Record<string, unknown>): string {
   return `使用工具：${toolName}`
 }
 
+function describeEscalation(escalation: AgentSandboxEscalation): string {
+  if (escalation.reason === 'protectedPathWrite') return `写入受保护路径：${escalation.target ?? '未知路径'}`
+  if (escalation.reason === 'filesystemWriteOutsideWorkspace') {
+    return `写入工作区外路径：${escalation.target ?? '未知路径'}`
+  }
+  return '允许命令访问网络'
+}
+
+function permissionKey(
+  toolName: string,
+  input: Record<string, unknown>,
+  escalation: AgentSandboxEscalation,
+): string {
+  const permission = escalation.permission
+  return permission.type === 'network'
+    ? `network:${whitelistKey(toolName, input)}`
+    : `filesystemWrite:${[...permission.roots].sort().join('\0')}`
+}
+
+function cloneEscalation(escalation: AgentSandboxEscalation): AgentSandboxEscalation {
+  return {
+    ...escalation,
+    permission: escalation.permission.type === 'network'
+      ? { type: 'network' }
+      : { type: 'filesystemWrite', roots: [...escalation.permission.roots] },
+  }
+}
+
 /** 顶层键排序后生成本轮白名单键；Bash 因参数含具体命令，只会复用完全相同的输入。 */
 function whitelistKey(toolName: string, input: Record<string, unknown>): string {
   const normalized = Object.fromEntries(Object.entries(input).sort(([left], [right]) => left.localeCompare(right)))
@@ -100,6 +121,7 @@ export class AgentPermissionService {
   private readonly pending = new Map<string, PendingPermission>()
   private readonly owners = new Map<string, number>()
   private readonly sessionWhitelists = new Map<string, Set<string>>()
+  private readonly sessionSandboxGrants = new Map<string, Map<string, AgentSandboxGrant>>()
   private readonly listeners = new Set<(event: PermissionEvent) => void>()
   private readonly createId: () => string
   private readonly now: () => number
@@ -136,10 +158,7 @@ export class AgentPermissionService {
     this.cancelSession(sessionId, 'owner_gone', '权限请求所属窗口已关闭')
   }
 
-  /**
-   * 为一轮 Agent 创建权限回调：plan 只允许静态判定的只读操作，安全读取自动通过，
-   * acceptEdits 额外允许文件编辑，bypassPermissions 全放行；其余操作进入确认队列。
-   */
+  /** 为一轮 Agent 创建权限回调；角色硬边界先于沙箱升级和普通用户审批。 */
   createCanUseTool(
     sessionId: string,
     runStartedAt: number,
@@ -149,10 +168,13 @@ export class AgentPermissionService {
     return async (toolName, rawInput, options) => {
       const input = cloneRecord(rawInput)
       const allow = (): AgentToolPermissionResult => ({ behavior: 'allow', updatedInput: input })
-      // 角色边界是硬限制，必须先于 bypassPermissions；用户授权不能把 explore/plan 变成 coder。
+      const commandRule = toolName === 'Bash'
+        ? evaluateAgentCommandRule(commandFrom(input))
+        : undefined
+      // 角色边界是硬限制；用户授权不能把 explore/plan 变成 coder。
       if (subagentType === 'explore' || subagentType === 'plan') {
         if (SUBAGENT_READ_TOOLS.has(toolName)) return allow()
-        if (subagentType === 'explore' && toolName === 'Bash' && isSafeReadOnlyCommand(commandFrom(input))) {
+        if (subagentType === 'explore' && commandRule?.decision === 'allow') {
           return allow()
         }
         return {
@@ -162,22 +184,39 @@ export class AgentPermissionService {
             : 'explore 子 Agent 只允许读取、搜索和无副作用命令',
         }
       }
-      // plan 必须先于历史白名单和普通确认判断，避免切换模式后沿用旧授权产生写操作。
-      if (options.permissionMode === 'plan') {
-        if (toolName === 'ExitPlanMode') return allow()
-        if (SAFE_TOOLS.has(toolName)) return allow()
-        if (toolName === 'Bash' && isSafeReadOnlyCommand(commandFrom(input))) return allow()
-        return { behavior: 'deny', message: PLAN_MODE_DENIAL }
+      // forbidden 是不可由历史白名单或用户审批覆盖的硬规则，必须先于二者判断。
+      if (commandRule?.decision === 'forbidden') {
+        return { behavior: 'deny', message: `命令规则禁止执行：${commandRule.reason}` }
       }
-      if (toolName === 'ExitPlanMode') {
-        return { behavior: 'deny', message: '当前不在计划模式中' }
+      if (options.sandboxEscalation) {
+        const existingGrant = this.sessionSandboxGrants.get(sessionId)
+          ?.get(permissionKey(toolName, input, options.sandboxEscalation))
+        if (existingGrant) return { ...allow(), sandboxGrants: [existingGrant] }
+        const owner = this.owners.get(sessionId)
+        if (owner === undefined || runSignal.aborted || options.signal?.aborted) {
+          return { behavior: 'deny', message: '沙箱升级确认不可用或运行已停止' }
+        }
+        return this.waitForDecision(
+          owner,
+          sessionId,
+          runStartedAt,
+          toolName,
+          input,
+          options.toolUseId,
+          runSignal,
+          options.signal,
+          options.sandboxEscalation,
+        )
       }
-      if (options.permissionMode === 'bypassPermissions') return allow()
       if (this.isWhitelisted(sessionId, toolName, input)) return allow()
       if (SAFE_TOOLS.has(toolName)) return allow()
-      if (toolName === 'Bash' && isSafeReadOnlyCommand(commandFrom(input))) return allow()
-      if (options.permissionMode === 'acceptEdits' && EDIT_TOOLS.has(toolName)) return allow()
-
+      if (commandRule?.decision === 'allow') return allow()
+      // 写工具先在基础路径策略中尝试，只有宿主返回结构化越界请求时才产生审批。
+      if (SANDBOX_ATTEMPT_TOOLS.has(toolName)) {
+        const grants = [...(this.sessionSandboxGrants.get(sessionId)?.values() ?? [])]
+          .filter((grant) => grant.permission.type === 'filesystemWrite')
+        return { ...allow(), ...(grants.length > 0 ? { sandboxGrants: grants } : {}) }
+      }
       const owner = this.owners.get(sessionId)
       if (owner === undefined || runSignal.aborted || options.signal?.aborted) {
         return { behavior: 'deny', message: '权限确认不可用或运行已停止' }
@@ -202,15 +241,42 @@ export class AgentPermissionService {
     const updatedInput = response.updatedInput
       ? cloneRecord(response.updatedInput)
       : cloneRecord(pending.input)
-    if (response.behavior === 'allow' && response.alwaysAllow && pending.request.allowAlways) {
+    const updatedCommandRule = pending.request.toolName === 'Bash'
+      ? evaluateAgentCommandRule(commandFrom(updatedInput))
+      : undefined
+    // renderer 可修正输入，但最终输入仍要重新过硬规则，不能借审批响应绕过 forbidden。
+    if (response.behavior === 'allow' && updatedCommandRule?.decision === 'forbidden') {
+      this.settle(
+        pending,
+        { behavior: 'deny', message: `命令规则禁止执行：${updatedCommandRule.reason}` },
+        'response',
+        'deny',
+      )
+      return true
+    }
+    const escalation = pending.request.sandboxEscalation
+    let sandboxGrants: AgentSandboxGrant[] | undefined
+    if (response.behavior === 'allow' && escalation) {
+      const grant: AgentSandboxGrant = {
+        scope: response.alwaysAllow && pending.request.allowAlways ? 'session' : 'once',
+        permission: escalation.permission,
+      }
+      sandboxGrants = [grant]
+      if (grant.scope === 'session') {
+        const grants = this.sessionSandboxGrants.get(pending.request.sessionId) ?? new Map<string, AgentSandboxGrant>()
+        grants.set(permissionKey(pending.request.toolName, updatedInput, escalation), grant)
+        this.sessionSandboxGrants.set(pending.request.sessionId, grants)
+      }
+    }
+    if (response.behavior === 'allow' && response.alwaysAllow && pending.request.allowAlways && !escalation) {
       const whitelist = this.sessionWhitelists.get(pending.request.sessionId) ?? new Set<string>()
-      whitelist.add(whitelistKey(pending.request.toolName, pending.input))
+      whitelist.add(whitelistKey(pending.request.toolName, updatedInput))
       this.sessionWhitelists.set(pending.request.sessionId, whitelist)
     }
     this.settle(
       pending,
       response.behavior === 'allow'
-        ? { behavior: 'allow', updatedInput }
+        ? { behavior: 'allow', updatedInput, ...(sandboxGrants ? { sandboxGrants } : {}) }
         : { behavior: 'deny', message: '用户拒绝了此操作' },
       'response',
       response.behavior,
@@ -220,6 +286,7 @@ export class AgentPermissionService {
 
   clearSessionWhitelist(sessionId: string): void {
     this.sessionWhitelists.delete(sessionId)
+    this.sessionSandboxGrants.delete(sessionId)
   }
 
   /** 停止、结束或 owner 消失时统一清理，防止 runtime 永久等待。 */
@@ -247,13 +314,16 @@ export class AgentPermissionService {
     toolUseId: string,
     runSignal: AbortSignal,
     toolSignal?: AbortSignal,
+    sandboxEscalation?: AgentSandboxEscalation,
   ): Promise<AgentToolPermissionResult> {
     const createdAt = this.now()
     const request: AgentPermissionRequest = {
       requestId: this.createId(), sessionId, runStartedAt, toolUseId, toolName,
-      toolInput: cloneRecord(input), description: describe(toolName, input),
+      toolInput: cloneRecord(input),
+      description: sandboxEscalation ? describeEscalation(sandboxEscalation) : describe(toolName, input),
       dangerLevel: assessDanger(toolName, input),
       allowAlways: assessDanger(toolName, input) !== 'dangerous',
+      ...(sandboxEscalation ? { sandboxEscalation: cloneEscalation(sandboxEscalation) } : {}),
       createdAt, expiresAt: createdAt + this.timeoutMs,
     }
     return new Promise((resolve) => {

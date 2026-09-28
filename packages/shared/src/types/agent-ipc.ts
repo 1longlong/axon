@@ -18,7 +18,6 @@ export const AGENT_IPC_CHANNELS = {
   QUEUE_EVENT: 'axon:agent:queue:event',
   PERMISSION_RESPOND: 'axon:agent:permission:respond',
   ASK_USER_RESPOND: 'axon:agent:ask-user:respond',
-  EXIT_PLAN_MODE_RESPOND: 'axon:agent:exit-plan-mode:respond',
   CHECK_ENVIRONMENT: 'axon:agent:environment:check',
   EVENT: 'axon:agent:event',
 } as const

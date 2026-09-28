@@ -6,24 +6,41 @@
  * 可选方法 = 能力协商：编排层必须探测后调用，未实现时降级。
  */
 
-import type {
-  AgentPermissionMode,
-  AgentReasoningCapability,
-  AgentThinkingLevel,
-} from './agent-session'
+import type { AgentReasoningCapability, AgentThinkingLevel } from './agent-session'
 import type { AgentStreamPayload } from './agent-message'
+import type {
+  AgentApprovalPolicy,
+  AgentApprovalReviewer,
+  AgentSandboxCapability,
+  AgentSandboxCapabilityInput,
+  AgentSandboxEscalation,
+  AgentSandboxGrant,
+  AgentSandboxMode,
+  AgentSandboxPolicy,
+} from './agent-sandbox'
 import type { ProviderType } from './channel'
+
+/** 会话当前的沙箱与审批语义；实际文件根由 sandboxPolicy 单独物化。 */
+export interface AgentExecutionPolicy {
+  sandboxMode: AgentSandboxMode
+  approvalPolicy: AgentApprovalPolicy
+  approvalReviewer: AgentApprovalReviewer
+}
 
 export interface AgentToolPermissionOptions {
   signal?: AbortSignal
   toolUseId: string
-  permissionMode: AgentPermissionMode
+  executionPolicy: AgentExecutionPolicy
+  /** 基础沙箱拒绝后的精确升级请求；缺失时只是普通工具策略判断。 */
+  sandboxEscalation?: AgentSandboxEscalation
 }
 
 export interface AgentToolPermissionResult {
   behavior: 'allow' | 'deny'
   /** 权限界面允许用户修正路径等参数后，再交给 runtime 执行。 */
   updatedInput?: Record<string, unknown>
+  /** 仅用于当前工具重试；session grant 也由权限服务在后续匹配时重新返回。 */
+  sandboxGrants?: AgentSandboxGrant[]
   message?: string
 }
 
@@ -139,7 +156,9 @@ export interface AgentQueryInput {
     apiKey: string
   }
   systemPrompt?: string
-  permissionMode?: AgentPermissionMode
+  executionPolicy?: AgentExecutionPolicy
+  /** 宿主解析出的基础沙箱策略；adapter 只能消费，不能自行扩大边界。 */
+  sandboxPolicy?: AgentSandboxPolicy
   /** runtime 无关的思考强度；adapter 负责映射到具体 SDK。 */
   thinkingLevel?: AgentThinkingLevel
   /** runtime 私有目录与恢复凭据；具体 artifact 格式仍由 adapter 解释。 */
@@ -178,6 +197,10 @@ export interface AgentReasoningCapabilityInput {
  *   独有的调优项才放进 adapter 扩展输入，上层不得依赖其 SDK 类型。
  */
 export interface AgentProviderAdapter {
+  /** 未明确返回 supported 时，编排层不得把 runtime 标记为已受宿主 OS 沙箱保护。 */
+  getSandboxCapability?(
+    input: AgentSandboxCapabilityInput,
+  ): AgentSandboxCapability | Promise<AgentSandboxCapability>
   /** 未实现或返回 undefined 时，UI 不展示未经 runtime 确认的思考等级。 */
   getReasoningCapability?(
     input: AgentReasoningCapabilityInput,
@@ -196,6 +219,4 @@ export interface AgentProviderAdapter {
   sendQueuedMessage?(sessionId: string, message: SDKUserMessageInput, options?: SendQueuedMessageOptions): Promise<void>
   /** 取消队列中的待发送消息（可选）。 */
   cancelQueuedMessage?(sessionId: string, messageUuid: string): Promise<void>
-  /** 动态切换活跃查询的权限模式（可选）。 */
-  setPermissionMode?(sessionId: string, mode: string): Promise<void>
 }

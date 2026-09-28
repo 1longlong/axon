@@ -28,7 +28,7 @@ const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const STATUSES: readonly AgentDelegationStatus[] = [
   'queued', 'running', 'blocked', 'completed', 'failed', 'canceled', 'interrupted',
 ]
-const BLOCK_REASONS: readonly AgentDelegationBlockReason[] = ['permission', 'ask_user', 'plan_approval']
+const BLOCK_REASONS: readonly AgentDelegationBlockReason[] = ['permission', 'ask_user']
 const SUBAGENT_TYPES = ['coder', 'explore', 'plan'] as const
 const ERROR_CATEGORIES: readonly AgentErrorCategory[] = [
   'network', 'provider', 'protocol', 'context', 'runtime', 'configuration',

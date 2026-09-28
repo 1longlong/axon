@@ -13,6 +13,7 @@ import { registerChannelIpcHandlers } from '../src/main/ipc/channel-ipc-handlers
 import { registerMcpProjectIpcHandlers } from '../src/main/ipc/mcp-project-ipc-handlers'
 import { AgentEventBus } from '../src/main/lib/agent/agent-event-bus'
 import { AgentIpcController } from '../src/main/lib/agent/agent-ipc-handlers'
+import { AgentPermissionService } from '../src/main/lib/agent/agent-permission-service'
 import { AgentService } from '../src/main/lib/agent/agent-service'
 import { AgentSessionManager } from '../src/main/lib/agent/agent-session-manager'
 import { AgentDelegationManager } from '../src/main/lib/collaboration/agent-delegation-manager'
@@ -95,6 +96,22 @@ const adapter: AgentProviderAdapter = {
       delta: { uuid: 'assistant-smoke', deltas: [{ type: 'text_delta', contentIndex: 0, delta: '正在处理' }] },
     }
     await new Promise((done) => setTimeout(done, 120))
+    const sandboxPermission = await input.canUseTool?.(
+      'Bash',
+      { command: 'curl https://example.com' },
+      {
+        toolUseId: 'sandbox-network-smoke',
+        executionPolicy: input.executionPolicy,
+        sandboxEscalation: {
+          reason: 'networkAccess', permission: { type: 'network' },
+          message: '命令的网络访问被基础沙箱拒绝；命令可能已产生部分本地副作用',
+        },
+      },
+    )
+    if (sandboxPermission?.behavior !== 'allow'
+      || sandboxPermission.sandboxGrants?.[0]?.permission.type !== 'network') {
+      throw new Error('沙箱网络升级未返回精确 Grant')
+    }
     const agentTool = input.customTools?.find((tool) => tool.name === 'Agent')
     if (!agentTool) throw new Error('Agent 协作工具未注入主会话')
     yield {
@@ -271,6 +288,7 @@ void app.whenReady().then(async () => {
     models: [{ id: 'gpt-5.6-smoke', name: 'Agent 冒烟模型', enabled: true, source: 'manual' }],
   })
   const events = new AgentEventBus()
+  const permissions = new AgentPermissionService()
   const delegations = new AgentDelegationManager({ sessionsDir: join(directory, 'sessions') })
   let collaboration: AgentCollaborationService
   const agent = new AgentService({
@@ -304,6 +322,9 @@ void app.whenReady().then(async () => {
         ? createAgentMemoryTools({ projectId, memory })
         : []),
     ],
+    createCanUseTool: (sessionId, runStartedAt, runSignal) => (
+      permissions.createCanUseTool(sessionId, runStartedAt, runSignal)
+    ),
   })
   collaboration = new AgentCollaborationService({
     sessions,
@@ -312,7 +333,7 @@ void app.whenReady().then(async () => {
     resolveProjectCwd: (projectId) => projects.resolveProjectCwd(projectId),
   })
   registerAgentIpcHandlers(
-    new AgentIpcController({ sessions, agent, events, ...(zimaAdapter ? {
+    new AgentIpcController({ sessions, agent, events, permissions, ...(zimaAdapter ? {
       validateCreate: (input) => {
         if (input.runtimeId === 'zima' && input.channelId) assertZimaConnection(channels.resolve(input.channelId))
       },
@@ -533,6 +554,10 @@ void app.whenReady().then(async () => {
   await typeEditor('执行本地 Agent 冒烟任务')
   await clickText('发送')
   await waitFor("document.body.textContent.includes('正在处理') && document.body.textContent.includes('Agent 运行中')")
+  await waitFor("document.body.textContent.includes('Agent 请求扩展沙箱权限：Bash') && document.body.textContent.includes('网络访问')")
+  await assert("document.body.textContent.includes('命令可能已产生部分本地副作用') && document.body.textContent.includes('批准后只携带本项权限重试当前工具一次')")
+  await assert("[...document.querySelectorAll('button')].some(item => item.offsetParent && item.textContent.trim() === '当前会话允许')")
+  await clickText('本次允许')
   await waitFor("document.querySelector('summary[aria-label=\"工具调用 Bash\"] svg.animate-spin') !== null")
   await assert("document.querySelectorAll('summary[aria-label=\"工具调用 Bash\"]').length === 1")
   await waitFor("document.body.textContent.includes('Agent 正常回答') && !document.body.textContent.includes('Agent 运行中')")
@@ -646,7 +671,7 @@ void app.whenReady().then(async () => {
     modelServer?.close()
   }
 
-  console.log(`Agent 冒烟验证通过：项目工作区、思考等级、项目指令、Skills、MCP 配置、项目记忆与变化刷新、协作子 Agent 任务卡与详情、双侧栏、文件树、用量圆环、变更汇总、Diff、流式消息、聚合 state/JSONL 与重载恢复${zimaAdapter ? '、Zima 创建/发送/恢复及 Pi 并存' : ''}。截图目录：${directory}`)
+  console.log(`Agent 冒烟验证通过：项目工作区、思考等级、项目指令、Skills、MCP 配置、项目记忆与变化刷新、沙箱升级权限卡与精确 Grant、协作子 Agent 任务卡与详情、双侧栏、文件树、用量圆环、变更汇总、Diff、流式消息、聚合 state/JSONL 与重载恢复${zimaAdapter ? '、Zima 创建/发送/恢复及 Pi 并存' : ''}。截图目录：${directory}`)
   clearTimeout(timeout)
   win.destroy()
   app.exit(0)

@@ -5,7 +5,6 @@ import type {
   AgentAskUserResponse,
   AgentEnvironmentCheckInput,
   AgentEnvironmentCheckResult,
-  AgentExitPlanResponse,
   AgentMemoryChangedEvent,
   AgentMemoryFile,
   AgentMemorySummary,
@@ -245,7 +244,6 @@ export class AgentRendererController {
       const streamingAssistantUuids = { ...state.streamingAssistantUuidBySession }
       const permissions = { ...state.pendingPermissionsBySession }
       const askUsers = { ...state.pendingAskUsersBySession }
-      const exitPlans = { ...state.pendingExitPlansBySession }
       const queuedMessages = { ...state.queuedMessagesBySession }
       delete messages[sessionId]
       delete statuses[sessionId]
@@ -257,7 +255,6 @@ export class AgentRendererController {
       delete streamingAssistantUuids[sessionId]
       delete permissions[sessionId]
       delete askUsers[sessionId]
-      delete exitPlans[sessionId]
       delete queuedMessages[sessionId]
       return {
         ...state,
@@ -272,7 +269,6 @@ export class AgentRendererController {
         streamingAssistantUuidBySession: streamingAssistantUuids,
         pendingPermissionsBySession: permissions,
         pendingAskUsersBySession: askUsers,
-        pendingExitPlansBySession: exitPlans,
         queuedMessagesBySession: queuedMessages,
         lastError: state.lastError?.sessionId === sessionId ? null : state.lastError,
       }
@@ -444,25 +440,6 @@ export class AgentRendererController {
       this.store.set(agentStateAtom, (state) => ({
         ...state,
         lastError: { scope: 'run', message: '提交 Agent 问题回答失败' },
-      }))
-      return false
-    }
-  }
-
-  async respondExitPlan(response: AgentExitPlanResponse): Promise<boolean> {
-    try {
-      const accepted = await this.api.respondExitPlan(response)
-      if (!accepted) {
-        this.store.set(agentStateAtom, (state) => ({
-          ...state,
-          lastError: { scope: 'run', message: '计划审批已失效或模式切换失败' },
-        }))
-      }
-      return accepted
-    } catch {
-      this.store.set(agentStateAtom, (state) => ({
-        ...state,
-        lastError: { scope: 'run', message: '提交计划审批失败' },
       }))
       return false
     }

@@ -1,6 +1,6 @@
 /** Agent runtime 能力与应用侧会话元数据。 */
 
-export type AgentPermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan'
+import type { AgentApprovalPolicy, AgentApprovalReviewer, AgentSandboxMode } from './agent-sandbox'
 
 /** 中立思考等级；具体 runtime 负责按当前模型能力映射或收窄。 */
 export type AgentThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -30,11 +30,13 @@ export type AgentRuntimeId = 'pi' | 'zima'
 export interface AgentRuntimeCapabilities {
   thinkingLevel: boolean
   nestedProjectInstructions: 'automatic' | 'manual'
+  /** 只有宿主执行链真正落入 OS 沙箱后才能置为 true。 */
+  osSandbox: boolean
 }
 
 export const AGENT_RUNTIME_CAPABILITIES: Record<AgentRuntimeId, AgentRuntimeCapabilities> = {
-  pi: { thinkingLevel: true, nestedProjectInstructions: 'automatic' },
-  zima: { thinkingLevel: true, nestedProjectInstructions: 'manual' },
+  pi: { thinkingLevel: true, nestedProjectInstructions: 'automatic', osSandbox: false },
+  zima: { thinkingLevel: true, nestedProjectInstructions: 'manual', osSandbox: false },
 }
 
 /**
@@ -53,8 +55,9 @@ export interface AgentSessionMeta {
   sdkSessionId?: string
   /** runtime session artifact 的精确路径；避免仅按 ID 子串定位 artifact。 */
   runtimeSessionFile?: string
-  /** 会话级权限模式，持久化以便重启恢复。 */
-  permissionMode?: AgentPermissionMode
+  sandboxMode?: AgentSandboxMode
+  approvalPolicy?: AgentApprovalPolicy
+  approvalReviewer?: AgentApprovalReviewer
   /** 会话级思考等级；缺失时按 medium 处理。 */
   thinkingLevel?: AgentThinkingLevel
   /** 缺失表示尚未建立首轮基线；空对象表示上一轮确认 memory/ 为空。 */
@@ -77,7 +80,9 @@ export interface AgentSessionCreateInput {
   channelId?: string
   modelId?: string
   projectId?: string
-  permissionMode?: AgentPermissionMode
+  sandboxMode?: AgentSandboxMode
+  approvalPolicy?: AgentApprovalPolicy
+  approvalReviewer?: AgentApprovalReviewer
   thinkingLevel?: AgentThinkingLevel
   /** 以下字段只供主进程协作编排层写入，renderer IPC 明确拒绝。 */
   parentSessionId?: string
@@ -92,7 +97,9 @@ export interface AgentSessionUpdateInput {
   channelId?: string | null
   modelId?: string | null
   projectId?: string | null
-  permissionMode?: AgentPermissionMode | null
+  sandboxMode?: AgentSandboxMode | null
+  approvalPolicy?: AgentApprovalPolicy | null
+  approvalReviewer?: AgentApprovalReviewer | null
   thinkingLevel?: AgentThinkingLevel | null
   sdkSessionId?: string
   runtimeSessionFile?: string

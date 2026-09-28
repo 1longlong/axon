@@ -31,9 +31,8 @@ export function QuickChatWindow(): React.ReactElement {
     return new Set([
       ...(agentState.pendingPermissionsBySession[sessionId] ?? []),
       ...(agentState.pendingAskUsersBySession[sessionId] ?? []),
-      ...(agentState.pendingExitPlansBySession[sessionId] ?? []),
     ].map((request) => request.requestId))
-  }, [agentState.pendingAskUsersBySession, agentState.pendingExitPlansBySession, agentState.pendingPermissionsBySession, sessionId])
+  }, [agentState.pendingAskUsersBySession, agentState.pendingPermissionsBySession, sessionId])
 
   /** 有效消息提交后立即展开原会话；后续消息仍由现有 controller 流程写入并展示。 */
   const onSent = React.useCallback((): void => {

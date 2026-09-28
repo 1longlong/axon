@@ -25,7 +25,6 @@ import {
 import type {
   AgentActiveRun,
   AgentAskUserResponse,
-  AgentExitPlanResponse,
   AgentGenerationEvent,
   AgentEnvironmentCheckInput,
   AgentEnvironmentCheckResult,
@@ -76,6 +75,7 @@ import type {
   MaterializedMcpPreset,
 } from '@axon/shared'
 import { DESKTOP_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, USER_PROFILE_IPC_CHANNELS, WINDOW_IPC_CHANNELS } from '../types'
+import type { QuickChatDragInput } from '../types'
 import type { AppSettings, DesktopAction, UserProfile } from '../types'
 
 const desktopActionListeners = new Set<(action: DesktopAction) => void>()
@@ -94,6 +94,8 @@ const api = {
   desktop: {
     setQuickChatExpanded: (expanded: boolean): Promise<void> =>
       ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.QUICK_CHAT_EXPANDED, expanded),
+    dragQuickChat: (input: QuickChatDragInput): void =>
+      ipcRenderer.send(DESKTOP_IPC_CHANNELS.QUICK_CHAT_DRAG, input),
     hideQuickChat: (): Promise<void> => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.HIDE_QUICK_CHAT),
     onQuickChatOpened: (callback: () => void): (() => void) => {
       const listener = (): void => callback()
@@ -180,8 +182,6 @@ const api = {
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.PERMISSION_RESPOND, response),
     respondAskUser: (response: AgentAskUserResponse): Promise<boolean> =>
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.ASK_USER_RESPOND, response),
-    respondExitPlan: (response: AgentExitPlanResponse): Promise<boolean> =>
-      ipcRenderer.invoke(AGENT_IPC_CHANNELS.EXIT_PLAN_MODE_RESPOND, response),
     /** 订阅单轮 Agent 运行生命周期，返回取消订阅函数。 */
     onEvent: (callback: (event: AgentGenerationEvent) => void): (() => void) => {
       const listener = (_event: IpcRendererEvent, event: AgentGenerationEvent): void => callback(event)
