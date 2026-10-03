@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-- 当前本地发行版本为 v0.1.3，生成 macOS Apple Silicon DMG/ZIP 与 SHA-256 清单；只在本机交付，不上传、不推送。
+- 当前发行版本为 v0.1.3，macOS Apple Silicon DMG/ZIP、SHA-256 清单和 release notes 已发布到 GitHub Release；发行提交 `c80d660` 与标签已推送。
 - 迭代 23“Agent Shell 文件快照执行”的四阶段及关联权限修复已完成。Pi 支持用户 Shell 解析、会话初始化异步预热、私有快照原子发布、条件恢复、环境覆盖与原始命令审批归因。
 - 会话删除、工作区改变和应用退出都会释放快照引用；初始化时异步清理无归属或三天不活跃的遗留缓存，排除在途预热与跨轮引用。
 - 主会话无 Plan 模式；独立 plan 子 Agent 保留。Pi 受宿主保护的普通/复合 Bash 命令先进入 Seatbelt，不因未命中白名单提前申请审批；显式禁止规则及真实越界升级仍有效。
@@ -12,7 +12,14 @@
 - Pi 宿主沙箱不可用时拒绝本轮，不再退回原生工具；Zima 无沙箱副作用工具等待普通人工审批。explore/plan 创建和逐轮执行均收窄为只读，审批不能放宽角色边界。
 - Runtime 切换、Automation、内嵌终端、完整发布链等扩展项仍暂不实施，本轮没有恢复或启动新迭代。
 
-## 本次交付：最近更新整理、提交与 v0.1.3 本地安装包（2026-10-04）
+## 本次交付：v0.1.3 推送与 GitHub Release 上传（2026-10-04）
+
+- 用户明确授权推送和上传；以非强制原子推送同步 `main` 与 `v0.1.3`，发行标签指向 `c80d66074a2a498ec7f76338e8cc99891846e0be`，不移动已发布标签。
+- 发布地址：https://github.com/1longlong/axon/releases/tag/v0.1.3 。Release 已公开发布（非草稿、非 prerelease），包含 DMG、ZIP 和 `SHA256SUMS.txt`，发行说明来自 `docs/releases/v0.1.3.md`。
+- 三个附件的远端状态均为 `uploaded`；DMG/ZIP 远端 SHA-256 与本地校验清单一致。
+- 本轮只更新本进度文档并同步发布结果，没有改源码、重新构建或重跑整套测试；下列内容是当前版本实现及已完成的构建验收。
+
+### 当前版本内容
 
 - `shared/agent-provider.ts` 新增必填的 `toolExecution`：adapter 按实际工具实例声明 `sandbox / runtime / host`。宿主工具工厂可明确声明自行守卫的 `managed` 工具，默认普通审批；模型参数不能设置这些授权元信息。`shared/agent-sandbox.ts` 的宿主端口必须报告真实能力，`shared/agent-run.ts` 补充 `sandbox_unavailable` 错误码。
 - `agent-sandbox-command-service.ts → agent-service-instance.ts → agent-service.ts → pi-agent-adapter.ts`：始终装配端口并传递实际探测结果；能力失败或模式不匹配时在 SDK/Shell 启动前拒绝。应用层保存用户消息和明确失败 result，UI/重启可恢复；没有无沙箱原生工具回退。
@@ -21,9 +28,9 @@
 - `agent-collaboration-service.ts → agent-service.ts → agent-permission-service.ts`：explore/plan 创建及每轮运行都固定只读；只有只读宿主沙箱明确覆盖 Bash 才向 explore 提供它，plan 永不提供 Bash。禁止角色升级或复用旧 Grant 扩大权限。`agent-tool-guidance.ts` 同步说明 Bash 取决于实际可用工具列表。
 - 新增/调整 permission、Pi/Zima adapter、编排、协作和宿主能力回归测试；真实 Shell 冒烟补充只读项目写入拒绝及角色升级拒绝，桌面冒烟补齐可信执行元信息。README、核心设计、协议示例和根 AGENTS 同步现行边界。
 - 根 `package.json`、`apps/electron/package.json` 和 `bun.lock` 的应用版本统一为 0.1.3；内部 shared/core 包版本不变。新增 `docs/releases/v0.1.3.md`，README 补充本地安装包说明。
-- 最近源码、测试和文档更新一并纳入本次发布提交，附 `Co-Authored-By: Codex <codex@openai.com>`；本地标签 `v0.1.3` 用于定位发行提交。用户明确只生成本地包，不创建 GitHub Release，不推送提交或标签。
+- 最近源码、测试和文档更新已纳入发行提交 `c80d660`，附 `Co-Authored-By: Codex <codex@openai.com>`；`v0.1.3` 用于定位安装包对应源码。发布后的进度文档单独提交并推送，不改变标签或重建安装包。
 
-## 本轮集中验证
+## 发行验证状态
 
 - `bun test`：90 个测试文件、583 项通过、0 失败、2127 次断言。
 - `bun run typecheck`：全仓通过。
@@ -34,6 +41,7 @@
 - `git diff --check`：通过。
 - `electron-builder --config electron-builder.yml --mac --arm64 --publish never`：本地 DMG/ZIP 打包成功；`package:checksums` 生成并验证当前版本 SHA-256 清单。
 - `hdiutil verify` 与 `unzip -tq`：安装包完整性检查通过；app.asar 版本为 0.1.3，主进程/preload/renderer 入口及 Pi/MCP 依赖存在，Info.plist 版本为 0.1.3。
+- 本轮重新验证本地 SHA-256 清单，复核远端发行标签、Release 状态和附件摘要；未替换或覆盖其他版本的发布。
 
 ## 本地发行产物
 
@@ -53,4 +61,4 @@
 
 ## 下一步
 
-v0.1.3 本地发行收尾，等待用户安装试用或指定下一阶段。可在明确授权后验证本机 Go/PATH 与真实模型工具循环；隔离验收不替代真实用户 rc 环境。外部发布与推送仍需授权；Zima 宿主委托、内存快照、PTY、常驻 Shell、凭据代理和域名网络代理继续后置，公开分发前仍需 Developer ID 签名和公证。
+v0.1.3 发行收尾，等待用户下载试用或指定下一阶段。可在明确授权后验证本机 Go/PATH 与真实模型工具循环；隔离验收不替代真实用户 rc 环境。后续推送和发布需新的授权；Zima 宿主委托、内存快照、PTY、常驻 Shell、凭据代理和域名网络代理继续后置，正式签名分发仍需 Developer ID 签名和公证。
