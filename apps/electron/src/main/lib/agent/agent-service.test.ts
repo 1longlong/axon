@@ -68,7 +68,7 @@ class FakeAdapter implements AgentProviderAdapter {
     supported: false,
     modes: [],
     sandboxedTools: [],
-    limitation: 'hostExecutorUnavailable',
+    limitation: 'runtimeToolDelegationUnavailable',
   }
   onQuery?: (input: AgentQueryInput) => void | Promise<void>
   emitRuntimeSession = true
@@ -168,6 +168,48 @@ async function expectTerminalError(action: () => Promise<unknown>, code: AgentSe
 }
 
 describe('AgentService 消息编排主链', () => {
+  test('宿主能力失效时持久化明确错误，模型和原生工具均不启动', async () => {
+    for (const limitation of ['hostExecutorUnavailable', 'platformUnsupported'] as const) {
+      const session = sessions.create({ channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1' })
+      const adapter = new FakeAdapter()
+      adapter.sandboxCapability = { supported: false, modes: [], sandboxedTools: [], limitation }
+      const outcome = await createService(adapter).service.sendMessage({ sessionId: session.id, text: '运行' })
+      expect(adapter.input).toBeUndefined()
+      expect(outcome.result).toMatchObject({
+        type: 'result', subtype: 'error_during_execution', error: {
+          code: 'sandbox_unavailable', retryable: false, message: expect.stringContaining('不会切换为无沙箱执行'),
+        },
+      })
+      expect(sessions.getMessages(session.id)).toHaveLength(2)
+      expect(sessions.getMessages(session.id).at(-1)).toMatchObject({ error: { code: 'sandbox_unavailable' } })
+    }
+  })
+
+  test('已有 explore/plan 会话逐轮收紧为真正只读，Bash 只在明确受保护时提供', async () => {
+    for (const role of ['explore', 'plan'] as const) {
+      const root = sessions.create({ channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1' })
+      const child = sessions.create({
+        channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1', sandboxMode: 'workspaceWrite',
+        parentSessionId: root.id, rootSessionId: root.id, parentToolUseId: `task-${role}`, subagentType: role,
+      })
+      rootStateStore.update(root.id, (state) => ({ ...state, tasks: [{ agentId: child.id, parentToolUseId: `task-${role}` }] }))
+      const adapter = new FakeAdapter()
+      adapter.sandboxCapability = { supported: true, modes: ['readOnly', 'workspaceWrite'], sandboxedTools: ['bash', 'read', 'write'] }
+      adapter.emitRuntimeSession = false
+      adapter.stream = [{ kind: 'sdk_message', message: { type: 'result', subtype: 'success', usage: { input_tokens: 0 } } }]
+      let nextMessage = 0
+      const { service } = createService(adapter, resolvedChannel(), { createId: () => `${role}-${++nextMessage}` })
+      await service.sendMessage({ sessionId: child.id, text: '检查' })
+      expect(adapter.input?.executionPolicy?.sandboxMode).toBe('readOnly')
+      expect(adapter.input?.sandboxPolicy).toMatchObject({ mode: 'readOnly', writableRoots: [] })
+      expect(adapter.input?.allowedBuiltinTools).toEqual(['Read', 'Glob', 'Grep', 'LS', ...(role === 'explore' ? ['Bash'] : [])])
+      adapter.sandboxCapability = { supported: false, modes: [], sandboxedTools: [], limitation: 'runtimeToolDelegationUnavailable' }
+      await service.sendMessage({ sessionId: child.id, text: '再次检查' })
+      expect(adapter.input?.sandboxPolicy).toBeUndefined()
+      expect(adapter.input?.allowedBuiltinTools).not.toContain('Bash')
+    }
+  })
+
   test('Zima 发送前校验失败不写半轮消息，成功时只分派给所属 adapter', async () => {
     sessions.create({ runtimeId: 'zima', channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1' })
     const piAdapter = new FakeAdapter()
@@ -463,7 +505,7 @@ describe('AgentService 消息编排主链', () => {
 
     await service.sendMessage({ sessionId: child.id, text: '检查项目' })
 
-    expect(adapter.input?.allowedBuiltinTools).toEqual(['Read', 'Glob', 'Grep', 'LS', 'Bash'])
+    expect(adapter.input?.allowedBuiltinTools).toEqual(['Read', 'Glob', 'Grep', 'LS'])
     expect(adapter.input?.customTools?.some((tool) => tool.name === 'SkillRead')).toBe(true)
     expect(adapter.input?.systemPrompt).toContain('name="inspect-project"')
   })

@@ -11,7 +11,7 @@
 import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { existsSync, mkdirSync, readdirSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
+import { delimiter, isAbsolute, join, relative, resolve } from 'node:path'
 import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage, AssistantMessageEvent, ToolResultMessage, UserMessage } from '@earendil-works/pi-ai/compat'
 import type {
@@ -28,6 +28,7 @@ import type {
   AgentDeferredToolCapabilityInput,
   AgentExecutionPolicy,
   AgentHostToolExecutionPort,
+  AgentHostShellEnvironment,
   AgentProviderAdapter,
   AgentQueryInput,
   AgentReasoningCapability,
@@ -38,6 +39,7 @@ import type {
   AgentSandboxPolicy,
   AgentStreamPayload,
   AgentThinkingLevel,
+  AgentToolExecution,
   AgentTypedError,
   SDKAssistantMessage,
   SDKMessage,
@@ -551,8 +553,8 @@ const PROVIDER_ENDPOINT_CONFIGURATION_PATTERN =
   /\b(?:ENOTFOUND|ERR_NAME_NOT_RESOLVED)\b|could not resolve host|nodename nor servname provided/i
 
 /**
- * 将最终 AssistantMessage 分类成中立错误：先匹配不可恢复的
- * 上下文/账户/请求错误，再使用 runtime 同源规则标识瞬时失败。
+ * 将已收束的 AssistantMessage 分类成中立终态供持久化/UI 消费；
+ * retryable 是展示标记，不修改原始错误或控制 runtime 的重试判断。
  */
 function createPiTypedError(assistant: AssistantMessage): AgentTypedError {
   const message = assistant.errorMessage ?? ''
@@ -641,9 +643,8 @@ function createPiTypedError(assistant: AssistantMessage): AgentTypedError {
 
 /**
  * 转换单条 Pi AgentMessage；无法识别的角色返回 null（调用方跳过，不猜测）。
- * 说明：产出的消息 parent_tool_use_id 恒为 null——Pi 的事件模型没有子代理
- * sidechain 概念；历史 JSONL 里非空 parent_tool_use_id 来自旧 runtime 的会话，
- * 渲染层的树状折叠逻辑为兼容旧数据保留。
+ * 本 adapter 产出的 parent_tool_use_id 为 null；Axon 子 Agent 的父子关系由
+ * 应用会话元数据和任务聚合维护，不从 Pi 消息推导。
  */
 export function convertPiMessage(
   message: AgentMessage,
@@ -997,7 +998,7 @@ function isWithinDirectory(path: string, directory: string): boolean {
   return relation === '' || (!relation.startsWith('..') && !isAbsolute(relation))
 }
 
-/** 精确路径优先；兼容只有 runtime session id 的旧元数据时才扫描目录。 */
+/** 精确 artifact 路径优先；仅有 runtime session id 时在当前会话允许目录内查找。 */
 function resolveSessionFile(input: PiAgentQueryOptions): string | undefined {
   if (input.runtimeSessionFile) {
     if (!isWithinDirectory(input.runtimeSessionFile, input.runtimeSessionDir)) {
@@ -1036,15 +1037,16 @@ function restoredDeferredToolNames(messages: readonly AgentMessage[], deferredNa
   return restored
 }
 
+/** 按实际工具实例的执行边界申请授权；越界只在同一次受控调用中携带精确 Grant 重试。 */
 function wrapToolWithPermission(
   definition: ToolDefinition,
   input: PiAgentQueryOptions,
   active: ActivePiSession,
   emit: (payload: AgentStreamPayload) => void,
+  toolExecution: AgentToolExecution,
   projectInstructionScope?: PiProjectInstructionScope,
   sandboxGrantStorage?: AsyncLocalStorage<AgentSandboxGrant[]>,
 ): ToolDefinition {
-  if (!input.canUseTool && !projectInstructionScope) return definition
   return {
     ...definition,
     async execute(toolUseId, rawInput, signal, onUpdate, context) {
@@ -1064,11 +1066,14 @@ function wrapToolWithPermission(
       }
       let updatedInput: Record<string, unknown> | undefined
       let initialGrants: AgentSandboxGrant[] = []
+      if (!input.canUseTool && toolExecution.kind === 'host' && toolExecution.permissionMode !== 'managed') {
+        return denied('当前会话没有工具授权能力')
+      }
       if (input.canUseTool) {
         const permission = await input.canUseTool(
           displayToolName(definition.name, original),
           normalizePermissionInput(definition.name, original),
-          { signal, toolUseId, executionPolicy: active.executionPolicy },
+          { signal, toolUseId, executionPolicy: active.executionPolicy, toolExecution },
         )
         if (permission.behavior === 'deny') {
           return denied(permission.message ?? '用户拒绝了工具执行')
@@ -1094,6 +1099,7 @@ function wrapToolWithPermission(
             signal,
             toolUseId,
             executionPolicy: active.executionPolicy,
+            toolExecution,
             sandboxEscalation: error.escalation,
           },
         )
@@ -1124,19 +1130,40 @@ function convertCustomTool(tool: AgentCustomToolDefinition): ToolDefinition {
  * Pi 继续负责工具 schema、增量展示和结果截断；宿主只负责受 Seatbelt 约束的进程执行。
  */
 export function createPiSandboxedBashOperations(
-  hostTools: AgentHostToolExecutionPort,
+  hostTools: Pick<AgentHostToolExecutionPort, 'executeShellCommand'>,
   policy: AgentSandboxPolicy,
   getGrants: () => AgentSandboxGrant[] = () => [],
+  runtimeBinDirectory?: string,
 ): PiBashOperations {
   return {
     async exec(command, cwd, options) {
       const timeoutMs = options.timeout === undefined ? undefined : options.timeout * 1_000
-      const result = await hostTools.executeCommand({
-        argv: ['/bin/zsh', '-lc', command],
+      // Pi 给出完整环境，不能把继承的 GUI PATH 当成快照后的显式覆盖。
+      const environmentOverrides: Record<string, string | undefined> = {}
+      const environment = options.env ? { ...options.env } : undefined
+      if (environment) {
+        for (const key of new Set([...Object.keys(process.env), ...Object.keys(environment)])) {
+          if (environment[key] !== process.env[key]) environmentOverrides[key] = environment[key]
+        }
+      }
+      const basePath = process.env.PATH ?? ''
+      const runtimePath = runtimeBinDirectory && !basePath.split(delimiter).includes(runtimeBinDirectory)
+        ? [runtimeBinDirectory, basePath].filter(Boolean).join(delimiter)
+        : basePath
+      const usesRuntimePath = Boolean(runtimeBinDirectory && environment?.PATH === runtimePath)
+      if (usesRuntimePath) delete environmentOverrides.PATH
+      // 这些是 Pi 本轮状态，缺失也要重放删除，不能让旧快照复活已失效的值。
+      for (const key of ['PI_SESSION_ID', 'PI_SESSION_FILE', 'PI_PROVIDER', 'PI_MODEL', 'PI_REASONING_LEVEL']) {
+        environmentOverrides[key] = environment?.[key]
+      }
+      const result = await hostTools.executeShellCommand({
+        command,
         cwd,
         policy,
         grants: getGrants(),
-        environment: options.env,
+        environment,
+        environmentOverrides,
+        ...(usesRuntimePath ? { pathPrepend: [runtimeBinDirectory!] } : {}),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ...(options.signal ? { abortSignal: options.signal } : {}),
       }, {
@@ -1269,6 +1296,7 @@ function createPiSandboxedGrepTool(
  */
 export class PiAgentAdapter implements AgentProviderAdapter {
   private readonly activeSessions = new Map<string, ActivePiSession>()
+  private readonly shellEnvironments = new Map<string, { cwd: string; environment: AgentHostShellEnvironment }>()
 
   constructor(
     private readonly loadRuntime: () => Promise<PiSdk> = () => import('@earendil-works/pi-coding-agent'),
@@ -1277,13 +1305,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
 
   /** 逐项报告真实覆盖范围；只有全部本地工具委托完成后才能标记完整支持。 */
   getSandboxCapability(_input: AgentSandboxCapabilityInput): AgentSandboxCapability {
-    if (this.hostTools) {
-      return {
-        supported: true,
-        modes: ['readOnly', 'workspaceWrite'],
-        sandboxedTools: ['bash', 'read', 'write', 'edit', 'grep', 'glob', 'ls'],
-      }
-    }
+    if (this.hostTools) return this.hostTools.getSandboxCapability()
     return {
       supported: false,
       modes: [],
@@ -1317,6 +1339,18 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     let promptSettled = false
 
     try {
+      // 缺少保护或策略时，在加载 SDK/启动 Shell 前失败；不得回退原生工具。
+      const capability = this.getSandboxCapability({ platform: 'macos' })
+      if (!this.hostTools || !capability.supported || !input.sandboxPolicy
+        || !capability.modes.includes(input.sandboxPolicy.mode)
+        || input.sandboxPolicy.mode !== input.executionPolicy.sandboxMode) {
+        throw new Error('Pi 本地工具需要可用的宿主沙箱与一致的执行策略，当前运行已拒绝')
+      }
+      // 预热属于应用会话，不跟随每轮 runtime 对象销毁，也不等待捕获结果。
+      const cwd = input.cwd ?? process.cwd()
+      const shellEnvironment = this.hostTools && input.sandboxPolicy && !input.abortSignal?.aborted
+        ? this.getShellEnvironment(input.sessionId, cwd)
+        : undefined
       // 初始化顺序不能调换：先固定 artifact 与模型，再订阅事件，最后发送 prompt，
       // 否则会丢失 init 或首个流式事件。
       mkdirSync(input.runtimeAgentDir, { recursive: true })
@@ -1324,7 +1358,6 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       const sdk = await this.loadRuntime()
       // 运行时模块必须在进入事件转换前就绪，后续错误分类才能复用同源规则。
       piCompat = await loadPiCompat()
-      const cwd = input.cwd ?? process.cwd()
       const sessionFile = resolveSessionFile(input)
       const resumeRequested = Boolean(input.resumeSessionId || input.runtimeSessionFile)
       let recoveredRuntimeSession = false
@@ -1377,41 +1410,41 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       const allowedBuiltinTools = input.allowedBuiltinTools
         ? new Set(input.allowedBuiltinTools)
         : undefined
-      const sandboxGrantStorage = this.hostTools && input.sandboxPolicy
-        ? new AsyncLocalStorage<AgentSandboxGrant[]>()
-        : undefined
-      const currentSandboxGrants = (): AgentSandboxGrant[] => sandboxGrantStorage?.getStore() ?? []
-      const sandboxedToolOptions = this.hostTools && input.sandboxPolicy
-        ? {
-            ...createPiSandboxedFileToolOptions(this.hostTools, input.sandboxPolicy, currentSandboxGrants),
-            bash: {
-              operations: createPiSandboxedBashOperations(
-                this.hostTools,
-                input.sandboxPolicy,
-                currentSandboxGrants,
-              ),
-            },
-          }
-        : undefined
-      const builtinTools = sandboxedToolOptions
-        ? [
-            sdk.createReadTool(cwd, sandboxedToolOptions.read),
-            sdk.createBashTool(cwd, sandboxedToolOptions.bash),
-            sdk.createEditTool(cwd, sandboxedToolOptions.edit),
-            sdk.createWriteTool(cwd, sandboxedToolOptions.write),
-            createPiSandboxedGrepTool(cwd, this.hostTools!, input.sandboxPolicy!),
-            sdk.createFindTool(cwd, sandboxedToolOptions.find),
-            sdk.createLsTool(cwd, sandboxedToolOptions.ls),
-          ].map((tool) => tool as unknown as ToolDefinition)
-        : sdk.createCodingTools(cwd).map((tool) => tool as unknown as ToolDefinition)
+      const sandboxGrantStorage = new AsyncLocalStorage<AgentSandboxGrant[]>()
+      const currentSandboxGrants = (): AgentSandboxGrant[] => sandboxGrantStorage.getStore() ?? []
+      const sandboxedToolOptions = {
+        ...createPiSandboxedFileToolOptions(this.hostTools, input.sandboxPolicy, currentSandboxGrants),
+        bash: {
+          operations: createPiSandboxedBashOperations(
+            shellEnvironment ?? this.hostTools,
+            input.sandboxPolicy,
+            currentSandboxGrants,
+            join(sdk.getAgentDir(), 'bin'),
+          ),
+        },
+      }
+      const builtinTools = [
+        sdk.createReadTool(cwd, sandboxedToolOptions.read),
+        sdk.createBashTool(cwd, sandboxedToolOptions.bash),
+        sdk.createEditTool(cwd, sandboxedToolOptions.edit),
+        sdk.createWriteTool(cwd, sandboxedToolOptions.write),
+        createPiSandboxedGrepTool(cwd, this.hostTools, input.sandboxPolicy),
+        sdk.createFindTool(cwd, sandboxedToolOptions.find),
+        sdk.createLsTool(cwd, sandboxedToolOptions.ls),
+      ].map((tool) => tool as unknown as ToolDefinition)
+      // 按工具实例的来源声明边界，不能让同名自定义工具借用内置工具的沙箱待遇。
       const tools = [
         ...builtinTools
           .filter((tool) => !allowedBuiltinTools || allowedBuiltinTools.has(displayToolName(tool.name)))
-          .map((tool) => tool as unknown as ToolDefinition),
-        ...(input.customTools ?? []).map(convertCustomTool),
-      ].map((tool) => wrapToolWithPermission(
-        tool, input, active, emit, projectInstructionScope, sandboxGrantStorage,
-      ))
+          .map((tool) => wrapToolWithPermission(
+            tool, input, active, emit, { kind: 'sandbox', mode: input.sandboxPolicy!.mode },
+            projectInstructionScope, sandboxGrantStorage,
+          )),
+        ...(input.customTools ?? []).map((tool) => wrapToolWithPermission(
+          convertCustomTool(tool), input, active, emit,
+          { kind: 'host', permissionMode: tool.permissionMode ?? 'ask' },
+        )),
+      ]
       const supportsDeferredTools = await supportsPiDeferredTools(input.provider, input.model?.trim() || 'default')
       const deferredToolNames = new Set(supportsDeferredTools
         ? (input.customTools ?? []).filter((tool) => tool.isDeferred === true).map((tool) => tool.name)
@@ -1676,9 +1709,27 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     })
   }
 
-  /** 释放所有活跃 runtime；用于应用退出或 adapter 替换。 */
+  /** 同一应用会话跨轮复用环境；工作区改变才释放旧引用并重新初始化。 */
+  private getShellEnvironment(sessionId: string, cwd: string): AgentHostShellEnvironment {
+    const existing = this.shellEnvironments.get(sessionId)
+    if (existing?.cwd === cwd) return existing.environment
+    existing?.environment.dispose()
+    const environment = this.hostTools!.initializeShellEnvironment({ sessionId, cwd })
+    this.shellEnvironments.set(sessionId, { cwd, environment })
+    return environment
+  }
+
+  /** 应用会话结束时释放宿主缓存；查询 finally 只释放单轮 runtime。 */
+  releaseSession(sessionId: string): void {
+    this.shellEnvironments.get(sessionId)?.environment.dispose()
+    this.shellEnvironments.delete(sessionId)
+  }
+
+  /** 释放活跃 runtime 与跨轮宿主环境；用于应用退出或 adapter 替换。 */
   dispose(): void {
     for (const sessionId of this.activeSessions.keys()) this.abort(sessionId)
     this.activeSessions.clear()
+    for (const { environment } of this.shellEnvironments.values()) environment.dispose()
+    this.shellEnvironments.clear()
   }
 }

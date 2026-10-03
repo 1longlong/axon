@@ -52,6 +52,27 @@ async function expectError(action: () => unknown, code: AgentSessionManagerError
 }
 
 describe('AgentSessionManager 会话索引', () => {
+  test('删除落盘后释放主/子会话资源，单独删子会话不影响其他归属；失败监听不影响删除', () => {
+    const sessions = manager()
+    const root = sessions.create()
+    const child = sessions.create({ parentSessionId: root.id, rootSessionId: root.id, parentToolUseId: 'task-1', subagentType: 'coder' })
+    const other = sessions.create({ parentSessionId: root.id, rootSessionId: root.id, parentToolUseId: 'task-2', subagentType: 'explore' })
+    const delivered: string[][] = []
+    sessions.onSessionsDeleted((removed) => {
+      delivered.push(removed.map((item) => item.id))
+      for (const item of removed) expect(sessions.get(item.id)).toBeUndefined()
+    })
+    const unsubscribe = sessions.onSessionsDeleted(() => { throw new Error('缓存释放失败') })
+    expect(sessions.delete(child.id).id).toBe(child.id)
+    expect(sessions.get(other.id)).toBeDefined()
+    expect(delivered).toEqual([[child.id]])
+    unsubscribe()
+    sessions.delete(root.id)
+    expect(delivered).toEqual([[child.id], [root.id, other.id]])
+    expect(() => sessions.delete(root.id)).toThrow()
+    expect(delivered).toHaveLength(2)
+  })
+
   test('runtime 归属与 Zima 思考等级持久化', () => {
     const sessions = manager()
     const pi = sessions.create({ title: 'Pi 会话' })

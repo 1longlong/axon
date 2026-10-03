@@ -150,7 +150,9 @@ export class AgentCollaborationService {
       channelId: parent.channelId,
       modelId: parent.modelId,
       projectId: parent.projectId,
-      sandboxMode: parent.sandboxMode,
+      // 只读角色只继承父边界的收窄版本，Shell 同样不能获得项目写权限。
+      sandboxMode: input.subagentType === 'explore' || input.subagentType === 'plan'
+        ? 'readOnly' : parent.sandboxMode,
       approvalPolicy: parent.approvalPolicy,
       approvalReviewer: parent.approvalReviewer,
       thinkingLevel: parent.thinkingLevel,

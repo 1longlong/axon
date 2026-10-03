@@ -13,6 +13,7 @@ import type {
   AgentQueryInput,
   AgentRunSource,
   AgentRuntimeId,
+  AgentSandboxCapability,
   AgentSandboxPolicy,
   AgentSendInput,
   AgentSessionMeta,
@@ -51,7 +52,7 @@ const MAX_AGENT_INPUT_LENGTH = 100_000
 
 export class AgentServiceError extends Error {
   constructor(
-    readonly code: 'invalid_input' | 'not_found' | 'already_active' | 'queue_full' | 'channel_unavailable' | 'workspace_unavailable' | 'custom_tool_unavailable' | 'persistence_error' | 'runtime_error',
+    readonly code: 'invalid_input' | 'not_found' | 'already_active' | 'queue_full' | 'channel_unavailable' | 'workspace_unavailable' | 'custom_tool_unavailable' | 'persistence_error' | 'sandbox_unavailable' | 'runtime_error',
     message: string,
   ) {
     super(message)
@@ -166,8 +167,11 @@ function assistantText(message: SDKMessage): string | undefined {
   return text || undefined
 }
 
-function allowedSubagentBuiltinTools(type: AgentSubagentType | undefined): string[] | undefined {
-  if (type === 'explore') return ['Read', 'Glob', 'Grep', 'LS', 'Bash']
+/** 只读子 Agent 的 Shell 必须有实际只读沙箱，不能用隐藏写工具代替资源隔离。 */
+function allowedSubagentBuiltinTools(type: AgentSubagentType | undefined, sandboxPolicy?: AgentSandboxPolicy, capability?: AgentSandboxCapability): string[] | undefined {
+  if (type === 'explore') return ['Read', 'Glob', 'Grep', 'LS',
+    ...(sandboxPolicy?.mode === 'readOnly' && capability?.sandboxedTools.includes('bash') ? ['Bash'] : []),
+  ]
   if (type === 'plan') return ['Read', 'Glob', 'Grep', 'LS']
   return undefined
 }
@@ -202,6 +206,9 @@ function normalizeTerminalError(error: unknown, stopped: boolean): AgentTypedErr
   }
   if (error instanceof AgentServiceError && error.code === 'persistence_error') return {
     code: error.code, category: 'persistence', message: error.message, retryable: false,
+  }
+  if (error instanceof AgentServiceError && error.code === 'sandbox_unavailable') return {
+    code: error.code, category: 'runtime', message: error.message, retryable: false,
   }
   return {
     code: error instanceof AgentServiceError ? error.code : 'runtime_error',
@@ -261,7 +268,9 @@ export class AgentService {
       throw new AgentServiceError('runtime_error', error instanceof Error ? error.message : 'Agent Runtime 不可用')
     }
     const executionPolicy: AgentExecutionPolicy = {
-      sandboxMode: session.sandboxMode ?? 'workspaceWrite',
+      // 每轮重新守角色硬边界，已有子会话或设置变化也不能恢复项目写权限。
+      sandboxMode: session.subagentType === 'explore' || session.subagentType === 'plan'
+        ? 'readOnly' : session.sandboxMode ?? 'workspaceWrite',
       approvalPolicy: session.approvalPolicy ?? 'onRequest',
       approvalReviewer: session.approvalReviewer ?? 'user',
     }
@@ -331,9 +340,13 @@ export class AgentService {
       // 先协商 runtime 能否让宿主接管全部工具执行；未明确支持时绝不宣称已启用 OS 沙箱。
       let sandboxPolicy: AgentSandboxPolicy | undefined
       const sandboxCapability = await adapter.getSandboxCapability?.({ platform: 'macos' })
+      if (sandboxCapability?.limitation === 'hostExecutorUnavailable'
+        || sandboxCapability?.limitation === 'platformUnsupported') {
+        throw new AgentServiceError('sandbox_unavailable', '当前宿主沙箱不可用，已拒绝本地工具运行；不会切换为无沙箱执行')
+      }
       if (sandboxCapability && (sandboxCapability.supported || sandboxCapability.sandboxedTools.length > 0)) {
         if (!sandboxCapability.modes.includes(executionPolicy.sandboxMode)) {
-          throw new AgentServiceError('runtime_error', '当前 Runtime 不支持会话选择的沙箱模式')
+          throw new AgentServiceError('sandbox_unavailable', '当前 Runtime 不支持会话选择的沙箱模式')
         }
         sandboxPolicy = buildAgentSandboxPolicy({
           projectRoot: resolvedCwd,
@@ -454,8 +467,8 @@ export class AgentService {
               },
             }
           : {}),
-        ...(allowedSubagentBuiltinTools(session.subagentType)
-          ? { allowedBuiltinTools: allowedSubagentBuiltinTools(session.subagentType) }
+        ...(allowedSubagentBuiltinTools(session.subagentType, sandboxPolicy, sandboxCapability)
+          ? { allowedBuiltinTools: allowedSubagentBuiltinTools(session.subagentType, sandboxPolicy, sandboxCapability) }
           : {}),
         executionPolicy,
         ...(sandboxPolicy ? { sandboxPolicy } : {}),

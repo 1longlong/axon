@@ -1,6 +1,6 @@
 # 常见 LLM 文本生成 API 协议示例
 
-> 协议核对日期：2026-09-01；Axon 完整 Chat 链路验证日期：2026-09-06；Agent 模型调用与自动重试链路记录日期：2026-09-11。本文面向直接 HTTP 集成，示例中的 ID、token 数和响应文本均为教学用虚构数据；为突出协议骨架，省略了许多可选字段。模型 ID 和可用能力会变化，实际调用前应通过对应厂商的模型目录确认。
+> 协议核对日期：2026-09-01；Axon 完整 Chat 链路验证日期：2026-09-06；Axon 实现链路更新日期：2026-10-04（不代表重新核对厂商协议）。本文面向直接 HTTP 集成，示例中的 ID、token 数和响应文本均为教学用虚构数据；为突出协议骨架，省略了许多可选字段。模型 ID 和可用能力会变化，实际调用前应通过对应厂商的模型目录确认。
 
 ## 1. 先理解共同的通信过程
 
@@ -1322,6 +1322,8 @@ User-Agent: Axon/<版本号>
 
 请求层强制 `redirect: "manual"`，限制请求体大小和总生成时间；API Key 只进入 header，不进入 URL、日志或错误消息。
 
+普通 Chat 不读取 Agent 设置中的系统提示词。未摘要时，请求仅携带有效历史和当前输入；已有历史摘要时，`ChatService` 把摘要作为 `systemPrompt` 传给 Provider，由协议适配器编码为 system 消息。自动标题和摘要生成是另外的内部模型请求，使用各自固定指令，不改变普通对话的提示词设置。
+
 ### 13.5 从供应商 SSE 到中立事件
 
 供应商可能分三帧返回 Markdown 正文：
@@ -1600,6 +1602,8 @@ bun run test:chat:smoke
 
 Agent 和普通 Chat 的最大区别是：一条用户消息可能在同一轮内发生多次模型 API 调用。模型先请求工具，runtime 执行后把 `tool_result` 加回上下文，再请求模型继续。
 
+本节以当前 Pi adapter 为例；runtime 事件名与重试参数不代表 Zima 的实现。Pi 使用 `SettingsManager.inMemory()`，不读取 Pi CLI 个人重试配置；当前 Axon 没有独立的 Agent 重试次数设置。
+
 ### 14.1 完整模块链路
 
 ```text
@@ -1805,7 +1809,7 @@ renderer 据此删除失败的流式草稿，并显示“模型请求暂时失�
 
 runtime 重试时只移除失败 assistant，保留此前已经提交的 `tool_result`，然后执行 `continue()`。因此上例中的 `read` 不会再次执行；新的模型请求直接携带已经得到的文件内容。
 
-默认语义重试最多 3 次，退避为 2、4、8 秒。每当某次模型调用成功时，计数清零，所以下一处独立的模型请求错误重新从第 1 次开始计算。当前没有叠加低层 Provider 请求重试，避免两层次数相乘。
+当前 Pi SDK 的默认语义重试最多 3 次，退避为 2、4、8 秒。每当某次模型调用成功时，计数清零，所以下一处独立的模型请求错误重新从第 1 次开始计算。当前配置未额外开启低层 Provider 重试（默认 `maxRetries = 0`），AgentService 也不叠加重试。
 
 ### 14.5 为什么只有 `agent_settled` 能生成 result
 
@@ -1840,7 +1844,7 @@ agent_end(willRetry=true)
 
 这里的 usage 累计本轮所有 prompt/continue 段，包括已经计费用量的失败模型调用；但整轮只有一个 result。
 
-### 14.6 重试耗尽与不可重试错误
+### 14.6 重试耗尽与终态错误分类
 
 重试耗尽后的 503 会转换为稳定错误，不保存原始 Provider body：
 
@@ -1864,7 +1868,7 @@ agent_end(willRetry=true)
 }
 ```
 
-认证错误不会等待重试：
+明确认证错误对应的终态分类如下；这份 DTO 不负责调度重试：
 
 ```json
 {
@@ -1875,21 +1879,27 @@ agent_end(willRetry=true)
 }
 ```
 
-当前最终分类包括：
+当前终态分类如下，最后一列是 UI 收到的 `retryable` 标记，不是 runtime 重试决策表：
 
-| 类型 | code | runtime 自动重试 |
+| 类型 | code | 终态 retryable |
 | --- | --- | --- |
-| 网络、DNS、超时、流提前结束 | `network_error` | 是 |
+| 笼统连接失败、临时 DNS、超时、流提前结束 | `network_error` | 是 |
 | 429、限流、节流 | `provider_rate_limited` | 是 |
 | 5xx、过载、服务不可用 | `provider_unavailable` | 是 |
 | API Key、401/403、访问权限 | `provider_authentication_error` | 否 |
 | 额度、余额、账单 | `provider_quota_exhausted` | 否 |
 | 模型不存在或无权访问 | `provider_model_not_found` | 否 |
 | 404、服务地址或路由不存在 | `provider_endpoint_not_found` | 否 |
+| 明确永久域名解析失败，如 ENOTFOUND | `provider_endpoint_not_found` | 否 |
 | 内容/安全策略拒绝 | `provider_content_rejected` | 否 |
 | 请求参数或协议不兼容 | `provider_request_invalid` | 否 |
 | 上下文超限且压缩恢复失败 | `context_overflow` | 否 |
 | 无法解析 Provider 响应 | `protocol_error` | 否 |
+| 未识别的 Provider 错误 | `provider_error` | 否 |
+
+实际顺序是 `AssistantMessage 错误 → Pi 自身重试/压缩判断 → agent_settled → createPiTypedError → 中立 result/UI`。`createPiTypedError()` 不修改原错误，也不覆盖 Pi 的重试判断。例如 Pi 自身允许重试含 `ENOTFOUND` 的错误，耗尽后 Axon 仍会把它分类为配置错误并标记 `retryable: false`，两者不矛盾。
+
+只有 `Connection error` 时，无法从文字区分并发限制、网络抖动或地址配置问题；当前按网络错误处理。429 等明确证据才能归类限流，不能用“此渠道以前成功过”替代错误证据。
 
 ### 14.7 最终的 JSONL 与消息列表
 
@@ -1918,10 +1928,90 @@ renderer 在运行时把完整 JSONL 消息与内存 delta 合并；自动重试
 - 用户消息必须先成功写入 Axon JSONL，才允许创建模型请求。
 - 工具权限拒绝以工具错误结果回给模型，不等同于 Provider 请求失败。
 - Provider 错误只由 runtime 在当前模型调用位置自动恢复；AgentService 不重投原始用户 prompt。
-- 认证、额度、参数、内容策略与上下文错误不会套用网络/5xx 重试。
+- runtime 按其原始错误规则决定重试；最终 `retryable` 不反向控制该决策，也不表示 Axon 提供整轮重新运行入口。
+- 普通工具失败不会自动重放；宿主明确返回沙箱升级请求且用户批准时，仅携带精确 Grant 重跑同一次调用，不重新发送整轮 prompt。命令可能已产生部分副作用，审批必须说明这一点。
 - 上下文超限走 runtime 压缩恢复，不占用普通 Provider 重试预算。
 - 上下文超限的失败 assistant 会一直暂存到 `agent_settled`；如果 runtime 开始 overflow 压缩，adapter 只发送 `discard_assistant` 清理 UI 草稿，不把该错误写入 JSONL。
 - 用户在退避等待中停止时，最终结果强制为 `terminal_reason: "stopped"`。
 - 用户在 runtime 初始化完成前停止时，adapter 直接输出 stopped result，且不会在 abort 之后继续调用 `prompt()` 或发起 Provider 请求。
 - adapter/runtime 初始化异常归为不可重试的 runtime 错误，不能伪装成 Provider 抖动。
 - 任何 API Key、Authorization、完整错误 body 和未经脱敏的 `errorMessage` 都不得进入 renderer、JSONL 或普通日志。
+
+## 15. Axon Pi Bash 的宿主执行与 Shell 快照
+
+### 15.1 从模型命令到宿主请求
+
+模型调用 Bash 的参数仍然只有业务命令，例如：
+
+```json
+{
+  "command": "go version"
+}
+```
+
+调用顺序为 `Pi Bash → 权限判断 → createPiSandboxedBashOperations().exec() → 宿主 executeShellCommand() → Seatbelt → 工具结果 → Pi 下一次模型请求`。adapter 不生成 Shell 包装或 Seatbelt profile；它把原始命令、可信 cwd 和当前授权转换为中立宿主请求。以下是省略环境细节及不可 JSON 化回调的示例：
+
+```json
+{
+  "command": "go version",
+  "cwd": "/absolute/project/workspace",
+  "policy": {
+    "platform": "macos",
+    "mode": "workspaceWrite",
+    "workingDirectory": "/absolute/project/workspace",
+    "readAccess": { "type": "fullAccess" },
+    "writableRoots": ["/absolute/project/workspace"],
+    "protectedReadOnlyRoots": ["/absolute/project/workspace/.git"],
+    "networkAccess": false
+  },
+  "grants": [],
+  "timeoutMs": 120000
+}
+```
+
+真实请求还可携带 `environment`（SDK 初始环境）、`environmentOverrides`（显式差异，`undefined` 表示删除，不能用 JSON 完整表达）和 `pathPrepend`（runtime 管理工具目录）。区分三者是为了避免 GUI 进程旧 PATH 覆盖已恢复的用户 PATH，同时保留本轮显式覆盖。宿主受控临时目录在恢复后仍优先。
+
+### 15.2 预热、选择与执行
+
+Pi 首次查询在加载 runtime 前创建宿主会话环境，立即异步预热；同一 cwd 的后续轮次复用引用。预热启动账户 Shell，读取启动配置，捕获导出变量、函数、别名和选项；独立加载验证后原子发布为私有文件。这一步不套模型工具沙箱，不调用模型 API，也不把内容写入消息历史。
+
+文件位于应用数据目录的 `shell_snapshots/<sessionId>-<uuid>.sh`，开发目录为 `~/.axon-dev/`，正式目录为 `~/.axon/`；发布前临时文件追加 `.tmp`。目录权限为 `0700`、文件为 `0600`。导出变量可能含凭据，文件不是脱敏数据或会话备份，不应上传。
+
+工具不等待预热。仅当快照就绪、文件存在、cwd/解释器一致且原 argv 使用 `-lc` 时加载；否则保留登录执行路线。以 zsh 为例，未命中时的 argv 为：
+
+```json
+["/bin/zsh", "-lc", "go version"]
+```
+
+命中后，宿主用非登录包装 Shell 静音加载快照，恢复显式覆盖、临时目录和管理工具目录，再 `exec /bin/zsh -c 'go version'`。包装 Shell 和最终命令在同一次 Seatbelt 限制内；规则、审批及错误归因始终使用原始 `go version`，不使用内部包装串。
+
+文件缺失等可恢复加载失败采用 best-effort 继续执行；不保证外部任意损坏脚本也能回退。当前初始化环境继承 Axon 进程，没有独立的环境过滤配置。普通 exec 路线不保证 alias/函数保留，也不把某次调用的 `export` 或 `cd` 写回初始化快照；它不是常驻终端。
+
+### 15.3 执行结果、精确审批与生命周期
+
+stdout/stderr 由宿主回传 Pi，再成为工具结果；Pi 后续模型请求消费结果。对于写入工作区外文件的命令，宿主支持以下两种明确 OS 拒绝格式：
+
+```json
+[
+  { "stderr": "zsh:1: operation not permitted: /absolute/outside/result.txt" },
+  { "stderr": "/bin/bash: /absolute/outside/result.txt: Operation not permitted" }
+]
+```
+
+解析器排除程序与行号前缀，提取真正目标路径；策略确认需要额外写权限时，转换为结构化升级请求。用户批准后，仅重跑同一次命令并携带对应 Grant。缺少明确拒绝证据的通用连接错误不推测为网络沙箱拒绝。
+
+会话删除、cwd 改变或应用退出会释放引用、取消预热并删除自有文件；根会话删除包含子会话。初始化异步清理无归属或归属会话超过三天不活跃的遗留普通文件，仅查看会话 `updatedAt` 与文件元数据，排除在途及活跃引用，不读取快照正文。重启后重新预热，不把旧缓存作为永久会话状态。
+
+以上 Shell 快照链路仅适用于具有可用宿主沙箱的 Pi；宿主不可用时拒绝本轮，不回退原生工具。Zima 未接入此执行层，其 Bash、Write/Edit 等副作用工具先等待普通人工审批，不携带或申请宿主沙箱 Grant。
+
+工具调用的授权来自 adapter 根据实际执行实例填写的中立元信息，不属于模型请求参数。例如，同样是 `Bash`：
+
+```json
+[
+  { "toolName": "Bash", "toolExecution": { "kind": "sandbox", "mode": "workspaceWrite" } },
+  { "toolName": "Bash", "toolExecution": { "kind": "runtime" } },
+  { "toolName": "Bash", "toolExecution": { "kind": "host", "permissionMode": "ask" } }
+]
+```
+
+第一项允许先在匹配模式的实际沙箱中尝试，后两项需要普通审批。模型参数中伪造 `toolExecution` 或工具名不改变该判断。explore/plan 创建及每轮运行都采用只读策略：explore 的 Bash 只在宿主明确覆盖该工具时开放；写项目文件被拦截后直接返回错误工具结果，不申请升级或复用历史 Grant，下一次模型请求消费该失败信息继续处理。

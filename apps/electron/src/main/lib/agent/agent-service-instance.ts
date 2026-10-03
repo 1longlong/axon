@@ -81,11 +81,20 @@ export function getAgentEventBus(): AgentEventBus {
 /** 生产环境唯一的 runtime 路由入口；查询能力与真正执行必须落到同一个 adapter。 */
 export function getAgentProviderAdapter(runtimeId: AgentRuntimeId): AgentProviderAdapter {
   if (!adapter) {
-    sandboxCommandService ??= new AgentSandboxCommandService()
+    sandboxCommandService ??= new AgentSandboxCommandService({
+      getShellSessionActivity: () => new Map(getAgentSessionManager().list().map((session) => [session.id, session.updatedAt])),
+    })
     adapter = new PiAgentAdapter(
       undefined,
-      sandboxCommandService.getCapability().available ? sandboxCommandService : undefined,
+      sandboxCommandService,
     )
+    // 只通知已经创建的 adapter，不为删除操作初始化 runtime 或读取其个人配置。
+    getAgentSessionManager().onSessionsDeleted((sessions) => {
+      for (const session of sessions) {
+        const owner: AgentProviderAdapter | null = session.runtimeId === 'pi' ? adapter : zimaAdapter
+        owner?.releaseSession?.(session.id)
+      }
+    })
   }
   if (runtimeId === 'pi') return adapter
   // 开发环境必须显式指定受控虚拟环境解释器，不能退回 PATH 或在线安装。

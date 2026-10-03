@@ -606,6 +606,7 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
             signal: input.abortSignal,
             toolUseId: toolCallId,
             executionPolicy: run.executionPolicy,
+            toolExecution: { kind: 'runtime' },
           })
           : { behavior: 'deny', message: '当前会话没有工具授权能力' }
       } catch {
@@ -627,7 +628,22 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
       let result: Awaited<ReturnType<AgentCustomToolDefinition['execute']>>
       try {
         if (!tool || input.abortSignal?.aborted) throw new Error('宿主工具不可用或运行已停止')
-        result = await tool.execute(args, { signal: input.abortSignal, toolUseId: toolCallId })
+        // 宿主工具不经过 runtime 内置审批事件，必须在执行前独立守住同一权限边界。
+        const decision = input.canUseTool
+          ? await input.canUseTool(name, args, {
+              signal: input.abortSignal, toolUseId: toolCallId,
+              executionPolicy: run.executionPolicy,
+              toolExecution: { kind: 'host', permissionMode: tool.permissionMode ?? 'ask' },
+            })
+          : tool.permissionMode === 'managed'
+            ? { behavior: 'allow' as const }
+            : { behavior: 'deny' as const, message: '当前会话没有工具授权能力' }
+        if (input.abortSignal?.aborted) return
+        result = decision.behavior === 'allow'
+          ? await tool.execute('updatedInput' in decision ? decision.updatedInput ?? args : args, {
+              signal: input.abortSignal, toolUseId: toolCallId,
+            })
+          : { content: decision.message ?? '用户拒绝了工具执行', isError: true }
       } catch {
         result = { content: '宿主工具执行失败', isError: true }
       }

@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { resolve } from 'node:path'
 import type {
   AgentCustomToolDefinition,
   AgentHostToolExecutionPort,
-  AgentSandboxCommandRequest,
+  AgentSandboxShellCommandRequest,
   AgentSandboxPolicy,
   SDKAssistantMessage,
   SDKMessage,
@@ -45,7 +46,19 @@ const SANDBOX_POLICY: AgentSandboxPolicy = {
 function hostToolPort(
   overrides: Partial<AgentHostToolExecutionPort> = {},
 ): AgentHostToolExecutionPort {
-  return {
+  const port: AgentHostToolExecutionPort = {
+    getSandboxCapability: () => ({
+      supported: true, modes: ['readOnly', 'workspaceWrite'],
+      sandboxedTools: ['bash', 'read', 'write', 'edit', 'grep', 'glob', 'ls'],
+    }),
+    initializeShellEnvironment: () => ({
+      executeShellCommand: (request, handlers) => port.executeShellCommand(request, handlers),
+      dispose: () => {},
+    }),
+    executeShellCommand: async () => ({
+      exitCode: 0, timedOut: false, aborted: false, stdout: '', stderr: '',
+      stdoutTruncated: false, stderrTruncated: false,
+    }),
     executeCommand: async () => ({
       exitCode: 0, timedOut: false, aborted: false, stdout: '', stderr: '',
       stdoutTruncated: false, stderrTruncated: false,
@@ -62,6 +75,7 @@ function hostToolPort(
     detectImageMimeType: async () => undefined,
     ...overrides,
   }
+  return port
 }
 
 describe('Agent 模型思考能力', () => {
@@ -115,12 +129,32 @@ describe('Agent 模型思考能力', () => {
 })
 
 describe('Pi Bash 宿主委托', () => {
-  test('只在 adapter 边界把命令翻译为绝对 shell argv，并保留流、环境、超时和取消', async () => {
-    let received: AgentSandboxCommandRequest | undefined
+  test('SDK 完整环境与运行时 PATH 前缀被拆开，继承值不变成显式覆盖', async () => {
+    let received: AgentSandboxShellCommandRequest | undefined
+    const bin = '/tmp/pi-managed-bin'
+    const operations = createPiSandboxedBashOperations(hostToolPort({
+      executeShellCommand: async (request) => {
+        received = request
+        return { exitCode: 0, timedOut: false, aborted: false, stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false }
+      },
+    }), SANDBOX_POLICY, undefined, bin)
+    const env = { ...process.env, PATH: [bin, process.env.PATH].filter(Boolean).join(':'), AXON_TEST_EXPLICIT: '覆盖', PI_MODEL: 'current-model' }
+    await operations.exec('true', '/tmp/project', { onData: () => {}, env })
+    expect(received?.environment?.PATH).toBe(env.PATH)
+    expect(received?.pathPrepend).toEqual([bin])
+    expect(received?.environmentOverrides).not.toHaveProperty('PATH')
+    expect(received?.environmentOverrides).toMatchObject({ AXON_TEST_EXPLICIT: '覆盖', PI_MODEL: 'current-model', PI_SESSION_FILE: undefined })
+    await operations.exec('true', '/tmp/project', { onData: () => {}, env: { ...env, PATH: '/explicit/bin' } })
+    expect(received?.environmentOverrides?.PATH).toBe('/explicit/bin')
+    expect(received?.pathPrepend).toBeUndefined()
+  })
+
+  test('adapter 只提交原始 Shell 命令，并保留流、环境、超时和取消', async () => {
+    let received: AgentSandboxShellCommandRequest | undefined
     const output: string[] = []
     const controller = new AbortController()
     const operations = createPiSandboxedBashOperations(hostToolPort({
-      executeCommand: async (request, handlers) => {
+      executeShellCommand: async (request, handlers) => {
         received = request
         handlers?.onStdout?.('标准输出')
         handlers?.onStderr?.('错误输出')
@@ -138,7 +172,7 @@ describe('Pi Bash 宿主委托', () => {
       env: { AXON_TEST: '1' },
     })).toEqual({ exitCode: 0 })
     expect(received).toMatchObject({
-      argv: ['/bin/zsh', '-lc', 'printf ok'],
+      command: 'printf ok',
       cwd: '/tmp/project',
       policy: SANDBOX_POLICY,
       grants: [],
@@ -146,6 +180,7 @@ describe('Pi Bash 宿主委托', () => {
       environment: { AXON_TEST: '1' },
       abortSignal: controller.signal,
     })
+    expect(received).not.toHaveProperty('argv')
     expect(output).toEqual(['标准输出', '错误输出'])
   })
 
@@ -155,13 +190,13 @@ describe('Pi Bash 宿主委托', () => {
       stdoutTruncated: false, stderrTruncated: false,
     })
     const timeout = createPiSandboxedBashOperations(hostToolPort({
-      executeCommand: async () => result(true, false),
+      executeShellCommand: async () => result(true, false),
     }), SANDBOX_POLICY)
     await expect(timeout.exec('sleep 5', '/tmp/project', { onData: () => {}, timeout: 3 }))
       .rejects.toThrow('timeout:3')
 
     const aborted = createPiSandboxedBashOperations(hostToolPort({
-      executeCommand: async () => result(false, true),
+      executeShellCommand: async () => result(false, true),
     }), SANDBOX_POLICY)
     await expect(aborted.exec('sleep 5', '/tmp/project', { onData: () => {} }))
       .rejects.toThrow('aborted')
@@ -559,6 +594,7 @@ function createRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarne
     dispose() { state.disposed = true },
   }
   const runtime = {
+    getAgentDir: () => '/tmp/pi-test-agent',
     ModelRuntime: {
       async create() {
         return {
@@ -581,9 +617,13 @@ function createRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarne
       async reload() {}
     },
     createCodingTools() { return [] },
-    createReadTool(_cwd: string, toolOptions?: unknown) {
+    createReadTool(cwd: string, toolOptions?: {
+      operations?: { readFile(path: string): Promise<Buffer> }
+    }) {
       state.sandboxedToolOptionsSeen ||= Boolean(toolOptions)
-      return { name: 'read', execute: async () => ({ content: [] }) }
+      return { name: 'read', execute: async (_id: string, input: { path: string }) => ({
+        content: [{ type: 'text', text: (await toolOptions?.operations?.readFile(resolve(cwd, input.path)))?.toString() ?? '' }],
+      }) }
     },
     createBashTool(cwd: string, toolOptions?: {
       operations?: {
@@ -639,19 +679,123 @@ function createRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarne
 }
 
 describe('PiAgentAdapter 查询主链', () => {
+  test('缺少宿主、探测失败或策略缺失/不一致时，在加载 SDK 前拒绝，不使用原生工具回退', async () => {
+    const harness = createRuntimeHarness()
+    let loads = 0
+    let initializations = 0
+    const load = async () => { loads += 1; return harness.load() }
+    const port = hostToolPort({
+      initializeShellEnvironment: () => { initializations += 1; throw new Error('不应预热') },
+    })
+    const unavailable = hostToolPort({
+      getSandboxCapability: () => ({ supported: false, modes: [], sandboxedTools: [], limitation: 'hostExecutorUnavailable' }),
+    })
+    const input: PiAgentQueryOptions = {
+      sessionId: 'blocked', prompt: '执行', model: 'test-model', apiKey: 'secret',
+      baseUrl: 'https://example.test', provider: 'openai', systemPrompt: '',
+      executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY,
+      runtimeAgentDir: '/tmp/axon-blocked-agent', runtimeSessionDir: '/tmp/axon-blocked-sessions',
+    }
+    const cases = [
+      { adapter: new PiAgentAdapter(load), input },
+      { adapter: new PiAgentAdapter(load, unavailable), input },
+      { adapter: new PiAgentAdapter(load, port), input: { ...input, sandboxPolicy: undefined } },
+      { adapter: new PiAgentAdapter(load, port), input: { ...input, sandboxPolicy: { ...SANDBOX_POLICY, mode: 'readOnly' as const } } },
+    ]
+    for (const scenario of cases) {
+      try {
+        await expect((async () => { for await (const _event of scenario.adapter.query(scenario.input)) {} })())
+          .rejects.toThrow('当前运行已拒绝')
+      } finally { scenario.adapter.dispose() }
+    }
+    expect(loads).toBe(0)
+    expect(initializations).toBe(0)
+  })
+
+  test('会话环境在加载 runtime 前预热，无 Bash 的多轮查询也只初始化一次，cwd 改变才释放', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const directory = mkdtempSync(join(tmpdir(), 'axon-pi-shell-environment-'))
+    const harness = createRuntimeHarness()
+    const events: string[] = []
+    const port = hostToolPort({
+      initializeShellEnvironment: ({ sessionId, cwd }) => {
+        events.push(`initialize:${sessionId}:${cwd}`)
+        return {
+          executeShellCommand: (request, handlers) => port.executeShellCommand(request, handlers),
+          dispose: () => { events.push(`dispose:${cwd}`) },
+        }
+      },
+    })
+    const adapter = new PiAgentAdapter(async () => {
+      events.push('load')
+      return harness.load()
+    }, port)
+    const query: PiAgentQueryOptions = {
+      sessionId: 'prewarm', prompt: 'hi', model: 'test-model',
+      apiKey: 'secret', baseUrl: 'https://example.test/v1', provider: 'openai',
+      cwd: directory, systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY,
+      sandboxPolicy: { ...SANDBOX_POLICY, workingDirectory: directory },
+      runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
+    }
+    try {
+      for await (const _payload of adapter.query(query)) {}
+      for await (const _payload of adapter.query(query)) {}
+      expect(events).toEqual([`initialize:prewarm:${directory}`, 'load', 'load'])
+      // 每轮 runtime 都释放，但宿主环境仍由应用会话持有。
+      expect(harness.state.disposed).toBe(true)
+      for await (const _payload of adapter.query({ ...query, cwd: join(directory, 'other') })) {}
+      expect(events.slice(-3)).toEqual([`dispose:${directory}`, `initialize:prewarm:${join(directory, 'other')}`, 'load'])
+      adapter.releaseSession('prewarm')
+      expect(events.at(-1)).toBe(`dispose:${join(directory, 'other')}`)
+      const countAfterRelease = events.length
+      adapter.releaseSession('prewarm')
+      expect(events).toHaveLength(countAfterRelease)
+      for await (const _payload of adapter.query(query)) {}
+      expect(events.slice(-2)).toEqual([`initialize:prewarm:${directory}`, 'load'])
+      adapter.dispose()
+      expect(events.at(-1)).toBe(`dispose:${directory}`)
+    } finally { adapter.dispose(); rmSync(directory, { recursive: true, force: true }) }
+  })
+
+  test('进入查询前已经取消时不启动宿主初始化', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const directory = mkdtempSync(join(tmpdir(), 'axon-pi-shell-cancel-'))
+    let initialized = false
+    const adapter = new PiAgentAdapter(createRuntimeHarness().load, hostToolPort({
+      initializeShellEnvironment: () => { initialized = true; throw new Error('不应初始化') },
+    }))
+    const controller = new AbortController()
+    controller.abort()
+    const query: PiAgentQueryOptions = {
+      sessionId: 'cancel', prompt: 'hi', model: 'test-model', apiKey: 'secret', provider: 'openai',
+      baseUrl: 'https://example.test/v1', systemPrompt: '测试',
+      cwd: directory, executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY,
+      abortSignal: controller.signal,
+      runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
+    }
+    try {
+      for await (const _payload of adapter.query(query)) {}
+      expect(initialized).toBe(false)
+    } finally { adapter.dispose(); rmSync(directory, { recursive: true, force: true }) }
+  })
+
   test('泛化连接错误只做终态归类，不覆盖 runtime 自身的重试设置', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs')
     const { tmpdir } = await import('node:os')
     const { join } = await import('node:path')
     const directory = mkdtempSync(join(tmpdir(), 'axon-pi-connection-error-'))
     const harness = createRuntimeHarness({ errorMessage: 'Connection error.' })
-    const adapter = new PiAgentAdapter(harness.load)
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort())
     try {
       const payloads = []
       const query: PiAgentQueryOptions = {
         sessionId: 'connection-error', prompt: '继续', model: 'test-model',
         apiKey: 'secret', baseUrl: 'https://example.test/v1', provider: 'openai',
-        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY,
+        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [],
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
       }
       for await (const payload of adapter.query(query)) payloads.push(payload)
@@ -700,6 +844,10 @@ describe('PiAgentAdapter 查询主链', () => {
         sessionId: 'sandboxed-tools', prompt: '搜索', model: 'test-model',
         apiKey: 'secret', baseUrl: 'https://example.test/v1', provider: 'openai',
         cwd: directory, systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy,
+        canUseTool: async (_name, _input, permission) => {
+          expect(permission.toolExecution).toEqual({ kind: 'sandbox', mode: 'workspaceWrite' })
+          return { behavior: 'allow' }
+        },
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
       }
       for await (const _payload of adapter.query(query)) {}
@@ -794,7 +942,7 @@ describe('PiAgentAdapter 查询主链', () => {
       message: '命令的网络访问被基础沙箱拒绝',
     })
     const adapter = new PiAgentAdapter(harness.load, hostToolPort({
-      executeCommand: async (request) => {
+      executeShellCommand: async (request) => {
         receivedGrants.push(request.grants)
         if (request.grants.length === 0) throw escalation
         return {
@@ -840,13 +988,13 @@ describe('PiAgentAdapter 查询主链', () => {
     const { tmpdir } = await import('node:os')
     const { join } = await import('node:path')
     const directory = mkdtempSync(join(tmpdir(), 'axon-pi-compaction-status-'))
-    const adapter = new PiAgentAdapter(createRuntimeHarness({ emitCompaction: true }).load)
+    const adapter = new PiAgentAdapter(createRuntimeHarness({ emitCompaction: true }).load, hostToolPort())
     try {
       const payloads = []
       const query: PiAgentQueryOptions = {
         sessionId: 'compaction-session', prompt: '继续', model: 'test-model',
         apiKey: 'secret', baseUrl: 'https://example.test/v1', provider: 'openai',
-        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY,
+        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [],
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
       }
       for await (const payload of adapter.query(query)) payloads.push(payload)
@@ -884,12 +1032,12 @@ describe('PiAgentAdapter 查询主链', () => {
       executeTool: 'tool_search',
       toolInput: { query: 'github repository' },
     })
-    const adapter = new PiAgentAdapter(harness.load)
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort())
     try {
       const query: PiAgentQueryOptions = {
         sessionId: 'tool-search-session', prompt: '查询问题', model: 'gpt-5.4',
         apiKey: 'secret', baseUrl: 'https://api.openai.com/v1', provider: 'openai-responses',
-        systemPrompt: '测试延迟工具', executionPolicy: DEFAULT_EXECUTION_POLICY,
+        systemPrompt: '测试延迟工具', executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [],
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
         customTools: [deferredTool, createAgentToolSearchTool([deferredTool])],
       }
@@ -919,12 +1067,12 @@ describe('PiAgentAdapter 查询主链', () => {
       isDeferred: true, execute: async () => ({ content: 'ok' }),
     } satisfies AgentCustomToolDefinition
     const harness = createRuntimeHarness({ executeTool: 'tool_search', toolInput: { query: 'github' } })
-    const adapter = new PiAgentAdapter(harness.load)
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort())
     try {
       const query: PiAgentQueryOptions = {
         sessionId: 'anthropic-tool-search', prompt: '查询问题', model: 'claude-sonnet-4-6',
         apiKey: 'secret', baseUrl: 'https://api.anthropic.com', provider: 'anthropic',
-        systemPrompt: '测试延迟工具', executionPolicy: DEFAULT_EXECUTION_POLICY,
+        systemPrompt: '测试延迟工具', executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [],
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
         customTools: [deferredTool, createAgentToolSearchTool([deferredTool])],
       }
@@ -946,11 +1094,11 @@ describe('PiAgentAdapter 查询主链', () => {
     const directory = mkdtempSync(join(tmpdir(), 'axon-pi-deepseek-'))
     const harness = createRuntimeHarness()
     try {
-      const adapter = new PiAgentAdapter(harness.load)
+      const adapter = new PiAgentAdapter(harness.load, hostToolPort())
       const query: PiAgentQueryOptions = {
         sessionId: 'deepseek-session', prompt: '你好', model: 'deepseek-v4-pro',
         apiKey: 'test', baseUrl: 'https://example.test', provider: 'anthropic-compatible',
-        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY, thinkingLevel: 'xhigh',
+        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [], thinkingLevel: 'xhigh',
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
       }
       for await (const _payload of adapter.query(query)) { /* 创建资源加载器后再检查扩展。 */ }
@@ -974,11 +1122,11 @@ describe('PiAgentAdapter 查询主链', () => {
     const directory = mkdtempSync(join(tmpdir(), 'axon-pi-thinking-'))
     const harness = createRuntimeHarness()
     try {
-      const adapter = new PiAgentAdapter(harness.load)
+      const adapter = new PiAgentAdapter(harness.load, hostToolPort())
       const query: PiAgentQueryOptions = {
         sessionId: 'thinking-session', prompt: '你好', model: 'gpt-5.6-smoke',
         apiKey: 'test', baseUrl: 'https://example.test/v1', provider: 'openai-responses',
-        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY, thinkingLevel: 'minimal',
+        systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [], thinkingLevel: 'minimal',
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
       }
       for await (const _payload of adapter.query(query)) { /* 消费完整查询流，断言注册结果。 */ }
@@ -998,7 +1146,7 @@ describe('PiAgentAdapter 查询主链', () => {
     const { join } = await import('node:path')
     const directory = mkdtempSync(join(tmpdir(), 'axon-pi-query-'))
     const harness = createRuntimeHarness()
-    const adapter = new PiAgentAdapter(harness.load)
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort())
     const sessions: Array<{ id: string; file?: string }> = []
     try {
       const payloads = []
@@ -1010,7 +1158,7 @@ describe('PiAgentAdapter 查询主链', () => {
         baseUrl: 'https://example.test/v1',
         provider: 'openai',
         systemPrompt: '你是工程助手',
-        executionPolicy: DEFAULT_EXECUTION_POLICY,
+        executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [],
         thinkingLevel: 'xhigh',
         runtimeAgentDir: join(directory, 'agent'),
         runtimeSessionDir: join(directory, 'sessions'),
@@ -1052,7 +1200,7 @@ describe('PiAgentAdapter 查询主链', () => {
     mkdirSync(join(directory, 'sessions'), { recursive: true })
     writeFileSync(artifact, '{}\n')
     const harness = createRuntimeHarness()
-    const adapter = new PiAgentAdapter(harness.load)
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort())
     try {
       const query: PiAgentQueryOptions = {
         sessionId: 'app-session-1',
@@ -1062,7 +1210,7 @@ describe('PiAgentAdapter 查询主链', () => {
         baseUrl: 'https://example.test/v1',
         provider: 'openai-responses',
         systemPrompt: '继续任务',
-        executionPolicy: DEFAULT_EXECUTION_POLICY,
+        executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [],
         runtimeAgentDir: join(directory, 'agent'),
         runtimeSessionDir: join(directory, 'sessions'),
         resumeSessionId: 'runtime-session-1',
@@ -1076,13 +1224,36 @@ describe('PiAgentAdapter 查询主链', () => {
     }
   })
 
+  test('同名自定义 Read 在缺少授权能力时拒绝执行，不借用内置读取权限', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const directory = mkdtempSync(join(tmpdir(), 'axon-pi-custom-read-'))
+    const harness = createRuntimeHarness({ executeTool: 'read' })
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort())
+    let executions = 0
+    try {
+      const query: PiAgentQueryOptions = {
+        sessionId: 'no-auth', prompt: '读文件', model: 'test-model', apiKey: 'secret',
+        baseUrl: 'https://example.test/v1', provider: 'openai', systemPrompt: '',
+        executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [],
+        runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
+        customTools: [{ name: 'read', description: '自定义读取', inputSchema: { type: 'object' },
+          execute: async () => { executions += 1; return { content: '不应执行' } } }],
+      }
+      for await (const _payload of adapter.query(query)) {}
+      expect(executions).toBe(0)
+      expect(harness.state.toolResult).toMatchObject({ isError: true, content: [{ text: '当前会话没有工具授权能力' }] })
+    } finally { adapter.dispose(); rmSync(directory, { recursive: true, force: true }) }
+  })
+
   test('权限拒绝时不执行自定义工具，并输出 permission_denied 系统消息', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs')
     const { tmpdir } = await import('node:os')
     const { join } = await import('node:path')
     const directory = mkdtempSync(join(tmpdir(), 'axon-pi-permission-'))
     const harness = createRuntimeHarness({ executeTool: 'lookup' })
-    const adapter = new PiAgentAdapter(harness.load)
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort())
     let executions = 0
     const query: PiAgentQueryOptions = {
       sessionId: 'app-session-1',
@@ -1092,7 +1263,7 @@ describe('PiAgentAdapter 查询主链', () => {
       baseUrl: 'https://example.test/v1',
       provider: 'custom',
       systemPrompt: '测试工具',
-      executionPolicy: DEFAULT_EXECUTION_POLICY,
+      executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [],
       runtimeAgentDir: join(directory, 'agent'),
       runtimeSessionDir: join(directory, 'sessions'),
       canUseTool: async () => ({ behavior: 'deny', message: '本次不允许' }),
@@ -1126,7 +1297,7 @@ describe('PiAgentAdapter 查询主链', () => {
     const { join } = await import('node:path')
     const directory = mkdtempSync(join(tmpdir(), 'axon-pi-updated-input-'))
     const harness = createRuntimeHarness({ executeTool: 'read' })
-    const adapter = new PiAgentAdapter(harness.load)
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort())
     let received: Record<string, unknown> | undefined
     const query: PiAgentQueryOptions = {
       sessionId: 'app-session-1',
@@ -1136,12 +1307,13 @@ describe('PiAgentAdapter 查询主链', () => {
       baseUrl: 'https://example.test',
       provider: 'anthropic-compatible',
       systemPrompt: '测试权限参数',
-      executionPolicy: DEFAULT_EXECUTION_POLICY,
+      executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [],
       runtimeAgentDir: join(directory, 'agent'),
       runtimeSessionDir: join(directory, 'sessions'),
       canUseTool: async (_name, input, permission) => {
         expect(input.file_path).toBe('before.txt')
         expect(permission.executionPolicy).toEqual(DEFAULT_EXECUTION_POLICY)
+        expect(permission.toolExecution).toEqual({ kind: 'host', permissionMode: 'ask' })
         return { behavior: 'allow', updatedInput: { file_path: 'after.txt' } }
       },
       customTools: [{
@@ -1174,27 +1346,30 @@ describe('PiAgentAdapter 查询主链', () => {
       executeTool: 'read',
       toolInput: { path: 'frontend/App.tsx' },
     })
-    const adapter = new PiAgentAdapter(harness.load)
     let executions = 0
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort({
+      readFile: async (path) => {
+        expect(path).toBe(join(directory, 'frontend', 'App.tsx'))
+        executions += 1
+        return Buffer.from('文件内容')
+      },
+    }))
     const query: PiAgentQueryOptions = {
       sessionId: 'app-session-1',
       prompt: '读取前端文件',
+      cwd: directory,
       model: 'test-model',
       apiKey: 'secret',
       baseUrl: 'https://example.test/v1',
       provider: 'openai',
       systemPrompt: '当前系统提示词\n根规则',
       executionPolicy: DEFAULT_EXECUTION_POLICY,
+      sandboxPolicy: { ...SANDBOX_POLICY, workingDirectory: directory, writableRoots: [directory] },
+      allowedBuiltinTools: ['Read'],
       runtimeAgentDir: join(directory, '.runtime'),
       runtimeSessionDir: join(directory, '.runtime', 'sessions'),
       projectInstructionScope: { projectRoot: directory, initialSources: initial.sources },
       canUseTool: async () => ({ behavior: 'allow' }),
-      customTools: [{
-        name: 'read',
-        description: '读取内容',
-        inputSchema: { type: 'object', properties: { path: { type: 'string' } } },
-        execute: async () => { executions += 1; return { content: '文件内容' } },
-      }],
     }
     try {
       for await (const _payload of adapter.query(query)) {}
@@ -1214,7 +1389,7 @@ describe('PiAgentAdapter 查询主链', () => {
     const { join } = await import('node:path')
     const directory = mkdtempSync(join(tmpdir(), 'axon-pi-abort-'))
     const harness = createRuntimeHarness({ waitForAbort: true })
-    const adapter = new PiAgentAdapter(harness.load)
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort())
     const query: PiAgentQueryOptions = {
       sessionId: 'app-session-1',
       prompt: '长任务',
@@ -1223,7 +1398,7 @@ describe('PiAgentAdapter 查询主链', () => {
       baseUrl: 'https://example.test/v1',
       provider: 'openai',
       systemPrompt: '测试停止',
-      executionPolicy: DEFAULT_EXECUTION_POLICY,
+      executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [],
       runtimeAgentDir: join(directory, 'agent'),
       runtimeSessionDir: join(directory, 'sessions'),
     }
@@ -1258,7 +1433,7 @@ describe('PiAgentAdapter 查询主链', () => {
     const { join } = await import('node:path')
     const directory = mkdtempSync(join(tmpdir(), 'axon-pi-keyless-'))
     const harness = createRuntimeHarness()
-    const adapter = new PiAgentAdapter(harness.load)
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort())
     const query: PiAgentQueryOptions = {
       sessionId: 'app-session-1',
       prompt: '本地任务',
@@ -1267,7 +1442,7 @@ describe('PiAgentAdapter 查询主链', () => {
       baseUrl: 'http://127.0.0.1:11434/v1',
       provider: 'custom',
       systemPrompt: '',
-      executionPolicy: DEFAULT_EXECUTION_POLICY,
+      executionPolicy: DEFAULT_EXECUTION_POLICY, sandboxPolicy: SANDBOX_POLICY, allowedBuiltinTools: [],
       runtimeAgentDir: join(directory, 'agent'),
       runtimeSessionDir: join(directory, 'sessions'),
     }

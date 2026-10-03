@@ -87,6 +87,7 @@ export function createAgentToolSearchTool(
 
   return {
     name: AGENT_TOOL_SEARCH_NAME,
+    permissionMode: 'managed',
     description: '按名称、用途或参数搜索当前会话可用的延迟工具，并返回匹配工具的完整参数 schema。需要 MCP 等未完整加载的能力时调用。',
     inputSchema: {
       type: 'object',

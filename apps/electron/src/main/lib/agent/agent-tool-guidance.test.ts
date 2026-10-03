@@ -16,7 +16,8 @@ describe('Agent 内置工具使用指引', () => {
   test('explore 子 Agent 不收到编辑工具指引', () => {
     const prompt = buildAgentToolGuidance('explore')
     expect(prompt).toContain('优先调用 read')
-    expect(prompt).toContain('bash 执行 rg')
+    expect(prompt).toContain('Glob、Grep、LS')
+    expect(prompt).toContain('只有可用工具列表包含 bash')
     expect(prompt).not.toContain('用 edit')
     expect(prompt).not.toContain('用 write')
   })

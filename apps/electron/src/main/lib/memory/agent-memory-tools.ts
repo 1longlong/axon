@@ -14,7 +14,6 @@ const MEMORY_LIST_TOOL = 'MemoryList'
 const MEMORY_READ_TOOL = 'MemoryRead'
 const MEMORY_WRITE_TOOL = 'MemoryWrite'
 
-export const AGENT_MEMORY_SAFE_TOOL_NAMES = [MEMORY_LIST_TOOL, MEMORY_READ_TOOL] as const
 export const AGENT_MEMORY_EDIT_TOOL_NAMES = [MEMORY_WRITE_TOOL] as const
 
 interface AgentMemoryToolOptions {
@@ -57,6 +56,7 @@ export function createAgentMemoryTools(options: AgentMemoryToolOptions): AgentCu
   return [
     {
       name: MEMORY_LIST_TOOL,
+      permissionMode: 'managed',
       description: '列出当前项目 memory/ 中可用的 Markdown 记忆文件及其元信息。需要根据 MEMORY.md 查找相关主题文件，或确认记忆文件是否存在时调用。',
       inputSchema: { type: 'object', additionalProperties: false, properties: {} },
       execute: async () => {
@@ -78,6 +78,7 @@ export function createAgentMemoryTools(options: AgentMemoryToolOptions): AgentCu
     },
     {
       name: MEMORY_READ_TOOL,
+      permissionMode: 'managed',
       description: '读取当前项目 memory/ 下一个 Markdown 记忆文件的最新全文。MEMORY.md 只负责索引；任务涉及某个主题时，先读取对应文件再使用其中内容。',
       inputSchema: {
         type: 'object', additionalProperties: false, required: ['path'],

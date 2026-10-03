@@ -1,45 +1,56 @@
 # Axon 当前进度
 
-> 本文件只保留当前可执行状态，不保存历史流水。新会话结合根目录 `../AGENTS.md` 与同目录 `axon-project-design.md` 继续。
+> 只保留当前可执行状态；新会话结合根目录 `AGENTS.md` 与 `docs/axon-project-design.md` 继续。
 
 ## 当前状态
 
-- 主 Agent 会话的 Plan 模式已取消：会话不再保存协作模式，输入框不再展示“普通 / Plan”选择，运行时不再注入计划模式提示词或 `ExitPlanMode` 工具，也不再产生计划审批事件。
-- `plan` 子 Agent 保留；它是独立的只读规划角色，不属于主会话模式切换。
-- Pi Bash 审批已改为沙箱边界驱动：普通、未知和复合命令默认先进入 Seatbelt，不再因为未命中只读白名单而请求批准；显式禁止命令仍直接拒绝，真实文件/网络越界仍走精确升级审批。
-- 核心迭代清单中已实施的迭代全部收尾；当前等待用户指定下一项工作。
-- 迭代 18“全局快捷唤起现有会话”已完成：支持多条“快捷键 → 现有 Chat/Agent 会话”绑定、轻量浮窗发送与接收、共享历史、快捷来源标记、取消重置和发送后自动展开。
-- 迭代 22“macOS Seatbelt 工具沙箱与细粒度审批”已完成：Pi 七类内置工具进入宿主沙箱，文件与可归因 Bash 拒绝支持精确升级审批；Zima、完全自动模式和域名网络代理继续后置。
-- Pi 是新会话默认 runtime；Zima 已接入独立 artifact、恢复、工具权限、停止、压缩摘要和 thinking。受控 Python 分发仍待完成；Zima 子目录 AGENTS.md 自动加载受协议限制。
-- Runtime 切换、Automation、内嵌终端、完整发布链等仍属于 `axon-project-design.md` 文末的可扩展能力，不主动实施。
+- 当前本地发行版本为 v0.1.3，生成 macOS Apple Silicon DMG/ZIP 与 SHA-256 清单；只在本机交付，不上传、不推送。
+- 迭代 23“Agent Shell 文件快照执行”的四阶段及关联权限修复已完成。Pi 支持用户 Shell 解析、会话初始化异步预热、私有快照原子发布、条件恢复、环境覆盖与原始命令审批归因。
+- 会话删除、工作区改变和应用退出都会释放快照引用；初始化时异步清理无归属或三天不活跃的遗留缓存，排除在途预热与跨轮引用。
+- 主会话无 Plan 模式；独立 plan 子 Agent 保留。Pi 受宿主保护的普通/复合 Bash 命令先进入 Seatbelt，不因未命中白名单提前申请审批；显式禁止规则及真实越界升级仍有效。
+- Pi 仍为新会话默认 runtime；Zima 未接入宿主 Shell 快照/Seatbelt 委托，受控 Python 分发仍待完成。
+- Pi 宿主沙箱不可用时拒绝本轮，不再退回原生工具；Zima 无沙箱副作用工具等待普通人工审批。explore/plan 创建和逐轮执行均收窄为只读，审批不能放宽角色边界。
+- Runtime 切换、Automation、内嵌终端、完整发布链等扩展项仍暂不实施，本轮没有恢复或启动新迭代。
 
-## 本次交付：快捷会话浮窗支持拖拽定位
+## 本次交付：最近更新整理、提交与 v0.1.3 本地安装包（2026-10-04）
 
-- 紧凑态整个输入胶囊都可按住拖动；手势超过 4px 才移动窗口，普通单击仍能聚焦输入，按钮和模型选择保持独立操作。
-- 紧凑胶囊固定为 70px 内容高度，阴影范围收敛在窗口透明边距内，不再因 BrowserWindow 底边裁切形成额外横线。
-- 展开态以会话历史顶部标题栏作为拖拽区域，移动后收起、再次唤起都沿用同一浮窗实例的当前位置。
-- renderer 只识别点击与拖动意图，主进程通过受控 IPC 更新窗口坐标并限制在当前显示器工作区；展开态继续使用 Electron 原生 drag hit-test。
+- `shared/agent-provider.ts` 新增必填的 `toolExecution`：adapter 按实际工具实例声明 `sandbox / runtime / host`。宿主工具工厂可明确声明自行守卫的 `managed` 工具，默认普通审批；模型参数不能设置这些授权元信息。`shared/agent-sandbox.ts` 的宿主端口必须报告真实能力，`shared/agent-run.ts` 补充 `sandbox_unavailable` 错误码。
+- `agent-sandbox-command-service.ts → agent-service-instance.ts → agent-service.ts → pi-agent-adapter.ts`：始终装配端口并传递实际探测结果；能力失败或模式不匹配时在 SDK/Shell 启动前拒绝。应用层保存用户消息和明确失败 result，UI/重启可恢复；没有无沙箱原生工具回退。
+- `agent-permission-service.ts → zima-agent-adapter.ts`：Zima 原生 Bash/Write/Edit 等等待普通人工审批；内置读工具保持直接读取。宿主反向工具调用也先检查权限，拒绝或授权缺失时不执行。正常 Pi 内置工具仍先在真实沙箱中尝试，结构化越界才申请 Grant。
+- 普通会话白名单按执行来源、名称和输入绑定。同名自定义 Read/Write/Bash 不继承内置工具待遇；可信标记来自工具实例而非名称。AskUserQuestion、ToolSearch、SkillRead、MemoryList/Read、Agent、TaskList/Output 工厂明确声明 managed；MemoryWrite、TaskStop 和 MCP 保持普通审批。
+- `agent-collaboration-service.ts → agent-service.ts → agent-permission-service.ts`：explore/plan 创建及每轮运行都固定只读；只有只读宿主沙箱明确覆盖 Bash 才向 explore 提供它，plan 永不提供 Bash。禁止角色升级或复用旧 Grant 扩大权限。`agent-tool-guidance.ts` 同步说明 Bash 取决于实际可用工具列表。
+- 新增/调整 permission、Pi/Zima adapter、编排、协作和宿主能力回归测试；真实 Shell 冒烟补充只读项目写入拒绝及角色升级拒绝，桌面冒烟补齐可信执行元信息。README、核心设计、协议示例和根 AGENTS 同步现行边界。
+- 根 `package.json`、`apps/electron/package.json` 和 `bun.lock` 的应用版本统一为 0.1.3；内部 shared/core 包版本不变。新增 `docs/releases/v0.1.3.md`，README 补充本地安装包说明。
+- 最近源码、测试和文档更新一并纳入本次发布提交，附 `Co-Authored-By: Codex <codex@openai.com>`；本地标签 `v0.1.3` 用于定位发行提交。用户明确只生成本地包，不创建 GitHub Release，不推送提交或标签。
 
-## 当前验证基线
+## 本轮集中验证
 
-2026-09-28：
+- `bun test`：90 个测试文件、583 项通过、0 失败、2127 次断言。
+- `bun run typecheck`：全仓通过。
+- `bun run --cwd apps/electron build`：v0.1.3 production build 通过，仅有既有 renderer 大 chunk 提示。
+- 同日修复收尾的 `test:agent:shell:smoke`：真实 Electron/Seatbelt 验证通过，覆盖初始化、PATH 恢复、正常写入、只读项目写入拒绝且不能升级、精确 Grant、环境覆盖、cwd 回退、输出流、超时/停止和清理。本次打包未重复运行。
+- 同日修复收尾的 `test:agent:smoke`：真实桌面 UI 验证通过，包括权限卡、子 Agent、Skills/MCP/记忆、文件树/Diff、消息流及 state/JSONL 恢复。本次打包未重复运行；模型事件使用隔离夹具，不是外部 API 验收，未运行 Zima live 测试。
+- Shell 测试只加载临时 HOME/ZDOTDIR 的启动配置，没有执行真实用户 rc 脚本。Shell 冒烟临时文件已删除；桌面截图保留在 `/var/folders/g_/9jwx4hbn38vbn9fn6cryjpmm0000gn/T/axon-agent-smoke-wV14Sb/`。
+- `git diff --check`：通过。
+- `electron-builder --config electron-builder.yml --mac --arm64 --publish never`：本地 DMG/ZIP 打包成功；`package:checksums` 生成并验证当前版本 SHA-256 清单。
+- `hdiutil verify` 与 `unzip -tq`：安装包完整性检查通过；app.asar 版本为 0.1.3，主进程/preload/renderer 入口及 Pi/MCP 依赖存在，Info.plist 版本为 0.1.3。
 
-- 全仓 88 个测试文件共 530 项通过、0 失败、1854 次断言。
-- 全仓 typecheck 通过。
-- production build 通过；仅保留既有 renderer 大 chunk 提示。
-- 快捷会话真实 Electron 冒烟通过：从紧凑态真实 input 发起阈值拖拽，展开态存在原生拖拽区域；移动位置可跨展开、收起和再次唤起保留，紧凑截图底行保持透明。
-- `git diff --check` 通过。
+## 本地发行产物
 
-## 当前关键决定
+- `apps/electron/release/Axon-0.1.3-arm64.dmg`
+- `apps/electron/release/Axon-0.1.3-arm64.zip`
+- `apps/electron/release/SHA256SUMS.txt`
+- 构建产物不进入 Git。安装包未进行 Developer ID 签名或公证；Zima Python 不随包分发。未测试外部模型 API，也未将本机安装的 Axon 替换为新版本。
 
-- 全局快捷键的 OS 注册由 Electron `globalShortcut` 负责；专属 GUI 冒烟不合成 macOS 键盘事件，避免要求辅助功能权限，而是确定性触发已注册回调。回调之后的窗口、IPC、模型与持久化均为真实链路。
-- 快捷浮窗不是独立会话：发送仍进入原 Chat/Agent controller 和同一份持久化历史，主窗口重新读取即可看到所有入口的消息。
-- 不实现会话分叉、回退、跨项目移动、运行中消息注入和同项目并发互斥。
-- Chat 暂不接工具；Agent 提供工具、Skills、MCP、项目指令、记忆和子 Agent。
-- 项目必须有工作区；未选择本地目录时使用应用管理目录。项目下会话共享唯一工作区。
-- 开发阶段配置与持久化格式变更不维护旧版本兼容；重要流程函数保留简洁中文注释。
-- 修复权限问题时以稳定安全边界和完整调用链为依据，不为单一命令不断扩充特例白名单。
+## 当前关键决定与边界
+
+- 快照只用于宿主执行缓存，不进入应用消息历史或 runtime artifact；重启后重新初始化，不将旧快照作为永久会话状态恢复。
+- 工具不等待预热，首条命令可能仍走原登录路线。快照只匹配初始化 cwd、固定解释器及登录参数；条件不符不临时重建。
+- 初始环境来自进程继承和 SDK 环境，当前没有独立过滤配置，普通导出声明不做二次过滤。恢复后显式覆盖、runtime 工具目录和受控临时目录仍优先；原始命令驱动规则、审批与归因。
+- 普通 exec 路线不保证 alias/函数跨 Shell 保留，单条工具的 export/cd 不改变初始化基线。缓存清理失败只诊断，不扩大工具权限。
+- 缺少明确 OS 拒绝证据时，不能把通用网络连接失败猜测为沙箱拒绝；已有模型请求错误与重试机制不受影响。
+- 开发阶段格式修改不维护旧配置兼容；重要流程保留简洁中文注释。扩展能力只有用户明确恢复才推进。
 
 ## 下一步
 
-等待用户在真实桌面中验证紧凑态和展开态拖拽手感；后续工作由用户指定。正式公开分发前仍需配置 Apple Developer ID 签名和公证。
+v0.1.3 本地发行收尾，等待用户安装试用或指定下一阶段。可在明确授权后验证本机 Go/PATH 与真实模型工具循环；隔离验收不替代真实用户 rc 环境。外部发布与推送仍需授权；Zima 宿主委托、内存快照、PTY、常驻 Shell、凭据代理和域名网络代理继续后置，公开分发前仍需 Developer ID 签名和公证。

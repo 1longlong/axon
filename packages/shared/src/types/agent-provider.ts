@@ -27,10 +27,17 @@ export interface AgentExecutionPolicy {
   approvalReviewer: AgentApprovalReviewer
 }
 
+/** 可信 adapter 按实际工具实例声明执行边界；模型参数不能设置此字段。 */
+export type AgentToolExecution =
+  | { kind: 'sandbox'; mode: AgentSandboxMode }
+  | { kind: 'runtime' }
+  | { kind: 'host'; permissionMode: 'managed' | 'ask' }
+
 export interface AgentToolPermissionOptions {
   signal?: AbortSignal
   toolUseId: string
   executionPolicy: AgentExecutionPolicy
+  toolExecution: AgentToolExecution
   /** 基础沙箱拒绝后的精确升级请求；缺失时只是普通工具策略判断。 */
   sandboxEscalation?: AgentSandboxEscalation
 }
@@ -80,6 +87,8 @@ export interface AgentCustomToolDefinition {
   name: string
   description: string
   inputSchema: Record<string, unknown>
+  /** 仅可信宿主工厂可声明自身已有受控边界；缺省需普通审批，不能按工具名称推断。 */
+  permissionMode?: 'managed' | 'ask'
   /** 是否只向模型暴露轻量目录信息，并通过 tool_search 按需返回完整 schema。 */
   isDeferred?: boolean
   execute: (
@@ -190,7 +199,7 @@ export interface AgentReasoningCapabilityInput {
 }
 
 /**
- * 语义要点（设计文档 §3）：
+ * 语义要点（设计文档 §6）：
  * - `query()` 是"一轮"不是"一个会话"；同一 sessionId 可多次 query，adapter 内部
  *   维护 runtime 侧会话状态，同一会话同时只允许一个活跃 query。
  * - systemPrompt、权限、工具与 resume 是核心闭环的中立字段；只有具体 runtime
@@ -213,6 +222,8 @@ export interface AgentProviderAdapter {
   abort(sessionId: string): void
   /** 软中断当前 turn 但保留活跃 Query，允许立即续跑新消息（可选能力）。 */
   interruptQuery?(sessionId: string): Promise<void>
+  /** 会话删除后释放跨轮缓存；不删除消息历史或 runtime artifact。 */
+  releaseSession?(sessionId: string): void
   /** 释放资源。 */
   dispose(): void
   /** 向活跃查询注入队列消息（可选，仅支持队列的 Provider 实现）。 */

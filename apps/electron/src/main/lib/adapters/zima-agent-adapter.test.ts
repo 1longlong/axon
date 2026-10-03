@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentQueryInput, AgentStreamPayload, SDKAssistantMessage } from '@axon/shared'
 import { ZimaAgentAdapter, ZimaRuntimeTransport } from './zima-agent-adapter'
+import { AgentPermissionService } from '../agent/agent-permission-service'
 
 let directory: string
 let adapter: ZimaAgentAdapter
@@ -129,7 +130,11 @@ describe('Zima adapter 离线协议契约', () => {
   test('内置工具授权和宿主工具都回传配对结果', async () => {
     const approved: string[] = []
     const approval = await collect(input('approval', {
-      canUseTool: async (name) => { approved.push(name); return { behavior: 'allow' } },
+      canUseTool: async (name, _args, permission) => {
+        expect(permission.toolExecution).toEqual({ kind: 'runtime' })
+        approved.push(name)
+        return { behavior: 'allow' }
+      },
     }))
     expect(approved).toEqual(['Write'])
     expect(messages(approval, 'user')).toHaveLength(1)
@@ -137,6 +142,10 @@ describe('Zima adapter 离线协议契约', () => {
 
     const calls: unknown[] = []
     const host = await collect(input('host', {
+      canUseTool: async (_name, _args, permission) => {
+        expect(permission.toolExecution).toEqual({ kind: 'host', permissionMode: 'ask' })
+        return { behavior: 'allow' }
+      },
       customTools: [{
         name: 'remote_echo', description: '回显',
         inputSchema: { type: 'object', properties: { value: { type: 'string' } } },
@@ -146,6 +155,56 @@ describe('Zima adapter 离线协议契约', () => {
     expect(calls).toEqual([{ path: 'demo.txt', value: 'hello' }])
     expect(messages(host, 'user')).toHaveLength(1)
     expect(messages(host, 'result')).toHaveLength(1)
+  })
+
+  test('Zima 原生 Write 真正等待人工审批，不自动回复 allow', async () => {
+    const permissions = new AgentPermissionService({ createId: () => 'zima-approval' })
+    permissions.bindOwner('app-session', 1)
+    const run = new AbortController()
+    let received: (() => void) | undefined
+    const requested = new Promise<void>((resolve) => { received = resolve })
+    permissions.subscribe((event) => {
+      if (event.type === 'permission_request') {
+        expect(event.request.toolName).toBe('Write')
+        expect(event.request.sandboxEscalation).toBeUndefined()
+        received?.()
+      }
+    })
+    let completed = false
+    const execution = collect(input('approval', {
+      abortSignal: run.signal,
+      canUseTool: permissions.createCanUseTool('app-session', 1, run.signal),
+    })).then((events) => { completed = true; return events })
+    try {
+      await requested
+      expect(completed).toBe(false)
+      expect(permissions.respond(1, { requestId: 'zima-approval', behavior: 'deny' })).toBe(true)
+      const events = await execution
+      const result = messages(events, 'user')[0]
+      expect(result?.kind === 'sdk_message' ? result.message : null).toMatchObject({
+        message: { content: [{ type: 'tool_result', is_error: true }] },
+      })
+    } finally { run.abort() }
+  })
+
+  test('宿主工具缺少授权或被拒绝时不执行，已声明自行守卫的工具可正常执行', async () => {
+    let executions = 0
+    const tool = {
+      name: 'remote_echo', description: '回显', inputSchema: { type: 'object' },
+      execute: async () => { executions += 1; return { content: 'ok' } },
+    }
+    await collect(input('host', { customTools: [tool] }))
+    expect(executions).toBe(0)
+    await collect(input('host', { customTools: [tool], canUseTool: async () => ({ behavior: 'deny', message: '拒绝' }) }))
+    expect(executions).toBe(0)
+    await collect(input('host', { customTools: [{ ...tool, permissionMode: 'managed' }] }))
+    expect(executions).toBe(1)
+    let argumentsSeen: Record<string, unknown> | undefined
+    await collect(input('host', {
+      customTools: [{ ...tool, execute: async (args) => { argumentsSeen = args; return { content: 'ok' } } }],
+      canUseTool: async () => ({ behavior: 'allow', updatedInput: { value: 'updated' } }),
+    }))
+    expect(argumentsSeen).toEqual({ value: 'updated' })
   })
 
   test('停止、进程崩溃和协议损坏都不产生重复终态', async () => {

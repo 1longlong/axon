@@ -47,6 +47,7 @@ export function createAgentSkillReadScope(catalog: AgentSkillCatalog): AgentSkil
 
   const tool: AgentCustomToolDefinition = {
     name: AGENT_SKILL_READ_TOOL_NAME,
+    permissionMode: 'managed',
     description: '按名称读取一个可用 Skill 的 SKILL.md 或其目录内引用文件。任务匹配 Skill 描述时先读取 SKILL.md。',
     inputSchema: {
       type: 'object',

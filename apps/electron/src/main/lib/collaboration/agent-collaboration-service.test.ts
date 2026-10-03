@@ -40,6 +40,20 @@ function successOutcome(text: string): AgentRunOutcome {
 }
 
 describe('AgentCollaborationService', () => {
+  test('explore/plan 创建为只读，不继承父会话的项目写权限', async () => {
+    const service = new AgentCollaborationService({
+      sessions, delegations: tasks,
+      agent: { sendMessage: async () => successOutcome('完成'), isActive: () => true, stop: () => false },
+      resolveProjectCwd: () => directory,
+    })
+    for (const role of ['explore', 'plan'] as const) {
+      const task = service.delegate({ parentSessionId: rootSessionId, parentToolUseId: `tool-${role}`,
+        title: '检查', objective: '分析', subagentType: role, runInBackground: false })
+      await service.wait(rootSessionId, task.id)
+      expect(sessions.get(task.childSessionId)).toMatchObject({ sandboxMode: 'readOnly', approvalPolicy: 'onRequest' })
+    }
+  })
+
   test('前台委派直接等待运行结果，同一工具调用重放不重复创建', async () => {
     const calls: Array<{ sessionId: string; text: string }> = []
     const service = new AgentCollaborationService({

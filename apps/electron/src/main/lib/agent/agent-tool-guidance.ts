@@ -22,6 +22,7 @@ const EDIT_GUIDANCE = `
 /** 上游按会话角色选择工具；本段随系统提示词下发，避免要求模型调用未注册的工具。 */
 export function buildAgentToolGuidance(subagentType?: AgentSubagentType): string {
   if (subagentType === 'plan') return READ_ONLY_GUIDANCE
-  if (subagentType === 'explore') return READ_GUIDANCE + BASH_SEARCH_GUIDANCE
+  if (subagentType === 'explore') return READ_ONLY_GUIDANCE + `
+- 路径搜索、正文搜索和列目录使用当前提供的 Glob、Grep、LS 工具。只有可用工具列表包含 bash 时，才能用它执行只读检查；不得申请扩大只读角色的权限。`
   return READ_GUIDANCE + BASH_SEARCH_GUIDANCE + BASH_EXEC_GUIDANCE + EDIT_GUIDANCE
 }

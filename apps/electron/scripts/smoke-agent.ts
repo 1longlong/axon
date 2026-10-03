@@ -101,6 +101,7 @@ const adapter: AgentProviderAdapter = {
       { command: 'curl https://example.com' },
       {
         toolUseId: 'sandbox-network-smoke',
+        toolExecution: { kind: 'sandbox', mode: input.executionPolicy.sandboxMode },
         executionPolicy: input.executionPolicy,
         sandboxEscalation: {
           reason: 'networkAccess', permission: { type: 'network' },

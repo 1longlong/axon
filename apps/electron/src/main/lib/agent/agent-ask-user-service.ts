@@ -88,6 +88,7 @@ export class AgentAskUserService {
   createTool(sessionId: string, runStartedAt: number, runSignal: AbortSignal): AgentCustomToolDefinition {
     return {
       name: 'AskUserQuestion',
+      permissionMode: 'managed',
       description: '当继续任务所需的关键事实、选择或授权缺失，且无法从上下文可靠推断时，向用户提出 1 到 4 个最少且具体的问题并等待回答；先完成不依赖该信息的已授权工作，能安全采用合理默认值时继续执行。',
       inputSchema: {
         type: 'object',

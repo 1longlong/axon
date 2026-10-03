@@ -1,13 +1,14 @@
 /**
  * Agent 根会话聚合持久化（state.json + 各 Agent 自有 JSONL）
  *
- * 双轨设计（设计文档 §8）：根会话索引 + state + JSONL 是**唯一展示源**，
+ * 双轨设计（设计文档 §3、§6）：根会话索引 + state + JSONL 是**唯一展示源**，
  * 编排层从 SDKMessage 流直接落盘；runtime 自己写的 session artifact 是
- * **唯一 resume 凭据**，本层只在索引里保存它的引用（sdkSessionId/runtimeSessionFile）。
+ * 精确续跑凭据，本层在元数据里保存引用（sdkSessionId/runtimeSessionFile）；
+ * artifact 不可用时由编排层从应用历史构造明确标记的语义恢复上下文。
  *
  * 校验纪律与 Chat 的 ConversationManager 一致：索引与消息都做规范化，
- * 未知消息类型透传保留（向前兼容），缺失 uuid 的消息在落盘前回填稳定 id
- * （已知陷阱 #7），损坏行隔离到 .corrupt 副本后修复主文件。
+ * 未知消息类型透传保留，缺失 uuid 的消息在落盘前回填稳定 id，
+ * 损坏行隔离到 .corrupt 副本后修复主文件。
  */
 
 import { randomUUID } from 'node:crypto'
@@ -316,6 +317,7 @@ export class AgentSessionManager {
   private readonly createId: () => string
   private readonly now: () => number
   private readonly stateStore: AgentRootStateStore
+  private readonly deletionListeners = new Set<(sessions: AgentSessionMeta[]) => void>()
 
   constructor(options: AgentSessionManagerOptions) {
     this.indexPath = options.indexPath
@@ -337,6 +339,20 @@ export class AgentSessionManager {
     return [...roots, ...children]
       .map((session) => cloneJson(session))
       .sort((left, right) => right.updatedAt - left.updatedAt)
+  }
+
+  /** 删除落盘后通知资源所有者；根会话删除同时交付其子会话，避免留下跨轮缓存。 */
+  onSessionsDeleted(listener: (sessions: AgentSessionMeta[]) => void): () => void {
+    this.deletionListeners.add(listener)
+    return () => { this.deletionListeners.delete(listener) }
+  }
+
+  /** 历史删除已经提交，资源清理失败只记诊断，不能把成功删除报告成失败。 */
+  private notifyDeleted(sessions: AgentSessionMeta[]): void {
+    for (const listener of this.deletionListeners) {
+      try { listener(sessions.map(cloneJson)) }
+      catch { console.warn('[Agent 会话] 删除后的资源释放失败') }
+    }
   }
 
   get(id: string): AgentSessionMeta | undefined {
@@ -501,6 +517,7 @@ export class AgentSessionManager {
     return cloneJson(updated)
   }
 
+  /** 先保存归属信息并删除持久化，再通知主/子会话资源释放，不依赖调用入口。 */
   delete(id: string): AgentSessionMeta {
     const normalizedId = normalizeId(id, '会话 ID')
     const index = this.readIndex()
@@ -509,9 +526,11 @@ export class AgentSessionManager {
     if (!removed) throw new AgentSessionManagerError('not_found', '会话不存在')
     const sessionPath = this.sessionPath(normalizedId)
     if (position >= 0) {
+      const children = this.readChildSessions(normalizedId)
       index.sessions.splice(position, 1)
       this.writeIndex(index)
       this.stateStore.deleteRoot(normalizedId)
+      this.notifyDeleted([removed, ...children])
       console.log(`[Agent 会话] 已删除会话: ${removed.title} (${removed.id})`)
       return cloneJson(removed)
     }
@@ -537,6 +556,7 @@ export class AgentSessionManager {
       try { unlinkSync(path) } catch { console.warn(`[Agent 会话] 清理消息文件失败: ${normalizedId}`) }
     }
     this.touchRoot(rootSessionId)
+    this.notifyDeleted([removed])
     console.log(`[Agent 会话] 已删除会话: ${removed.title} (${removed.id})`)
     return cloneJson(removed)
   }

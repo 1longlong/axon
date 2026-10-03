@@ -86,6 +86,17 @@ export interface AgentSandboxCommandRequest {
   abortSignal?: AbortSignal
 }
 
+/** 原始 Shell 请求由宿主选择解释器；adapter 不生成启动 argv 或快照包装脚本。 */
+export interface AgentSandboxShellCommandRequest extends Omit<AgentSandboxCommandRequest, 'argv'> {
+  command: string
+  /** 默认采用登录启动语义；非登录请求不应套用登录环境快照。 */
+  login?: boolean
+  /** 与完整初始环境分开；只让明确覆盖项在快照恢复后胜出，undefined 表示删除。 */
+  environmentOverrides?: Record<string, string | undefined>
+  /** 宿主或 runtime 管理的程序目录，在恢复 PATH 后重新前置。 */
+  pathPrepend?: string[]
+}
+
 export interface AgentSandboxCommandOutputHandlers {
   onStdout?: (chunk: string) => void
   onStderr?: (chunk: string) => void
@@ -131,6 +142,13 @@ export interface AgentSandboxTextSearchResult {
 
 /** adapter 只能通过这个中立端口请求宿主执行命令或文件操作，不能直接接触 Seatbelt 实现。 */
 export interface AgentHostToolExecutionPort {
+  /** 报告实际宿主保护能力；端口存在不等于 OS 沙箱可用。 */
+  getSandboxCapability(): AgentSandboxCapability
+  initializeShellEnvironment(input: { sessionId: string; cwd: string }): AgentHostShellEnvironment
+  executeShellCommand(
+    request: AgentSandboxShellCommandRequest,
+    handlers?: AgentSandboxCommandOutputHandlers,
+  ): Promise<AgentSandboxCommandResult>
   executeCommand(
     request: AgentSandboxCommandRequest,
     handlers?: AgentSandboxCommandOutputHandlers,
@@ -149,6 +167,15 @@ export interface AgentHostToolExecutionPort {
     context: AgentSandboxFileContext,
   ): Promise<AgentSandboxTextSearchResult>
   detectImageMimeType(path: string, context: AgentSandboxFileContext): Promise<string | undefined>
+}
+
+/** 会话持有宿主环境的引用；不暴露 Shell 类型、快照内容或内部文件路径。 */
+export interface AgentHostShellEnvironment {
+  executeShellCommand(
+    request: AgentSandboxShellCommandRequest,
+    handlers?: AgentSandboxCommandOutputHandlers,
+  ): Promise<AgentSandboxCommandResult>
+  dispose(): void
 }
 
 export interface AgentSandboxCommandResult {

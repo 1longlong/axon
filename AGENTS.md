@@ -76,7 +76,8 @@ Axon 是一个本地优先、支持可插拔 Agent Runtime 的 Electron AI 桌�
 - [x] 迭代 18：全局快捷唤起现有会话（2026-09-27；多快捷键绑定、轻量浮窗、共享历史、来源标记与真实 GUI 验收完成）
 - [x] 迭代 20：ToolSearch 与工具懒加载（2026-09-20；仅 Pi 下官方 Anthropic Messages tool reference 与模型目录明确支持的 OpenAI Responses 动态工具启用；其他协议/runtime 保持 MCP eager，检索、能力协商、权限及恢复契约完成）
 - [x] 迭代 21：多级 Skills 与 Axon 管理安装（2026-09-21；完成四级优先级发现、统一 `SkillRead`、受控原子安装、专用 IPC、Agent Skills 设置 UI、主/子 Agent 继承与真实 Electron 验证；catalog provider 按计划保留为空，远程/市场来源后置）
-- [x] 迭代 22：macOS Seatbelt 工具沙箱与细粒度审批（2026-09-27；Pi 内置工具宿主委托、基础沙箱、命令规则、文件/网络升级审批、精确 Grant、权限 UI 与真实 Electron 验收完成；Zima、完全自动和域名网络代理按计划后置）
+- [x] 迭代 22：macOS Seatbelt 工具沙箱与细粒度审批（2026-09-27；Pi 内置工具宿主委托、不可用时拒绝原生回退、命令规则、精确 Grant、按实际执行来源审批、只读子 Agent 边界、权限 UI 与真实 Electron 验收完成；Zima 沙箱、完全自动和域名网络代理按计划后置）
+- [x] 迭代 23：Agent Shell 文件快照执行（2026-10-04；完成会话异步预热、私有文件发布、条件选择、沙箱内恢复、原始命令归因、主/子会话释放和遗留清理；全仓检查、真实 Seatbelt 与 Electron 冒烟通过）
 
 ## 可扩展功能迭代（暂不实现）
 

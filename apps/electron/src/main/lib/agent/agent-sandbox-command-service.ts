@@ -16,7 +16,10 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { StringDecoder } from 'node:string_decoder'
 import { AgentSandboxEscalationError } from '@axon/shared'
 import type {
+  AgentSandboxCapability,
   AgentSandboxCommandRequest,
+  AgentHostShellEnvironment,
+  AgentSandboxShellCommandRequest,
   AgentSandboxCommandResult,
   AgentSandboxCommandOutputHandlers,
   AgentSandboxFileContext,
@@ -33,6 +36,10 @@ import {
   type SeatbeltCapability,
 } from './agent-seatbelt-profile'
 import { hasAgentCommandNetworkIntent } from './agent-command-rules'
+import { resolveAgentShell, type AgentShell } from './agent-shell'
+import { AgentShellSnapshotEnvironment, prepareAgentShellSnapshotCommand, pruneAgentShellSnapshots } from './agent-shell-snapshot'
+import type { AgentShellSnapshot } from './agent-shell-snapshot'
+import { getAgentShellSnapshotsDir } from '../core/config-paths'
 
 const DEFAULT_TIMEOUT_MS = 120_000
 const MAX_TIMEOUT_MS = 3_600_000
@@ -59,6 +66,10 @@ export interface AgentSandboxCommandServiceOptions {
   maxOutputBytes?: number
   killGraceMs?: number
   createTempDirectory?: () => string
+  resolveShell?: () => AgentShell | undefined
+  shellSnapshotDirectory?: string
+  shellInitializationEnvironment?: NodeJS.ProcessEnv
+  getShellSessionActivity?: () => ReadonlyMap<string, number>
 }
 
 interface CapturedOutput {
@@ -168,7 +179,7 @@ function terminateProcessGroup(pid: number | undefined, signal: NodeJS.Signals):
 
 function shellCommand(argv: string[]): string | undefined {
   const executable = basename(argv[0] ?? '')
-  return ['sh', 'bash', 'zsh'].includes(executable) && argv[1] === '-lc' && typeof argv[2] === 'string'
+  return ['sh', 'bash', 'zsh'].includes(executable) && ['-lc', '-c'].includes(argv[1] ?? '') && typeof argv[2] === 'string'
     ? argv[2]
     : undefined
 }
@@ -177,10 +188,15 @@ function shellCommand(argv: string[]): string | undefined {
 function operationNotPermittedPaths(output: string): string[] {
   const results: string[] = []
   for (const line of output.split(/\r?\n/)) {
-    if (!/operation not permitted/i.test(line)) continue
-    const prefix = line.slice(0, line.search(/:\s*operation not permitted/i)).trim()
-    const match = prefix.match(/(?:^|:\s+|[`'"])(\/.*?)[`'"]?$/)
-    const path = match?.[1]?.trim()
+    const failure = /operation not permitted/i.exec(line)
+    if (!failure) continue
+    // 命令行程序常用“路径: errno”，Shell 重定向也会用“errno: 路径”。
+    const suffix = line.slice(failure.index + failure[0].length).match(/^\s*:\s*[`'"]?(\/.*?)[`'"]?\s*$/)
+    const prefix = line.slice(0, failure.index).replace(/:\s*$/, '').trim()
+    // 先去掉程序/行号前缀，避免把“/bin/bash: /目标”整体误当作文件路径。
+    const match = prefix.match(/:\s+[`'"]?(\/.*?)[`'"]?$/)
+      ?? prefix.match(/^[`'"]?(\/.*?)[`'"]?$/)
+    const path = (suffix?.[1] ?? match?.[1])?.trim()
     if (path && isAbsolute(path)) results.push(path)
   }
   return [...new Set(results)]
@@ -195,6 +211,12 @@ export class AgentSandboxCommandService {
   private readonly maxOutputBytes: number
   private readonly killGraceMs: number
   private readonly createTempDirectory: () => string
+  private readonly resolveShell: () => AgentShell | undefined
+  private readonly shellSnapshotDirectory?: string
+  private readonly shellInitializationEnvironment?: NodeJS.ProcessEnv
+  private readonly getShellSessionActivity?: () => ReadonlyMap<string, number>
+  private readonly shellReferences = new Set<AgentShellSnapshotEnvironment>()
+  private cleanupTask?: Promise<void>
 
   constructor(options: AgentSandboxCommandServiceOptions = {}) {
     this.capability = options.capability ?? detectSeatbeltCapability()
@@ -202,10 +224,59 @@ export class AgentSandboxCommandService {
     this.killGraceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS
     this.createTempDirectory = options.createTempDirectory
       ?? (() => mkdtempSync(join(tmpdir(), 'axon-agent-tool-')))
+    this.resolveShell = options.resolveShell ?? resolveAgentShell
+    this.shellSnapshotDirectory = options.shellSnapshotDirectory
+    this.shellInitializationEnvironment = options.shellInitializationEnvironment
+    this.getShellSessionActivity = options.getShellSessionActivity
+  }
+
+  /** 固定会话 Shell 并异步预热；工具只消费已经就绪的快照，不等待或临时重建。 */
+  initializeShellEnvironment(input: { sessionId: string; cwd: string }): AgentHostShellEnvironment {
+    const shell = this.resolveShell()
+    const environment = new AgentShellSnapshotEnvironment({
+      ...input,
+      shell,
+      directory: this.shellSnapshotDirectory ?? getAgentShellSnapshotsDir(),
+      environment: this.shellInitializationEnvironment,
+      onFailure: (reason) => console.warn(`[agent-shell] 快照预热失败（${reason}），保留原始执行路线`),
+    })
+    this.shellReferences.add(environment)
+    // 先登记在途引用，再异步清理旧缓存；不让清理阻塞首轮工具或取消当前预热。
+    this.pruneShellSnapshots()
+    return {
+      executeShellCommand: (request, handlers) => this.executeWithShell(() => shell, request, handlers, environment.snapshot),
+      dispose: () => {
+        environment.dispose()
+        this.shellReferences.delete(environment)
+      },
+    }
+  }
+
+  /** 初始化时合并清理任务；所有者元数据或文件系统异常只能降级缓存维护。 */
+  private pruneShellSnapshots(): void {
+    if (!this.getShellSessionActivity || this.cleanupTask) return
+    this.cleanupTask = Promise.resolve().then(() => pruneAgentShellSnapshots({
+      directory: this.shellSnapshotDirectory ?? getAgentShellSnapshotsDir(),
+      sessionActivity: this.getShellSessionActivity!(),
+      isReferenced: (sessionId) => [...this.shellReferences].some((item) => item.options.sessionId === sessionId),
+    })).catch(() => { console.warn('[agent-shell] 遗留快照清理失败，稍后初始化时重试') })
+      .finally(() => { this.cleanupTask = undefined })
   }
 
   getCapability(): SeatbeltCapability {
     return this.capability
+  }
+
+  /** 将真实 OS 探测结果转成中立能力；adapter 不能仅因端口存在就宣称受保护。 */
+  getSandboxCapability(): AgentSandboxCapability {
+    if (!this.capability.available) return {
+      supported: false, modes: [], sandboxedTools: [],
+      limitation: this.capability.reason === 'platformUnsupported' ? 'platformUnsupported' : 'hostExecutorUnavailable',
+    }
+    return {
+      supported: true, modes: ['readOnly', 'workspaceWrite'],
+      sandboxedTools: ['bash', 'read', 'write', 'edit', 'grep', 'glob', 'ls'],
+    }
   }
 
   /** 全盘读取遵循基础策略；写入必须命中可写根且不能越过保护目录，除非有精确额外授权。 */
@@ -394,9 +465,61 @@ export class AgentSandboxCommandService {
     }
   }
 
+  /** 将 adapter 的原始 Shell 命令转为宿主 argv，再复用同一沙箱、输出与停止链路。 */
+  async executeShellCommand(
+    request: AgentSandboxShellCommandRequest,
+    handlers: AgentSandboxCommandOutputHandlers = {},
+  ): Promise<AgentSandboxCommandResult> {
+    return this.executeWithShell(this.resolveShell, request, handlers)
+  }
+
+  /** 已初始化的引用复用固定解释器，不因每轮 PATH 或账户设置变化重新选择。 */
+  private async executeWithShell(
+    getShell: () => AgentShell | undefined,
+    request: AgentSandboxShellCommandRequest,
+    handlers: AgentSandboxCommandOutputHandlers = {},
+    snapshot?: AgentShellSnapshot,
+  ): Promise<AgentSandboxCommandResult> {
+    if (!this.capability.available) {
+      throw new AgentSandboxExecutionError('sandboxUnavailable', '当前宿主无法应用 macOS Seatbelt 沙箱')
+    }
+    if (request.abortSignal?.aborted) return this.emptyResult(false, true)
+    if (request.command.includes('\0')) {
+      throw new AgentSandboxExecutionError('invalidRequest', 'Shell 命令不能包含空字符')
+    }
+    const shell = getShell()
+    if (!shell) throw new AgentSandboxExecutionError('spawnFailed', '宿主未找到可用的用户 Shell')
+    const { command, login = true, environmentOverrides, pathPrepend, ...context } = request
+    const originalRequest: AgentSandboxCommandRequest = {
+      ...context,
+      argv: [shell.path, login ? '-lc' : '-c', command],
+      environment: { ...context.environment, ...environmentOverrides },
+    }
+    // 直接程序入口永不自动加载快照；原始 request 也不被包装代码改写。
+    return snapshot
+      ? this.executePreparedCommand(originalRequest, handlers, {
+          snapshot, environmentOverrides: environmentOverrides ?? context.environment, pathPrepend,
+        })
+      : this.executeCommand(originalRequest, handlers)
+  }
+
+  /** 校验原始 argv 与项目边界，应用已批准权限后启动受 Seatbelt 约束的进程。 */
   async executeCommand(
     request: AgentSandboxCommandRequest,
     handlers: AgentSandboxCommandOutputHandlers = {},
+  ): Promise<AgentSandboxCommandResult> {
+    return this.executePreparedCommand(request, handlers)
+  }
+
+  /** 校验原始请求，分配沙箱资源后才生成实际 argv；错误判断继续使用原始 request。 */
+  private async executePreparedCommand(
+    request: AgentSandboxCommandRequest,
+    handlers: AgentSandboxCommandOutputHandlers,
+    shellPreparation?: {
+      snapshot: AgentShellSnapshot
+      environmentOverrides?: Record<string, string | undefined>
+      pathPrepend?: string[]
+    },
   ): Promise<AgentSandboxCommandResult> {
     if (!this.capability.available) {
       throw new AgentSandboxExecutionError('sandboxUnavailable', '当前宿主无法应用 macOS Seatbelt 沙箱')
@@ -427,7 +550,14 @@ export class AgentSandboxCommandService {
         additionalWritableRoots: [temporaryDirectory, ...grants.writableRoots],
         networkAccess: grants.networkAccess,
       })
-      const result = await this.spawnSandboxedCommand(request, cwd, temporaryDirectory, profile, handlers)
+      const prepared = shellPreparation
+        ? prepareAgentShellSnapshotCommand({
+            argv: request.argv, cwd: request.cwd,
+            environmentOverrides: shellPreparation.environmentOverrides,
+            pathPrepend: shellPreparation.pathPrepend,
+          }, shellPreparation.snapshot)
+        : { argv: request.argv, environment: {} }
+      const result = await this.spawnSandboxedCommand(request, cwd, temporaryDirectory, profile, handlers, prepared)
       const escalation = this.detectCommandEscalation(request, policy, result)
       if (escalation) throw escalation
       return result
@@ -484,6 +614,7 @@ export class AgentSandboxCommandService {
     temporaryDirectory: string,
     profile: string,
     handlers: AgentSandboxCommandOutputHandlers,
+    prepared: { argv: string[]; environment: Record<string, string> },
   ): Promise<AgentSandboxCommandResult> {
     return new Promise((resolveResult, reject) => {
       const stdout: CapturedOutput = { chunks: [], bytes: 0, truncated: false }
@@ -497,13 +628,14 @@ export class AgentSandboxCommandService {
       let killTimer: ReturnType<typeof setTimeout> | undefined
 
       const child = spawn(this.capability.available ? this.capability.executablePath : '', [
-        '-p', profile, request.argv[0]!, ...request.argv.slice(1),
+        '-p', profile, prepared.argv[0]!, ...prepared.argv.slice(1),
       ], {
         cwd,
         detached: true,
         env: {
           ...process.env,
           ...request.environment,
+          ...prepared.environment,
           TMPDIR: temporaryDirectory,
           TMP: temporaryDirectory,
           TEMP: temporaryDirectory,

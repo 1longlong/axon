@@ -64,6 +64,11 @@ export function getSettingsPath(): string {
   return join(getConfigDir(), 'settings.json')
 }
 
+/** 宿主 Shell 执行缓存独立于会话历史；目录由快照发布流程创建并设置权限。 */
+export function getAgentShellSnapshotsDir(): string {
+  return join(homedir(), getConfigDirName(), 'shell_snapshots')
+}
+
 /** 用户资料文件路径（~/.axon/user-profile.json） */
 export function getUserProfilePath(): string {
   return join(getConfigDir(), 'user-profile.json')

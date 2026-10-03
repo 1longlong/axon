@@ -45,6 +45,7 @@ export type AgentErrorCode =
   | 'custom_tool_unavailable'
   | 'persistence_error'
   | 'runtime_error'
+  | 'sandbox_unavailable'
   | 'internal_error'
 
 /** IPC 只表示消息是否由主进程接管；模型成败以派发后 JSONL 中的 result 为准。 */

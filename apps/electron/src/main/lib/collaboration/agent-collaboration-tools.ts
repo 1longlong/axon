@@ -18,13 +18,6 @@ const TASK_LIST_TOOL = 'TaskList'
 const TASK_OUTPUT_TOOL = 'TaskOutput'
 const TASK_STOP_TOOL = 'TaskStop'
 
-/** 创建、查看任务属于安全编排；停止任务继续走普通权限确认。 */
-export const AGENT_COLLABORATION_SAFE_TOOL_NAMES = [
-  AGENT_TOOL,
-  TASK_LIST_TOOL,
-  TASK_OUTPUT_TOOL,
-] as const
-
 interface AgentCollaborationToolOptions {
   sessionId: string
   runSignal: AbortSignal
@@ -94,6 +87,7 @@ export function createAgentCollaborationTools(
   return [
     {
       name: AGENT_TOOL,
+      permissionMode: 'managed',
       description: '启动一个隔离上下文的子 Agent 处理聚焦任务。默认以前台方式运行并直接返回最终结果；只有任务可独立继续且当前不需要结果时才设置 run_in_background=true。子 Agent 不直接与用户对话，其结果由当前 Agent 检查、整合并向用户说明。',
       inputSchema: {
         type: 'object', additionalProperties: false, required: ['description', 'prompt'],
@@ -151,6 +145,7 @@ export function createAgentCollaborationTools(
     },
     {
       name: TASK_LIST_TOOL,
+      permissionMode: 'managed',
       description: '列出当前会话创建的后台任务；适合在上下文压缩后重新取得 task_id 或查看仍在运行的任务。',
       inputSchema: {
         type: 'object', additionalProperties: false,
@@ -184,6 +179,7 @@ export function createAgentCollaborationTools(
     },
     {
       name: TASK_OUTPUT_TOOL,
+      permissionMode: 'managed',
       description: '取得后台任务的当前状态和最终输出。默认立即返回快照；只有明确需要等待结果时才设置 block=true。',
       inputSchema: {
         type: 'object', additionalProperties: false, required: ['task_id'],

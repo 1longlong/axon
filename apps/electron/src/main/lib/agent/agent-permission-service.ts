@@ -10,20 +10,14 @@ import type {
   AgentSandboxEscalation,
   AgentSandboxGrant,
   AgentToolPermissionResult,
+  AgentToolExecution,
   AgentSubagentType,
 } from '@axon/shared'
-import { AGENT_MEMORY_SAFE_TOOL_NAMES } from '../memory/agent-memory-tools'
-import { AGENT_COLLABORATION_SAFE_TOOL_NAMES } from '../collaboration/agent-collaboration-tools'
-import { AGENT_TOOL_SEARCH_NAME } from './agent-tool-search'
 import { AGENT_SKILL_READ_TOOL_NAME } from '../project/agent-skill-read-tool'
 import { evaluateAgentCommandRule } from './agent-command-rules'
 
 const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1_000
-const SAFE_TOOLS = new Set([
-  'Read', 'Glob', 'Grep', 'LS', 'AskUserQuestion', AGENT_TOOL_SEARCH_NAME, AGENT_SKILL_READ_TOOL_NAME,
-  ...AGENT_MEMORY_SAFE_TOOL_NAMES,
-  ...AGENT_COLLABORATION_SAFE_TOOL_NAMES,
-])
+const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LS'])
 const SUBAGENT_READ_TOOLS = new Set([
   'Read', 'Glob', 'Grep', 'LS', 'MemoryList', 'MemoryRead', AGENT_SKILL_READ_TOOL_NAME,
 ])
@@ -38,6 +32,7 @@ interface PendingPermission {
   owner: number
   request: AgentPermissionRequest
   input: Record<string, unknown>
+  toolExecution?: AgentToolExecution
   resolve: (result: AgentToolPermissionResult) => void
   timeout: ReturnType<typeof setTimeout>
   cleanupSignals: () => void
@@ -65,7 +60,6 @@ function hasShellRisk(command: string): boolean {
 }
 
 function assessDanger(toolName: string, input: Record<string, unknown>): AgentPermissionDangerLevel {
-  if (SAFE_TOOLS.has(toolName)) return 'safe'
   if (toolName === 'Bash' && hasShellRisk(commandFrom(input))) return 'dangerous'
   return 'normal'
 }
@@ -111,10 +105,10 @@ function cloneEscalation(escalation: AgentSandboxEscalation): AgentSandboxEscala
   }
 }
 
-/** 顶层键排序后生成本轮白名单键；Bash 因参数含具体命令，只会复用完全相同的输入。 */
-function whitelistKey(toolName: string, input: Record<string, unknown>): string {
+/** 会话白名单绑定执行边界与排序后的输入，避免同名工具跨来源复用批准。 */
+function whitelistKey(toolName: string, input: Record<string, unknown>, toolExecution?: AgentToolExecution): string {
   const normalized = Object.fromEntries(Object.entries(input).sort(([left], [right]) => left.localeCompare(right)))
-  return `${toolName}:${JSON.stringify(normalized)}`
+  return `${JSON.stringify(toolExecution ?? null)}:${toolName}:${JSON.stringify(normalized)}`
 }
 
 export class AgentPermissionService {
@@ -171,17 +165,25 @@ export class AgentPermissionService {
       const commandRule = toolName === 'Bash'
         ? evaluateAgentCommandRule(commandFrom(input))
         : undefined
+      const execution = options.toolExecution
+      const sandboxed = execution?.kind === 'sandbox' && execution.mode === options.executionPolicy.sandboxMode
+      const nativeRead = READ_TOOLS.has(toolName) && (sandboxed || execution?.kind === 'runtime')
+      const managedHost = execution?.kind === 'host' && execution.permissionMode === 'managed'
+      if (runSignal.aborted || options.signal?.aborted) {
+        return { behavior: 'deny', message: 'Agent 运行已停止' }
+      }
       // 角色边界是硬限制；用户授权不能把 explore/plan 变成 coder。
       if (subagentType === 'explore' || subagentType === 'plan') {
-        if (SUBAGENT_READ_TOOLS.has(toolName)) return allow()
-        if (subagentType === 'explore' && commandRule?.decision === 'allow') {
+        if (!options.sandboxEscalation && (nativeRead || managedHost && SUBAGENT_READ_TOOLS.has(toolName))) return allow()
+        if (subagentType === 'explore' && sandboxed && execution.mode === 'readOnly'
+          && commandRule?.decision === 'allow' && !options.sandboxEscalation) {
           return allow()
         }
         return {
           behavior: 'deny',
           message: subagentType === 'plan'
             ? 'plan 子 Agent 只允许读取和分析，不能使用 Shell 或修改资源'
-            : 'explore 子 Agent 只允许读取、搜索和无副作用命令',
+            : 'explore 子 Agent 只允许读取、搜索和受只读沙箱保护的命令',
         }
       }
       // forbidden 是不可由历史白名单或用户审批覆盖的硬规则，必须先于二者判断。
@@ -189,6 +191,7 @@ export class AgentPermissionService {
         return { behavior: 'deny', message: `命令规则禁止执行：${commandRule.reason}` }
       }
       if (options.sandboxEscalation) {
+        if (!sandboxed) return { behavior: 'deny', message: '该工具没有宿主沙箱，不能申请沙箱升级权限' }
         const existingGrant = this.sessionSandboxGrants.get(sessionId)
           ?.get(permissionKey(toolName, input, options.sandboxEscalation))
         if (existingGrant) return { ...allow(), sandboxGrants: [existingGrant] }
@@ -204,15 +207,16 @@ export class AgentPermissionService {
           input,
           options.toolUseId,
           runSignal,
+          execution,
           options.signal,
           options.sandboxEscalation,
         )
       }
-      if (this.isWhitelisted(sessionId, toolName, input)) return allow()
-      if (SAFE_TOOLS.has(toolName)) return allow()
-      if (commandRule?.decision === 'allow') return allow()
-      // 写工具先在基础路径策略中尝试，只有宿主返回结构化越界请求时才产生审批。
-      if (SANDBOX_ATTEMPT_TOOLS.has(toolName)) {
+      if (this.isWhitelisted(sessionId, toolName, input, execution)) return allow()
+      if (nativeRead || managedHost) return allow()
+      if (sandboxed && commandRule?.decision === 'allow') return allow()
+      // 只有真实宿主文件工具可直接尝试；同名自定义工具或 runtime 原生写入必须普通审批。
+      if (sandboxed && SANDBOX_ATTEMPT_TOOLS.has(toolName)) {
         const grants = [...(this.sessionSandboxGrants.get(sessionId)?.values() ?? [])]
           .filter((grant) => grant.permission.type === 'filesystemWrite')
         return { ...allow(), ...(grants.length > 0 ? { sandboxGrants: grants } : {}) }
@@ -229,6 +233,7 @@ export class AgentPermissionService {
         input,
         options.toolUseId,
         runSignal,
+        execution,
         options.signal,
       )
     }
@@ -270,7 +275,7 @@ export class AgentPermissionService {
     }
     if (response.behavior === 'allow' && response.alwaysAllow && pending.request.allowAlways && !escalation) {
       const whitelist = this.sessionWhitelists.get(pending.request.sessionId) ?? new Set<string>()
-      whitelist.add(whitelistKey(pending.request.toolName, updatedInput))
+      whitelist.add(whitelistKey(pending.request.toolName, updatedInput, pending.toolExecution))
       this.sessionWhitelists.set(pending.request.sessionId, whitelist)
     }
     this.settle(
@@ -300,8 +305,8 @@ export class AgentPermissionService {
     return matches.length
   }
 
-  private isWhitelisted(sessionId: string, toolName: string, input: Record<string, unknown>): boolean {
-    return this.sessionWhitelists.get(sessionId)?.has(whitelistKey(toolName, input)) ?? false
+  private isWhitelisted(sessionId: string, toolName: string, input: Record<string, unknown>, toolExecution?: AgentToolExecution): boolean {
+    return this.sessionWhitelists.get(sessionId)?.has(whitelistKey(toolName, input, toolExecution)) ?? false
   }
 
   /** 先登记 pending 再广播请求，避免极快响应早于 Map 写入。 */
@@ -313,6 +318,7 @@ export class AgentPermissionService {
     input: Record<string, unknown>,
     toolUseId: string,
     runSignal: AbortSignal,
+    toolExecution?: AgentToolExecution,
     toolSignal?: AbortSignal,
     sandboxEscalation?: AgentSandboxEscalation,
   ): Promise<AgentToolPermissionResult> {
@@ -341,6 +347,7 @@ export class AgentPermissionService {
         owner,
         request,
         input,
+        toolExecution,
         resolve,
         cleanupSignals,
         timeout: setTimeout(() => {
