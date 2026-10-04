@@ -1,26 +1,69 @@
 import * as React from 'react'
-import { ChevronRight, File, Folder, FolderTree, Link, Loader2, RefreshCw, X } from 'lucide-react'
-import type { AgentWorkspaceFilePreview, AgentWorkspaceTreeEntry } from '@axon/shared'
+import { FileIcon } from '@react-symbols/icons/utils'
+import { ChevronRight, Link, Loader2, RefreshCw, X } from 'lucide-react'
+import type { AgentWorkspaceTreeEntry } from '@axon/shared'
+import { ProjectFolderIcon } from '@/components/icons/WorkbenchIcons'
+import { cn } from '@/lib/utils'
+import { EMPTY_WORKSPACE_FILE_TABS, workspaceFileTabsReducer } from '@/lib/workspace-file-tabs'
 import { useAgentController } from './AgentStateProvider'
+import { WorkspaceFileTabs } from './WorkspaceFileTabs'
 
-/** 文件工具窗口展示受限目录和只读预览；工作区切换或卸载时丢弃全部迟到响应。 */
-export function WorkspaceFileTree({ projectId, workspaceUpdatedAt }: {
+interface WorkspaceFileTreeProps {
   projectId: string
   workspaceUpdatedAt: number
-}): React.ReactElement {
+  treeOpen: boolean
+  treeId: string
+  treeAnchorRef: React.RefObject<HTMLButtonElement>
+  previewVisible: boolean
+  onPreviewOpenChange(open: boolean): void
+  onCloseTree(restoreFocus?: boolean): void
+}
+
+/** 文件工具窗口展示受限目录和只读预览；工作区切换或卸载时丢弃全部迟到响应。 */
+export function WorkspaceFileTree({ projectId, workspaceUpdatedAt, treeOpen, treeId, treeAnchorRef, previewVisible, onPreviewOpenChange, onCloseTree }: WorkspaceFileTreeProps): React.ReactElement {
   const controller = useAgentController()
   const [entries, setEntries] = React.useState<AgentWorkspaceTreeEntry[]>([])
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState(false)
   const [truncated, setTruncated] = React.useState(false)
   const [watchFailed, setWatchFailed] = React.useState(false)
-  const [preview, setPreview] = React.useState<AgentWorkspaceFilePreview | null>(null)
-  const [previewLoading, setPreviewLoading] = React.useState(false)
-  const [previewError, setPreviewError] = React.useState(false)
-  const selectedPath = React.useRef<string | null>(null)
+  const [files, dispatchFiles] = React.useReducer(workspaceFileTabsReducer, EMPTY_WORKSPACE_FILE_TABS)
+  const filesRef = React.useRef(files)
+  filesRef.current = files
   const requestVersion = React.useRef(0)
   const previewVersion = React.useRef(0)
+  const workspaceVersion = React.useRef(0)
+  const treeRef = React.useRef<HTMLElement>(null)
+  const hasPreview = files.tabs.length > 0
 
+  // 只在打开/关闭预览时通知布局；目录监听重读同一文件不会强行展开手动收起的预览。
+  React.useEffect(() => {
+    onPreviewOpenChange(hasPreview)
+  }, [hasPreview, onPreviewOpenChange])
+
+  /** 浮层非模态：Escape 归还图标焦点，点击外部仅收树，不抢走目标控件的焦点。 */
+  React.useEffect(() => {
+    if (!treeOpen) return
+    treeRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      onCloseTree()
+    }
+    const onPointerDown = (event: PointerEvent): void => {
+      if (!(event.target instanceof Node)) return
+      if (treeRef.current?.contains(event.target) || treeAnchorRef.current?.contains(event.target)) return
+      onCloseTree(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [onCloseTree, treeAnchorRef, treeOpen])
+
+  /** 目录读取经 controller 获取受限树；只接收最新请求，避免监听刷新乱序覆盖。 */
   const load = React.useCallback(async (): Promise<void> => {
     const version = ++requestVersion.current
     setLoading(true)
@@ -37,123 +80,114 @@ export function WorkspaceFileTree({ projectId, workspaceUpdatedAt }: {
     }
   }, [controller, projectId])
 
-  /** 预览请求独立防乱序，快速切换文件时旧内容不会覆盖新选择。 */
-  const loadPreview = React.useCallback(async (relativePath: string): Promise<void> => {
-    const version = ++previewVersion.current
-    selectedPath.current = relativePath
-    setPreviewLoading(true)
-    setPreviewError(false)
+  /** 每个文件独立接收读取结果；目录刷新不切换激活项，重置后的迟到响应直接丢弃。 */
+  const loadPreview = React.useCallback(async (relativePath: string, activate = true): Promise<void> => {
+    const requestId = ++previewVersion.current
+    const version = workspaceVersion.current
+    dispatchFiles({ type: 'load', relativePath, requestId, activate })
     try {
       const next = await controller.readProjectFile(projectId, relativePath)
-      if (previewVersion.current === version) setPreview(next)
+      if (workspaceVersion.current === version) dispatchFiles({ type: 'loaded', relativePath, requestId, preview: next })
     } catch {
-      if (previewVersion.current === version) {
-        setPreview(null)
-        setPreviewError(true)
-      }
-    } finally {
-      if (previewVersion.current === version) setPreviewLoading(false)
+      if (workspaceVersion.current === version) dispatchFiles({ type: 'failed', relativePath, requestId })
     }
   }, [controller, projectId])
 
-  const closePreview = React.useCallback((): void => {
-    previewVersion.current += 1
-    selectedPath.current = null
-    setPreview(null)
-    setPreviewError(false)
-    setPreviewLoading(false)
-  }, [])
-
+  // 工作区重置先隔离旧响应，再订阅刷新；卸载同时释放监听和读取结果的归属。
   React.useEffect(() => {
-    closePreview()
+    workspaceVersion.current += 1
+    dispatchFiles({ type: 'clear' })
     void load()
     setWatchFailed(false)
     const unsubscribe = controller.onProjectDirectoryChanged((event) => {
       if (event.projectId !== projectId) return
       void load()
-      if (selectedPath.current) void loadPreview(selectedPath.current)
+      for (const tab of filesRef.current.tabs) void loadPreview(tab.relativePath, false)
     })
     void controller.watchProjectDirectory(projectId).catch(() => setWatchFailed(true))
     return () => {
       requestVersion.current += 1
-      previewVersion.current += 1
+      workspaceVersion.current += 1
       unsubscribe()
       void controller.unwatchProjectDirectory(projectId).catch(() => {})
     }
-  }, [closePreview, controller, load, loadPreview, projectId, workspaceUpdatedAt])
+  }, [controller, load, loadPreview, projectId, workspaceUpdatedAt])
 
-  return <section aria-label="工作区文件面板" className="flex h-full min-h-0 flex-col">
-    <div className="titlebar-drag-region flex h-12 shrink-0 items-center gap-2 border-b px-3">
-      <FolderTree size={14} />
-      <span className="flex-1 text-xs font-medium">工作区文件</span>
-      <button type="button" aria-label="刷新工作区文件" disabled={loading} onClick={() => void load()} className="titlebar-no-drag rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40">
-        {loading ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-      </button>
-    </div>
-    <div className={`min-h-0 overflow-auto p-2 text-xs ${preview || previewLoading || previewError ? 'h-1/2 shrink-0 border-b' : 'flex-1'}`}>
-      {error
-        ? <p className="px-1 py-2 text-destructive">读取工作区文件失败</p>
-        : !loading && entries.length === 0
-          ? <p className="px-1 py-2 text-muted-foreground">工作区暂无文件</p>
-          : <TreeEntries entries={entries} selectedPath={selectedPath.current} onSelect={(path) => void loadPreview(path)} />}
-      {truncated && <p className="mt-2 border-t px-1 pt-2 text-[11px] text-muted-foreground">文件较多，仅显示部分内容</p>}
-      {watchFailed && <p className="mt-2 border-t px-1 pt-2 text-[11px] text-muted-foreground">自动刷新不可用，可手动刷新</p>}
-    </div>
-    {(preview || previewLoading || previewError) && <FilePreview preview={preview} loading={previewLoading} error={previewError} onClose={closePreview} />}
+  return <section aria-label="工作区文件面板" className="relative flex h-full min-h-0 flex-col">
+    {/* 保持各 Tab 内容挂载，切换或手动收栏时保留阅读位置。 */}
+    {hasPreview && <div hidden={!previewVisible} className={cn('flex min-h-0 flex-1 flex-col', !previewVisible && 'hidden')}>
+      <WorkspaceFileTabs tabs={files.tabs} activePath={files.activePath}
+        onSelect={(relativePath) => dispatchFiles({ type: 'activate', relativePath })}
+        onClose={(relativePath) => {
+          dispatchFiles({ type: 'close', relativePath })
+          if (files.tabs.length === 1) treeAnchorRef.current?.focus()
+        }} />
+    </div>}
+    {/* 仅隐藏浮层而不卸载：目录展开态、文件预览和工作区监听都继续有效。 */}
+    <section ref={treeRef} id={treeId} role="dialog" aria-modal="false" tabIndex={-1} aria-label="工作区文件树" hidden={!treeOpen} className={cn('workspace-file-tree-popover absolute right-3 top-2 z-30 w-72 max-w-[calc(100vw_-_4rem)] max-h-[min(28rem,calc(100%_-_1rem))] min-h-0 flex-col rounded-[8px] border border-border text-popover-foreground shadow-sm outline-none', treeOpen ? 'flex' : 'hidden')}>
+      <span aria-hidden="true" className="workspace-file-tree-pointer pointer-events-none absolute" />
+      <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-border-subtle px-2.5">
+        <ProjectFolderIcon size={14} className="shrink-0 text-amber-500 dark:text-amber-400" />
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold">工作区文件</span>
+        <button type="button" aria-label="刷新工作区文件" title="刷新工作区文件" disabled={loading} onClick={() => void load()} className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
+          {loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+        </button>
+        <button type="button" aria-label="收起工作区文件树" title="收起文件树，保留预览" onClick={() => onCloseTree()} className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"><X size={12} /></button>
+      </div>
+      <div className="min-h-0 overflow-auto px-1.5 py-1.5 font-mono text-[11px]">
+        {error
+          ? <p className="px-1 py-2 text-destructive">读取工作区文件失败</p>
+          : loading && entries.length === 0
+            ? <p className="px-1 py-2 text-muted-foreground">正在读取工作区…</p>
+            : !loading && entries.length === 0
+              ? <p className="px-1 py-2 text-muted-foreground">工作区暂无文件</p>
+              : <WorkspaceTreeEntries entries={entries} selectedPath={files.activePath} onSelect={(path) => {
+                if (files.tabs.some((tab) => tab.relativePath === path)) dispatchFiles({ type: 'activate', relativePath: path })
+                else void loadPreview(path)
+              }} />}
+        {truncated && <p className="mt-2 border-t border-border-subtle px-1 pt-2 text-[11px] text-muted-foreground">文件较多，仅显示部分内容</p>}
+        {watchFailed && <p className="mt-2 border-t border-border-subtle px-1 pt-2 text-[11px] text-muted-foreground">自动刷新不可用，可手动刷新</p>}
+      </div>
+      {!loading && !error && <div className="shrink-0 border-t border-border-subtle px-3 py-1 font-mono text-[10px] text-muted-foreground">顶层 {entries.length} 项{truncated ? '（部分）' : ''}</div>}
+    </section>
   </section>
 }
 
-function TreeEntries({ entries, selectedPath, onSelect }: {
+interface WorkspaceTreeEntriesProps {
   entries: AgentWorkspaceTreeEntry[]
   selectedPath: string | null
   onSelect(relativePath: string): void
-}): React.ReactElement {
+}
+
+export function WorkspaceTreeEntries({ entries, selectedPath, onSelect }: WorkspaceTreeEntriesProps): React.ReactElement {
   return <div className="space-y-0.5">{entries.map((entry) => (
     entry.kind === 'directory'
-      ? <details key={entry.relativePath}>
-          <summary className="group flex cursor-pointer list-none items-center gap-1 rounded px-1 py-1 hover:bg-muted [&::-webkit-details-marker]:hidden">
-            <ChevronRight size={11} className="shrink-0 transition-transform group-open:rotate-90" />
-            <Folder size={13} className="shrink-0 text-muted-foreground" />
+      ? <details key={entry.relativePath} className="[&[open]>summary>svg:first-child]:rotate-90">
+          <summary className="flex min-w-0 cursor-pointer list-none items-center gap-1.5 rounded px-1.5 py-1 hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+            <ChevronRight size={11} className="shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none" />
+            <ProjectFolderIcon size={13} className="shrink-0 text-amber-500 dark:text-amber-400" />
             <span className="truncate" title={entry.relativePath}>{entry.name}</span>
           </summary>
-          {entry.children && entry.children.length > 0 && <div className="ml-3 border-l pl-1">
-            <TreeEntries entries={entry.children} selectedPath={selectedPath} onSelect={onSelect} />
+          {entry.children && entry.children.length > 0 && <div className="ml-3 pl-1">
+            <WorkspaceTreeEntries entries={entry.children} selectedPath={selectedPath} onSelect={onSelect} />
           </div>}
         </details>
       : entry.kind === 'symlink'
-        ? <div key={entry.relativePath} className="flex items-center gap-1 rounded px-1 py-1 pl-[18px] text-muted-foreground">
+        ? <div key={entry.relativePath} className="flex min-w-0 items-center gap-1.5 rounded px-1.5 py-1 pl-[23px] text-muted-foreground">
             <Link size={12} className="shrink-0" /><span className="truncate" title={entry.relativePath}>{entry.name}</span>
           </div>
-        : <button type="button" key={entry.relativePath} aria-label={`预览 ${entry.relativePath}`} onClick={() => onSelect(entry.relativePath)} className={`flex w-full items-center gap-1 rounded px-1 py-1 pl-[18px] text-left hover:bg-muted ${selectedPath === entry.relativePath ? 'bg-muted' : ''}`}>
-            <File size={12} className="shrink-0 text-muted-foreground" />
+        : <button type="button" key={entry.relativePath} aria-label={`预览 ${entry.relativePath}`} aria-pressed={selectedPath === entry.relativePath} onClick={() => onSelect(entry.relativePath)} className={cn('flex w-full min-w-0 items-center gap-1.5 rounded border border-transparent px-1.5 py-1 pl-[23px] text-left hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring', selectedPath === entry.relativePath && 'border-border bg-background font-medium text-foreground')}>
+            <WorkspaceFileIcon name={entry.name} size={14} />
             <span className="truncate" title={entry.relativePath}>{entry.name}</span>
           </button>
   ))}</div>
 }
 
-function FilePreview({ preview, loading, error, onClose }: {
-  preview: AgentWorkspaceFilePreview | null
-  loading: boolean
-  error: boolean
-  onClose(): void
-}): React.ReactElement {
-  return <section aria-label="文件预览" className="flex min-h-0 flex-1 flex-col bg-background">
-    <div className="flex h-9 shrink-0 items-center gap-2 border-b px-3">
-      <span className="min-w-0 flex-1 truncate text-[11px] font-medium">{preview?.relativePath ?? '文件预览'}</span>
-      <button type="button" aria-label="关闭文件预览" onClick={onClose} className="rounded p-1 text-muted-foreground hover:bg-muted"><X size={12} /></button>
-    </div>
-    <div className="min-h-0 flex-1 overflow-auto p-3 text-xs">
-      {loading
-        ? <p className="flex items-center gap-1.5 text-muted-foreground"><Loader2 size={12} className="animate-spin" />正在读取…</p>
-        : error
-          ? <p className="text-destructive">文件不存在或无法安全读取</p>
-          : preview?.kind === 'too_large'
-            ? <p className="text-muted-foreground">文件超过 512 KB，暂不预览</p>
-            : preview?.kind === 'binary'
-              ? <p className="text-muted-foreground">二进制文件暂不预览</p>
-              : preview?.kind === 'text'
-                ? <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5">{preview.content}</pre>
-                : null}
-    </div>
-  </section>
+interface WorkspaceFileIconProps {
+  name: string
+  size: number
+}
+
+function WorkspaceFileIcon({ name, size }: WorkspaceFileIconProps): React.ReactElement {
+  return <FileIcon fileName={name} autoAssign width={size} height={size} aria-hidden="true" focusable="false" className="shrink-0 text-muted-foreground" />
 }

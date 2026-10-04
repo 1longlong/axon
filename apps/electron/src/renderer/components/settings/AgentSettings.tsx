@@ -116,13 +116,13 @@ export function AgentSettings(): React.ReactElement {
     }
   }
 
-  return <section>
-    <h1 className="text-xl font-semibold">Agent 设置</h1>
-    <p className="mt-1 text-sm text-muted-foreground">配置所有项目共享的 Agent 行为。</p>
-    <div className="mt-6 rounded-xl border bg-card p-4 shadow-sm">
-      <div className="flex items-center justify-between gap-6">
+  return <section className="max-w-3xl">
+    <h1 className="text-sm font-semibold">Agent 设置</h1>
+    <p className="mt-1 text-xs leading-5 text-muted-foreground">配置所有项目共享的 Agent 行为。</p>
+    <div className="mt-4 rounded-md border border-border-subtle bg-[hsl(var(--input-surface))] p-4">
+      <div className="flex items-center justify-between gap-4">
         <div>
-          <p className="text-sm font-medium">Git / PR 标识</p>
+          <p className="text-xs font-medium">Git / PR 标识</p>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
             Agent 创建 commit 或 PR/MR 时附加 Axon 标识；不会修改 Git 作者，也不会添加共同作者。
           </p>
@@ -134,19 +134,19 @@ export function AgentSettings(): React.ReactElement {
           aria-label="Git / PR 标识"
           disabled={loading || saving}
           onClick={() => void changeAttribution(!enabled)}
-          className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50 ${enabled ? 'bg-primary' : 'bg-muted'}`}
+          className={`relative h-5 w-9 shrink-0 rounded-full transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 ${enabled ? 'bg-primary' : 'bg-muted'}`}
         >
-          <span className={`absolute left-1 top-1 size-4 rounded-full bg-background shadow transition-transform ${enabled ? 'translate-x-5' : 'translate-x-0'}`} />
+          <span className={`absolute left-1 top-1 size-3 rounded-full bg-background shadow transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0'}`} />
         </button>
       </div>
     </div>
-    <div className="mt-6 rounded-xl border bg-card p-4 shadow-sm">
-      <div className="flex items-start justify-between gap-4">
+    <div className="mt-4 rounded-md border border-border-subtle bg-[hsl(var(--input-surface))] p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-medium">Agent 系统提示词</h2>
+          <h2 className="text-xs font-medium">Agent 系统提示词</h2>
           <p className="mt-1 text-xs text-muted-foreground">只影响之后的 Agent 请求，Chat 不使用。</p>
         </div>
-        <span className="shrink-0 rounded-full bg-muted px-3 py-1 text-xs text-muted-foreground">
+        <span className="shrink-0 rounded border border-border-subtle bg-muted/50 px-2 py-1 text-[11px] text-muted-foreground">
           当前：{appliedPrompt ? appliedTemplate?.name ?? '自定义内容' : '空白'}
         </span>
       </div>
@@ -163,7 +163,7 @@ export function AgentSettings(): React.ReactElement {
             setPromptTouched(true)
             setMessage(null)
           }}
-          className="h-9 min-w-0 flex-1 rounded-md border bg-background px-2 text-sm outline-none focus:ring-1 focus:ring-ring"
+          className="h-8 min-w-0 flex-1 rounded-md border bg-[hsl(var(--input-surface))] px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
           aria-label="Agent 系统提示词预设"
         >
           <option value="">空白</option>
@@ -185,7 +185,7 @@ export function AgentSettings(): React.ReactElement {
           <button
             type="button"
             onClick={() => void deleteCustomTemplate(selectedTemplateId)}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border text-muted-foreground hover:bg-muted hover:text-foreground"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             title="删除当前预设"
             aria-label="删除当前预设"
           >
@@ -199,7 +199,7 @@ export function AgentSettings(): React.ReactElement {
           setPromptDraft(event.target.value)
           setPromptTouched(true)
         }}
-        className="mt-3 h-72 w-full resize-y rounded-md border bg-background p-3 font-mono text-xs leading-5 outline-none focus:ring-1 focus:ring-ring"
+        className="mt-3 h-56 w-full resize-y rounded-md border bg-[hsl(var(--input-surface))] p-3 font-mono text-xs leading-5 outline-none focus:ring-1 focus:ring-ring"
         placeholder="当前为空白，不向 Agent 添加用户系统提示词。"
         aria-label="Agent 系统提示词内容"
       />
@@ -208,21 +208,22 @@ export function AgentSettings(): React.ReactElement {
           type="button"
           disabled={promptSaving}
           onClick={() => void applyPrompt()}
-          className="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-50"
+          className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
         >
           {promptSaving ? '正在应用…' : '应用到 Agent'}
         </button>
         <input
+          aria-label="自定义模板名称"
           value={newTemplateName}
           onChange={(event) => setNewTemplateName(event.target.value)}
-          className="h-8 min-w-44 rounded-md border bg-background px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
+          className="h-8 min-w-0 w-44 rounded-md border bg-[hsl(var(--input-surface))] px-2 text-xs outline-none focus:ring-1 focus:ring-ring"
           placeholder="新预设名称"
           maxLength={100}
         />
         <button
           type="button"
           onClick={() => void saveCustomTemplate()}
-          className="rounded-md border px-3 py-1.5 text-xs hover:bg-muted"
+          className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           新增预设
         </button>

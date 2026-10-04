@@ -5,7 +5,8 @@
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { Bot, ChevronRight, FolderKanban, Loader2, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Search, Settings, Trash2 } from 'lucide-react'
+import { ChevronRight, PanelLeft, Plus, Search, Settings, Trash2 } from 'lucide-react'
+import { AgentModeIcon, ChatIcon, ProjectFolderIcon } from '@/components/icons/WorkbenchIcons'
 import { appModeAtom } from '@/atoms/app-mode'
 import {
   activeTabIdAtom,
@@ -164,13 +165,13 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
         aria-label="左侧会话栏"
         style={{ width: LEFT_SIDEBAR_COLLAPSED_WIDTH }}
         className={cn(
-          'flex h-full shrink-0 flex-col items-center gap-2 border-r bg-[hsl(var(--sidebar-surface))] px-2 pb-2',
+          'flex h-full shrink-0 flex-col items-center gap-1 border-r border-border-subtle bg-[hsl(var(--sidebar-surface))] px-2 pb-2',
           !isWindows && 'pt-10',
           isWindows && 'pt-2',
         )}
       >
         {(['agent', 'chat'] as const).map((mode) => {
-          const Icon = mode === 'agent' ? Bot : MessageSquare
+          const Icon = mode === 'agent' ? AgentModeIcon : ChatIcon
           return (
             <button
               key={mode}
@@ -183,11 +184,11 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
                 if (existing) setActiveTabId(existing.id)
               }}
               className={cn(
-                'flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground',
+                'flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
                 appMode === mode && 'bg-muted text-foreground',
               )}
             >
-              <Icon size={17} />
+              <Icon size={14} />
             </button>
           )
         })}
@@ -197,27 +198,27 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
           aria-label={appMode === 'chat' ? '新建对话' : '新建 Agent 项目'}
           disabled={creatingChat || creatingAgent || (appMode === 'chat' && !creationReady)}
           onClick={handleCreate}
-          className="mt-1 flex h-9 w-9 items-center justify-center rounded-lg border border-dashed text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="mt-1 flex h-8 w-8 items-center justify-center rounded-md border text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
-          <Plus size={17} />
+          <Plus size={14} />
         </button>
         <button
           type="button"
           title="设置"
           aria-label="设置"
           onClick={() => setSettingsOpen(true)}
-          className="mt-auto flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="mt-auto flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
         >
-          <Settings size={17} />
+          <Settings size={14} />
         </button>
         <button
           type="button"
           title="展开侧栏"
           aria-label="展开侧栏"
           onClick={() => setCollapsed(false)}
-          className="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
         >
-          <PanelLeftOpen size={17} />
+          <PanelLeft size={14} />
         </button>
       </aside>
     )
@@ -238,45 +239,46 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
       aria-label="左侧会话栏"
       style={{ width }}
       className={cn(
-        'flex h-full shrink-0 flex-col bg-[hsl(var(--sidebar-surface))] px-3 pb-3',
-        !isWindows && 'pt-8',
+        'flex h-full shrink-0 flex-col border-r border-border-subtle bg-[hsl(var(--sidebar-surface))] px-2 pb-2',
+        !isWindows && 'pt-10',
         isWindows && 'pt-2',
       )}
     >
-      <ModeSwitcher />
+      <div className="px-1"><ModeSwitcher /></div>
 
       {appMode === 'chat' ? <button
           type="button"
           disabled={creatingChat || !creationReady}
           onClick={handleCreate}
-          className="mt-3 flex h-9 items-center justify-center gap-2 rounded-lg border border-dashed text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="mt-3 flex h-8 items-center justify-center gap-1.5 rounded-md border bg-background text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40"
         >
-          <Plus size={15} />
+          <Plus size={14} />
           {!creationReady ? '正在加载渠道…' : creatingChat ? '正在新建…' : '新建对话'}
         </button>
-        : <ProjectCreateActions disabled={creatingAgent} onError={setProjectError} />}
+        : null}
 
-      <div className="mt-5 flex items-center px-1">
-        <span className="text-xs font-medium text-muted-foreground">
-          {appMode === 'chat' ? '全部对话' : 'Agent 项目'}
+      <div className="mt-2 flex min-h-6 items-center justify-between gap-1 px-2">
+        <span className="font-mono text-[11px] font-medium text-muted-foreground">
+          {appMode === 'chat' ? '全部对话' : '项目与会话'}
         </span>
+        {appMode === 'agent' && <ProjectCreateActions compact disabled={creatingAgent} onError={setProjectError} />}
       </div>
 
       {appMode === 'agent' && agentState.projects.length > 0 && (
-        <label className="relative mt-2 block">
-          <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+        <label className="relative mt-1 block px-1">
+          <Search size={12} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <input
             type="search"
             aria-label="搜索 Agent 会话"
             value={agentSearchQuery}
             onChange={(event) => setAgentSearchQuery(event.target.value)}
             placeholder="搜索项目或会话"
-            className="h-8 w-full rounded-md border bg-background pl-8 pr-2 text-xs outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
+            className="h-7 w-full rounded border bg-muted/40 pl-7 pr-2 text-xs outline-none placeholder:text-muted-foreground focus:bg-background focus:ring-1 focus:ring-ring"
           />
         </label>
       )}
 
-      <div onScroll={() => setHoveredProject(null)} className="mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto scrollbar-none">
+      <div onScroll={() => setHoveredProject(null)} className="mt-3 min-h-0 flex-1 space-y-2 overflow-y-auto scrollbar-none">
         {appMode === 'chat' ? (
           chatState.conversationsStatus === 'loading' && chatState.conversations.length === 0 ? (
             <p className="px-2 py-6 text-center text-xs text-muted-foreground">正在加载对话…</p>
@@ -285,25 +287,24 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
           ) : chatState.conversations.length === 0 ? (
             <p className="px-2 py-6 text-center text-xs text-muted-foreground">暂无对话</p>
           ) : chatState.conversations.map((conversation) => (
-            <div key={conversation.id} className="group flex h-9 items-center rounded-lg hover:bg-muted/60">
+            <div key={conversation.id} className={cn('group flex h-7 items-center rounded hover:bg-muted/60', activeTabId === conversation.id && 'bg-muted/70')}>
               <button
                 type="button"
                 onClick={() => handleSelectConversation(conversation)}
                 className={cn(
-                  'flex h-full min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-left text-sm transition-colors',
-                  activeTabId === conversation.id ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
+                  'flex h-full min-w-0 flex-1 items-center gap-1.5 rounded px-2 text-left text-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+                  activeTabId === conversation.id ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
                 )}
               >
-                <MessageSquare size={15} className="shrink-0" />
                 <span className="truncate">{conversation.title}</span>
               </button>
               <button
                 type="button"
                 aria-label={`删除对话 ${conversation.title}`}
                 onClick={() => void handleDeleteConversation(conversation)}
-                className="mr-1 hidden rounded p-1 text-muted-foreground hover:bg-background hover:text-destructive group-hover:block"
+                className="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 hover:bg-background hover:text-destructive group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               >
-                <Trash2 size={13} />
+                <Trash2 size={12} />
               </button>
             </div>
           ))
@@ -318,8 +319,9 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
         ) : agentProjectTree.map(({ project, sessions }) => {
           const projectCollapsed = collapsedProjects.has(project.id) && !agentSearchQuery.trim()
           const projectSessionCount = agentState.sessions.filter((session) => session.projectId === project.id).length
-          return <section key={project.id} aria-label={`项目 ${project.name}`} className="rounded-lg border border-transparent hover:border-border/60">
-            <div className="group flex min-h-10 items-center rounded-lg px-1 hover:bg-muted/60"
+          const projectActive = sessions.some((session) => tabs.some((tab) => tab.type === 'agent' && tab.sessionId === session.id && tab.id === activeTabId))
+          return <section key={project.id} aria-label={`项目 ${project.name}`}>
+            <div className="group flex min-h-7 items-center rounded-md px-1 hover:bg-muted/60"
               onMouseEnter={(event) => showProjectInfo(project, projectSessionCount, event.currentTarget)}
               onMouseLeave={() => setHoveredProject(null)} onClickCapture={() => setHoveredProject(null)}>
               <button type="button" aria-label={`${projectCollapsed ? '展开' : '收起'}项目 ${project.name}`}
@@ -329,42 +331,43 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
                   else next.add(project.id)
                   return next
                 })}
-                className="flex min-w-0 flex-1 items-center gap-2 px-1 py-2 text-left">
-                <ChevronRight size={13} className={cn('shrink-0 transition-transform', !projectCollapsed && 'rotate-90')} />
-                <FolderKanban size={15} className="shrink-0" />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-sm font-medium text-foreground">{project.name}</span>
-                  <span className="block truncate text-[10px] text-muted-foreground">
-                    {project.workspace.kind === 'local' ? '本地工作区 · ' : ''}{projectSessionCount} 个会话
-                  </span>
-                </span>
+                className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-1.5 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+                <ChevronRight size={12} className={cn('shrink-0 text-muted-foreground transition-transform motion-reduce:transition-none', !projectCollapsed && 'rotate-90')} />
+                <ProjectFolderIcon size={14} className={cn('shrink-0', projectActive ? 'text-amber-500 dark:text-amber-400' : 'text-muted-foreground')} />
+                <span className="min-w-0 truncate text-xs font-medium text-foreground">{project.name}</span>
+                {project.workspace.kind === 'local' && <span className="shrink-0 rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground">本地</span>}
+                <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{projectSessionCount} 会话</span>
               </button>
-              <AgentSessionCreateMenu projectName={project.name} disabled={creatingAgent}
-                onCreate={(runtimeId) => handleCreateAgentSession(project.id, runtimeId)} />
-              <ProjectActions project={project} sessionCount={projectSessionCount} disabled={creatingAgent} onError={setProjectError} />
+              {/* 菜单平时不占标题宽度；鼠标悬停或键盘进入节点时显示，长名称仍可截断。 */}
+              <div className="pointer-events-none flex w-0 shrink-0 items-center opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:w-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:w-auto group-focus-within:opacity-100 motion-reduce:transition-none">
+                <AgentSessionCreateMenu projectName={project.name} disabled={creatingAgent}
+                  onCreate={(runtimeId) => handleCreateAgentSession(project.id, runtimeId)} />
+                <ProjectActions project={project} sessionCount={projectSessionCount} disabled={creatingAgent} onError={setProjectError} />
+              </div>
             </div>
-            {!projectCollapsed && <div className="mb-1 ml-5 border-l pl-2">
+            {!projectCollapsed && <div className="mb-1 ml-4 space-y-0.5 pl-1">
               {sessions.length === 0
                 ? <p className="px-2 py-2 text-[11px] text-muted-foreground">暂无会话</p>
                 : sessions.map((session) => {
                     const tab = tabs.find((item) => item.type === 'agent' && item.sessionId === session.id)
+                    const isActive = tab !== undefined && activeTabId === tab.id
                     const runSource = agentState.activeRunSourcesBySession[session.id]
-                    return <div key={session.id} className="group/session flex h-9 items-center rounded-md hover:bg-muted/60">
-                      <button type="button" onClick={() => handleSelectAgentSession(session)}
+                    return <div key={session.id} className={cn('group/session relative flex h-7 items-center rounded hover:bg-muted/60', isActive && 'bg-muted/70')}>
+                      {isActive && <span aria-hidden="true" className="pointer-events-none absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-indigo-500 dark:bg-indigo-400" />}
+                      <button type="button" aria-current={isActive ? 'page' : undefined}
+                        aria-label={runSource ? `${session.title}（${runSource === 'external' ? '外部任务运行中' : '运行中'}）` : undefined}
+                        onClick={() => handleSelectAgentSession(session)}
                         className={cn(
-                          'flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-left text-xs',
-                          activeTabId === tab?.id ? 'bg-muted text-foreground' : 'text-muted-foreground hover:text-foreground',
+                          'flex h-full min-w-0 flex-1 items-center gap-1.5 rounded px-2 text-left text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+                          isActive ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
                         )}>
-                        {runSource
-                          ? <Loader2 size={13} className="shrink-0 animate-spin" aria-label={runSource === 'external' ? '外部任务运行中' : '运行中'} />
-                          : <Bot size={13} className="shrink-0" />}
                         <span className="truncate">{session.title}</span>
-                        {session.runtimeId === 'zima' && <span className="shrink-0 rounded bg-muted px-1 text-[10px]">Zima</span>}
-                        {runSource === 'external' && <span className="shrink-0 rounded bg-muted px-1 text-[9px]">外部</span>}
+                        {session.runtimeId === 'zima' && <span className="shrink-0 rounded bg-muted px-1 font-mono text-[10px]">Zima</span>}
+                        {runSource === 'external' && <span className="shrink-0 rounded bg-muted px-1 font-mono text-[10px]">外部</span>}
                       </button>
                       <button type="button" aria-label={`删除 Agent 会话 ${session.title}`}
                         onClick={() => void handleDeleteAgentSession(session)}
-                        className="mr-1 hidden rounded p-1 text-muted-foreground hover:bg-background hover:text-destructive group-hover/session:block">
+                        className="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 hover:bg-background hover:text-destructive group-hover/session:opacity-100 group-focus-within/session:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
                         <Trash2 size={12} />
                       </button>
                     </div>
@@ -377,13 +380,13 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
         )}
       </div>
 
-      <div className="flex h-10 items-end gap-1 border-t pt-2">
+      <div className="flex h-9 shrink-0 items-end gap-1 border-t border-border-subtle pt-1">
         <button
           type="button"
           onClick={() => setSettingsOpen(true)}
-          className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
-          <Settings size={16} />
+          <Settings size={14} />
           设置
         </button>
         <button
@@ -391,9 +394,9 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
           title="收起侧栏"
           aria-label="收起侧栏"
           onClick={() => setCollapsed(true)}
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
-          <PanelLeftClose size={17} />
+          <PanelLeft size={14} />
         </button>
       </div>
     </aside>

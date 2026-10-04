@@ -59,8 +59,8 @@ export function AgentSessionCreateMenu({ projectName, disabled, onCreate }: {
     <button ref={triggerRef} type="button" disabled={disabled} aria-expanded={open}
       aria-label={`在 ${projectName} 中新建会话`} title="新建会话"
       onClick={() => { setPosition(null); setOpen((current) => !current) }}
-      className="flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-foreground disabled:opacity-40">
-      <Plus size={14} />
+      className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
+      <Plus size={12} />
     </button>
     {open && createPortal(<div ref={menuRef} role="menu" aria-label={`选择 ${projectName} 会话 Runtime`}
       style={{ position: 'fixed', left: position?.left ?? 0, top: position?.top ?? 0, width: MENU_WIDTH, visibility: position ? 'visible' : 'hidden' }}

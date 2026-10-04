@@ -1,64 +1,65 @@
 # Axon 当前进度
 
-> 只保留当前可执行状态；新会话结合根目录 `AGENTS.md` 与 `docs/axon-project-design.md` 继续。
+> 更新于 2026-10-05。只保留当前可执行状态；新会话结合 [工程约定](../AGENTS.md)、[项目设计](axon-project-design.md)和 [UI 实现](ui-design.md)继续。
 
-## 当前状态
+## 当前迭代与发行
 
-- 当前发行版本为 v0.1.3，macOS Apple Silicon DMG/ZIP、SHA-256 清单和 release notes 已发布到 GitHub Release；发行提交 `c80d660` 与标签已推送。
-- 迭代 23“Agent Shell 文件快照执行”的四阶段及关联权限修复已完成。Pi 支持用户 Shell 解析、会话初始化异步预热、私有快照原子发布、条件恢复、环境覆盖与原始命令审批归因。
-- 会话删除、工作区改变和应用退出都会释放快照引用；初始化时异步清理无归属或三天不活跃的遗留缓存，排除在途预热与跨轮引用。
-- 主会话无 Plan 模式；独立 plan 子 Agent 保留。Pi 受宿主保护的普通/复合 Bash 命令先进入 Seatbelt，不因未命中白名单提前申请审批；显式禁止规则及真实越界升级仍有效。
-- Pi 仍为新会话默认 runtime；Zima 未接入宿主 Shell 快照/Seatbelt 委托，受控 Python 分发仍待完成。
-- Pi 宿主沙箱不可用时拒绝本轮，不再退回原生工具；Zima 无沙箱副作用工具等待普通人工审批。explore/plan 创建和逐轮执行均收窄为只读，审批不能放宽角色边界。
-- Runtime 切换、Automation、内嵌终端、完整发布链等扩展项仍暂不实施，本轮没有恢复或启动新迭代。
+- 核心迭代 1–23 中已实施的条目均已完成，具体编号和边界见根目录 AGENTS.md；本轮是 UI 重构整理，没有启动新的核心迭代或恢复扩展项。
+- 当前发行版本 v0.1.3，发行提交 `c80d660`、标签、macOS Apple Silicon DMG/ZIP、SHA-256 清单和 release notes 已发布。安装包没有 Developer ID 签名/公证，Zima Python 尚未随包分发；本机安装未被替换。
+- 迭代 23 Shell 快照链完成：Pi 首次查询异步预热、私有快照验证及原子发布、匹配后恢复环境、原始命令审批归因、删除/工作区改变/退出释放，以及遗留缓存清理。2026-10-04 收尾记录为全仓 572 项测试/2041 次断言、类型检查、构建和两项真实 Electron 冒烟通过；这是该迭代的验收结果，不覆盖随后全部 UI 改动。
+- Pi 默认使用宿主 Seatbelt，不可用时拒绝本轮；普通 Bash 先进入基础沙箱，显式禁令和真实越界升级仍有效。主会话无 Plan 模式，独立 plan 子 Agent 保留；explore/plan 创建及逐轮执行固定只读，审批不能扩大角色边界。
+- Zima 未接入宿主 Seatbelt/Shell 快照，副作用工具使用人工审批；受控 Python 分发仍待完成。Runtime 切换、Automation、内嵌终端、正式签名分发等继续后置。
 
-## 本次交付：v0.1.3 推送与 GitHub Release 上传（2026-10-04）
+## UI 重构现状
 
-- 用户明确授权推送和上传；以非强制原子推送同步 `main` 与 `v0.1.3`，发行标签指向 `c80d66074a2a498ec7f76338e8cc99891846e0be`，不移动已发布标签。
-- 发布地址：https://github.com/1longlong/axon/releases/tag/v0.1.3 。Release 已公开发布（非草稿、非 prerelease），包含 DMG、ZIP 和 `SHA256SUMS.txt`，发行说明来自 `docs/releases/v0.1.3.md`。
-- 三个附件的远端状态均为 `uploaded`；DMG/ZIP 远端 SHA-256 与本地校验清单一致。
-- 本轮只更新本进度文档并同步发布结果，没有改源码、重新构建或重跑整套测试；下列内容是当前版本实现及已完成的构建验收。
+用户确认的浅色极简开发者工作台已接入全局主题、导航、顶栏、消息、输入、文件区、Chat、设置与现有弹窗。具体规则和代码入口集中在 [UI 设计与实现](ui-design.md)，不再保留待实施的早期方案。
 
-### 当前版本内容
+- 会话列表无图标，当前 Agent 会话带左侧激活条；项目颜色表示当前会话所属项目。
+- Agent 与 Chat 共用折叠思考块，长内容限高、裁切边缘淡出、流式底部跟随与上翻暂停；当前回复有实际输出后隐藏通用 Agent 等待动效。
+- 普通发送为圆形上箭头；盾牌菜单展示批准策略并高亮当前项，未实现的自动审批和完全访问仍禁用。
+- 文件树从右侧图标弹出为透明气泡，无文件时自动收栏。文件类型图标由 `@react-symbols/icons@1.4.1` 自动分配，未知文件回退默认图标。
+- 多文件 Tab 按相对路径去重，标题只显示文件名及关闭入口。内容、读取/错误状态与阅读位置独立保存；目录监听刷新所有打开项，不改变选择。标签只驻留会话视图内存，工作区切换时清空，迟到响应被隔离。
+- 右栏最大宽度 600px，会话预留 480px；实际扩展受当前窗口空间限制，真实当前窗口已验证从 395px 拉到 435px。
+- 外观、渠道、模型、Agent / Skills、项目/MCP、Task、权限及追问外观统一，原保存/回滚/审批/任务业务链保留。未新增 IPC、Runtime 契约或持久化字段。
+- 自动文件图标映射带入完整图标集；此前独立测量约增加 gzip 150.51 kB。当前保留已有 Vite 大 chunk 提示，尚未进行性能专项。
 
-- `shared/agent-provider.ts` 新增必填的 `toolExecution`：adapter 按实际工具实例声明 `sandbox / runtime / host`。宿主工具工厂可明确声明自行守卫的 `managed` 工具，默认普通审批；模型参数不能设置这些授权元信息。`shared/agent-sandbox.ts` 的宿主端口必须报告真实能力，`shared/agent-run.ts` 补充 `sandbox_unavailable` 错误码。
-- `agent-sandbox-command-service.ts → agent-service-instance.ts → agent-service.ts → pi-agent-adapter.ts`：始终装配端口并传递实际探测结果；能力失败或模式不匹配时在 SDK/Shell 启动前拒绝。应用层保存用户消息和明确失败 result，UI/重启可恢复；没有无沙箱原生工具回退。
-- `agent-permission-service.ts → zima-agent-adapter.ts`：Zima 原生 Bash/Write/Edit 等等待普通人工审批；内置读工具保持直接读取。宿主反向工具调用也先检查权限，拒绝或授权缺失时不执行。正常 Pi 内置工具仍先在真实沙箱中尝试，结构化越界才申请 Grant。
-- 普通会话白名单按执行来源、名称和输入绑定。同名自定义 Read/Write/Bash 不继承内置工具待遇；可信标记来自工具实例而非名称。AskUserQuestion、ToolSearch、SkillRead、MemoryList/Read、Agent、TaskList/Output 工厂明确声明 managed；MemoryWrite、TaskStop 和 MCP 保持普通审批。
-- `agent-collaboration-service.ts → agent-service.ts → agent-permission-service.ts`：explore/plan 创建及每轮运行都固定只读；只有只读宿主沙箱明确覆盖 Bash 才向 explore 提供它，plan 永不提供 Bash。禁止角色升级或复用旧 Grant 扩大权限。`agent-tool-guidance.ts` 同步说明 Bash 取决于实际可用工具列表。
-- 新增/调整 permission、Pi/Zima adapter、编排、协作和宿主能力回归测试；真实 Shell 冒烟补充只读项目写入拒绝及角色升级拒绝，桌面冒烟补齐可信执行元信息。README、核心设计、协议示例和根 AGENTS 同步现行边界。
-- 根 `package.json`、`apps/electron/package.json` 和 `bun.lock` 的应用版本统一为 0.1.3；内部 shared/core 包版本不变。新增 `docs/releases/v0.1.3.md`，README 补充本地安装包说明。
-- 最近源码、测试和文档更新已纳入发行提交 `c80d660`，附 `Co-Authored-By: Codex <codex@openai.com>`；`v0.1.3` 用于定位安装包对应源码。发布后的进度文档单独提交并推送，不改变标签或重建安装包。
+## 已验证与仍待验证
 
-## 发行验证状态
+| 范围 | 当前证据 |
+| --- | --- |
+| 浅色基础工作台 | 真实 Electron 中检查导航、标题、输入和部分项目/会话操作 |
+| 设置与弹窗 | 外观三模式切换后恢复浅色；渠道、Agent / Skills、项目创建/重命名、MCP stdio/HTTP 部分交互检查；未保存测试配置或发起外部连接 |
+| 思考块 | 隔离 React 夹具验证默认折叠、限高、追加跟随、上翻暂停、恢复跟随、折叠保留位置、完成态和无横向溢出；另核对深色及 280px 窄宽长单词；真实历史会话检查鼠标/Return 折叠 |
+| 文件区 | 真实浅色气泡透明/锚点、选择与关闭、Escape、手动收栏与会话切换；多 Tab 去重/切换/关闭/自动收栏；长锁文件切换后保留第 77 行阅读位置；实际侧栏扩展且输入按钮完整 |
+| 输入图标与策略 | 真实菜单高亮、禁用项、键盘/Escape/外部关闭，以及 Agent/Chat 发送随草稿启用/禁用；测试草稿已清除 |
+| 自动化 | 本轮 renderer 23 文件、112 项测试、320 次断言通过；全仓类型检查及完整 Electron build 通过；Agent 冒烟入口打包通过 |
 
-- `bun test`：90 个测试文件、583 项通过、0 失败、2127 次断言。
-- `bun run typecheck`：全仓通过。
-- `bun run --cwd apps/electron build`：v0.1.3 production build 通过，仅有既有 renderer 大 chunk 提示。
-- 同日修复收尾的 `test:agent:shell:smoke`：真实 Electron/Seatbelt 验证通过，覆盖初始化、PATH 恢复、正常写入、只读项目写入拒绝且不能升级、精确 Grant、环境覆盖、cwd 回退、输出流、超时/停止和清理。本次打包未重复运行。
-- 同日修复收尾的 `test:agent:smoke`：真实桌面 UI 验证通过，包括权限卡、子 Agent、Skills/MCP/记忆、文件树/Diff、消息流及 state/JSONL 恢复。本次打包未重复运行；模型事件使用隔离夹具，不是外部 API 验收，未运行 Zima live 测试。
-- Shell 测试只加载临时 HOME/ZDOTDIR 的启动配置，没有执行真实用户 rc 脚本。Shell 冒烟临时文件已删除；桌面截图保留在 `/var/folders/g_/9jwx4hbn38vbn9fn6cryjpmm0000gn/T/axon-agent-smoke-wV14Sb/`。
-- `git diff --check`：通过。
-- `electron-builder --config electron-builder.yml --mac --arm64 --publish never`：本地 DMG/ZIP 打包成功；`package:checksums` 生成并验证当前版本 SHA-256 清单。
-- `hdiutil verify` 与 `unzip -tq`：安装包完整性检查通过；app.asar 版本为 0.1.3，主进程/preload/renderer 入口及 Pi/MCP 依赖存在，Info.plist 版本为 0.1.3。
-- 本轮重新验证本地 SHA-256 清单，复核远端发行标签、Release 状态和附件摘要；未替换或覆盖其他版本的发布。
+完整 UI 隔离 Electron 冒烟尚未执行。仍需覆盖真实流式历史阅读、隐藏树期间文件监听、读取失败/迟到响应的动态布局、后台记忆草稿、最小窗口、深色文件气泡、减少透明度系统偏好，以及 Task/审批/追问、保存中/失败/未保存退出等动态边界。MCP 取消未取得明确撤销提示，不能记作已验收。
 
-## 本地发行产物
+受限 Shell 曾出现 Vite 监听 EPERM 和 Electron 在 macOS 注册阶段 SIGABRT；系统终端可以启动真实 Axon，桌面控制已成功定向读取 worktree 的 Electron.app。后续验收优先复用已有窗口；脚本打包与静态渲染均不能替代 GUI 执行。
 
-- `apps/electron/release/Axon-0.1.3-arm64.dmg`
-- `apps/electron/release/Axon-0.1.3-arm64.zip`
-- `apps/electron/release/SHA256SUMS.txt`
-- 构建产物不进入 Git。安装包未进行 Developer ID 签名或公证；Zima Python 不随包分发。未测试外部模型 API，也未将本机安装的 Axon 替换为新版本。
+## 本轮整理（2026-10-05）
 
-## 当前关键决定与边界
+- 文档：新增 `docs/ui-design.md` 汇总现行风格、交互、组件分工、异步链路和验收边界，取代过时实施方案；本文件归并为当前状态，移除重复阶段和失败重试流水。`README.md` 与核心设计补充入口及现行文件/布局行为。
+- 资料：清除设计概念图、参考图、验收截图、生成提示词及截图索引；仓库只保留现行 UI 实现说明与代码/测试。
+- 代码：拆出 `components/agent/WorkspaceFileTabs.tsx`，承载标签键盘/焦点和只读内容；`WorkspaceFileTree.tsx` 保留目录、controller 读取和监听，补齐生命周期注释，现有测试调整导入。移除 `WorkbenchIcons.tsx` 中未使用的 JSON 自定义图标；全局 CSS 将滚动条规则归组，更新过时注释。
+- 验证入口：`scripts/smoke-agent.ts` 使用“发送消息”和单文件关闭的现行可访问名称；预览断言只查询可见节点，兼容隐藏但保留挂载的 Tab 内容与后台会话。
+- 本轮检查：`bun run typecheck`、`bun test apps/electron/src/renderer`（112 项/320 次断言）、完整 Electron build（renderer 5.55 秒）和冒烟入口 Bun / esbuild 打包通过；文档相对链接与 diff 格式检查通过。没有新增依赖、业务功能、存储格式或新的 GUI 验收结论。
 
-- 快照只用于宿主执行缓存，不进入应用消息历史或 runtime artifact；重启后重新初始化，不将旧快照作为永久会话状态恢复。
-- 工具不等待预热，首条命令可能仍走原登录路线。快照只匹配初始化 cwd、固定解释器及登录参数；条件不符不临时重建。
-- 初始环境来自进程继承和 SDK 环境，当前没有独立过滤配置，普通导出声明不做二次过滤。恢复后显式覆盖、runtime 工具目录和受控临时目录仍优先；原始命令驱动规则、审批与归因。
-- 普通 exec 路线不保证 alias/函数跨 Shell 保留，单条工具的 export/cd 不改变初始化基线。缓存清理失败只诊断，不扩大工具权限。
-- 缺少明确 OS 拒绝证据时，不能把通用网络连接失败猜测为沙箱拒绝；已有模型请求错误与重试机制不受影响。
-- 开发阶段格式修改不维护旧配置兼容；重要流程保留简洁中文注释。扩展能力只有用户明确恢复才推进。
+## 合并前文件清理（2026-10-05）
 
-## 下一步
+- 根据用户准备合并主分支的要求，移除 `docs/ui-previews/` 剩余 5 张参考/验收图片和截图索引，清理 UI 文档中的对应链接。
+- 检查本次新增文件的代码引用：思考组件、策略菜单、文件标签、状态 reducer 和工作台图标均被运行代码使用；3 个新测试文件覆盖当前行为和安全边界，保留。现行 `docs/ui-design.md` 是 README/核心设计引用的维护说明，保留。
+- 本轮只删辅助资料和调整文档，没有修改运行代码或执行 Git 合并。文档链接、无残留预览引用及 diff 格式检查通过；代码验证沿用上一轮通过结果。
 
-v0.1.3 发行收尾，等待用户下载试用或指定下一阶段。可在明确授权后验证本机 Go/PATH 与真实模型工具循环；隔离验收不替代真实用户 rc 环境。后续推送和发布需新的授权；Zima 宿主委托、内存快照、PTY、常驻 Shell、凭据代理和域名网络代理继续后置，正式签名分发仍需 Developer ID 签名和公证。
+## 下次起点
+
+用户已授权提交并合入本地主分支。当前 UI worktree 为 detached HEAD，主工作区 `/Users/covenant/Workspace/Projects/Github/axon` 的 main 干净，二者起点均为 `607947e`，可按快进方式合并。创建 `codex/ui-refactor` 分支与暂存均失败：共享 Git 元数据位于主仓库 `.git`，当前执行环境只允许读取，创建 `index.lock` 返回 `Operation not permitted`。尚未创建分支、暂存、提交或合并，全部改动仍保留在当前 worktree。
+
+用户再次要求由助手直接执行；当前执行权限仍禁止对共享 Git 元数据写入，且不能申请沙箱外执行，没有可用的专用 Git 写入工具。提交与合并继续等待执行环境开放所需权限，未重复同样的失败命令。
+
+2026-10-05 用户要求重新尝试：主工作区 main 仍干净、起点未改变；创建分支和暂存再次失败，`index.lock` 仍返回 `Operation not permitted`，没有提交或合并。当前尝试没有取得新的 Git 写入权限，代码及验证结果保留。
+
+下次从允许写入主仓库 Git 元数据的系统终端或执行环境创建 `codex/ui-refactor`、暂存本次改动、提交，再于 main 工作区执行 `git merge --ff-only codex/ui-refactor`；本次未授权远端推送。剩余 GUI 验收范围见上文，尚未执行的冒烟不能标记为通过。
+
+Shell/沙箱的关键边界继续以核心设计为准：快照不进入消息或 Runtime artifact，工具不等待预热，显式环境与受控临时目录优先，命令授权以原始输入为依据，单次 export/cd 不写回初始化基线，缺少明确 OS 拒绝证据时不猜测网络升级。推送、发布和正式签名需按用户新指令处理。

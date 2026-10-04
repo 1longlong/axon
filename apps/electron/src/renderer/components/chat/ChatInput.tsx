@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
-import { CornerDownLeft, Loader2, Paperclip, Settings, Square } from 'lucide-react'
+import { ArrowUp, ChevronDown, Loader2, Paperclip, Settings, Square } from 'lucide-react'
 import { MAX_CHAT_INPUT_LENGTH } from '@axon/shared'
 import type { ConversationMeta, FileAttachment } from '@axon/shared'
 import { chatDraftsAtom, chatStateAtom } from '@/atoms/chat-state'
@@ -145,9 +145,9 @@ export function ChatInput({ conversation }: { conversation: ConversationMeta }):
   const statusText = modelError ?? contextLabel ?? hint
 
   return (
-    <div className="shrink-0 px-4 pb-4 pt-2">
+    <div className="shrink-0 px-5 pb-4 pt-2">
       <div
-        className="mx-auto max-w-3xl rounded-xl border bg-[hsl(var(--input-surface))] p-2 shadow-sm"
+        className="mx-auto max-w-3xl rounded-[12px] border bg-[hsl(var(--input-surface))] p-3 shadow-sm focus-within:border-ring/30 focus-within:ring-1 focus-within:ring-ring/10 [&_.chat-rich-input]:min-h-12 [&_.chat-rich-input]:px-1 [&_.chat-rich-input]:text-[13px]"
         onPaste={(event) => {
           // 粘贴的文件（主要是截图）与选择文件走同一条待发送草稿链路。
           if (event.clipboardData.files.length > 0) {
@@ -172,11 +172,11 @@ export function ChatInput({ conversation }: { conversation: ConversationMeta }):
           onSubmit={send}
         />
         {attachmentError && (
-          <p className="px-1 pt-1 text-[11px] text-destructive">{attachmentError}</p>
+          <p role="alert" className="break-words px-1 pt-1 text-[11px] text-destructive">{attachmentError}</p>
         )}
-        <div className="flex items-center justify-between gap-3 px-1 pt-1">
-          <span className={cnHint(contextLabel, Boolean(attachmentError || modelError))}>{statusText}</span>
-          <div className="flex items-center gap-1.5">
+        <div className="flex min-w-0 items-center justify-between gap-2 px-1 pt-2">
+          <span className={cnHint(contextLabel, Boolean(attachmentError || modelError))} title={statusText}>{statusText}</span>
+          <div className="flex min-w-0 flex-1 items-center justify-end gap-1.5">
             <input
               ref={fileInputRef}
               type="file"
@@ -192,37 +192,40 @@ export function ChatInput({ conversation }: { conversation: ConversationMeta }):
               aria-label="添加附件"
               disabled={sending}
               onClick={() => fileInputRef.current?.click()}
-              className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex size-7 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Paperclip size={14} />
             </button>
-            {modelOptions.length > 0 ? <select
-              aria-label="选择渠道和模型"
-              value={hasModel ? currentModel : ''}
-              disabled={sending || savingModel}
-              onChange={(event) => void selectModel(event.target.value)}
-              className="h-8 w-48 max-w-[45%] rounded-md border bg-background px-2 text-xs text-foreground outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
-            >
-              <option value="" disabled>选择渠道 / 模型</option>
-              {modelOptions.map((option) => <option
-                key={encodeChatModelOption(option.channelId, option.modelId)}
-                value={encodeChatModelOption(option.channelId, option.modelId)}
+            {modelOptions.length > 0 ? <div className="relative min-w-0 max-w-48 flex-1">
+              <select
+                aria-label="选择渠道和模型"
+                value={hasModel ? currentModel : ''}
+                disabled={sending || savingModel}
+                onChange={(event) => void selectModel(event.target.value)}
+                className="h-7 w-full min-w-0 appearance-none truncate rounded border-0 bg-transparent pl-1 pr-5 text-xs text-muted-foreground outline-none hover:bg-muted hover:text-foreground focus:ring-1 focus:ring-ring disabled:opacity-50"
               >
-                {option.channelName} / {option.modelName}
-              </option>)}
-            </select> : <button
+                <option value="" disabled>选择渠道 / 模型</option>
+                {modelOptions.map((option) => <option
+                  key={encodeChatModelOption(option.channelId, option.modelId)}
+                  value={encodeChatModelOption(option.channelId, option.modelId)}
+                >
+                  {option.channelName} / {option.modelName}
+                </option>)}
+              </select>
+              <ChevronDown size={10} className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            </div> : <button
               type="button"
               onClick={openChannelSettings}
-              className="flex h-8 items-center gap-1.5 rounded-md border px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="flex h-7 min-w-0 items-center gap-1.5 rounded px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
-              <Settings size={13} />{state.channelsStatus === 'loading' ? '加载渠道…' : '配置渠道'}
+              <Settings size={13} className="shrink-0" /><span className="truncate">{state.channelsStatus === 'loading' ? '加载渠道…' : '配置渠道'}</span>
             </button>}
             {sending ? (
               <button
                 type="button"
                 aria-label="停止生成"
                 onClick={() => void controller.stop(conversation.id)}
-                className="flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-destructive px-3 text-xs text-destructive-foreground hover:opacity-90"
+                className="flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-destructive px-3 text-xs text-destructive-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1"
               >
                 <Square size={12} fill="currentColor" />
                 停止
@@ -231,12 +234,12 @@ export function ChatInput({ conversation }: { conversation: ConversationMeta }):
               <button
                 type="button"
                 aria-label="发送消息"
+                title="发送消息"
                 disabled={!availability.canSend}
                 onClick={() => send()}
-                className="flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-primary px-3 text-xs text-primary-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                {state.generationsByConversation[conversation.id] ? <Loader2 size={13} className="animate-spin" /> : <CornerDownLeft size={13} />}
-                发送
+                {state.generationsByConversation[conversation.id] ? <Loader2 size={16} aria-hidden="true" className="animate-spin motion-reduce:animate-none" /> : <ArrowUp size={18} aria-hidden="true" />}
               </button>
             )}
           </div>
@@ -247,6 +250,7 @@ export function ChatInput({ conversation }: { conversation: ConversationMeta }):
 }
 
 function cnHint(contextLabel: string | null | undefined, hasError: boolean): string {
-  if (hasError) return 'truncate text-[11px] text-destructive'
-  return contextLabel ? 'truncate text-[11px] text-amber-600' : 'truncate text-[11px] text-muted-foreground'
+  const base = 'max-w-[25%] shrink-0 truncate font-mono text-[11px]'
+  if (hasError) return `${base} text-destructive`
+  return contextLabel ? `${base} text-amber-600` : `${base} text-muted-foreground`
 }

@@ -52,10 +52,41 @@ const timeout = setTimeout(() => {
 }, process.env.AXON_ZIMA_PYTHON ? 60_000 : 30_000)
 
 let capturedQuery: AgentQueryInput | undefined
+let resumeReadingCheck: (() => void) | undefined
+
+/** 分段暂停输出，供真实 renderer 验证查看历史与恢复底部跟随的边界。 */
+function waitForReadingCheck(): Promise<void> {
+  return new Promise((resolve) => { resumeReadingCheck = resolve })
+}
 
 /** 用中立事件模拟 runtime；分片间隔让 renderer 的运行中状态可被真实观察。 */
 const adapter: AgentProviderAdapter = {
   async *query(input: AgentQueryInput): AsyncIterable<AgentStreamPayload> {
+    if (input.prompt === '验证消息阅读体验') {
+      const history = Array.from({ length: 60 }, (_, index) => `阅读验证段落 ${index + 1}：保留用户正在查看的位置。`).join('\n\n')
+      const firstUpdate = '\n\n阅读验证新增输出一'
+      const secondUpdate = '\n\n阅读验证新增输出二'
+      yield { kind: 'sdk_delta', delta: { uuid: 'reading-check', deltas: [{ type: 'text_delta', contentIndex: 0, delta: history }] } }
+      await waitForReadingCheck()
+      yield { kind: 'sdk_delta', delta: { uuid: 'reading-check', deltas: [{ type: 'text_delta', contentIndex: 0, delta: firstUpdate }] } }
+      await waitForReadingCheck()
+      yield { kind: 'sdk_delta', delta: { uuid: 'reading-check', deltas: [{ type: 'text_delta', contentIndex: 0, delta: secondUpdate }] } }
+      yield {
+        kind: 'sdk_message',
+        message: { type: 'assistant', uuid: 'reading-check', parent_tool_use_id: null, message: { content: [
+          { type: 'text', text: history + firstUpdate + secondUpdate },
+          { type: 'tool_use', id: 'reading-long-tool', name: 'Read', input: { path: 'reading-check.txt' } },
+        ] } },
+      }
+      yield {
+        kind: 'sdk_message',
+        message: { type: 'user', uuid: 'reading-tool-result', parent_tool_use_id: null, message: { content: [
+          { type: 'tool_result', tool_use_id: 'reading-long-tool', content: history },
+        ] } },
+      }
+      yield { kind: 'sdk_message', message: { type: 'result', subtype: 'success', terminal_reason: 'completed' } }
+      return
+    }
     if (input.systemPrompt?.includes('## 子 Agent 角色')) {
       yield {
         kind: 'sdk_message',
@@ -465,9 +496,9 @@ void app.whenReady().then(async () => {
   await clickText('MCP 服务')
   await waitFor("!!document.querySelector('[role=\"dialog\"][aria-label^=\"配置 \"][aria-label$=\" 的 MCP 服务\"]')")
   await clickText('工作区文件系统')
-  await waitFor("document.querySelector('[role=\"dialog\"]')?.textContent.includes('filesystem')")
+  await waitFor("document.querySelector('[role=\"dialog\"][aria-label$=\" 的 MCP 服务\"]')?.textContent.includes('filesystem')")
   await clickText('保存')
-  await waitFor("document.querySelector('[role=\"dialog\"]')?.textContent.includes('配置已保存')")
+  await waitFor("document.querySelector('[role=\"dialog\"][aria-label$=\" 的 MCP 服务\"]')?.textContent.includes('配置已保存')")
   await clickAria('关闭 MCP 配置')
   await waitFor("!document.querySelector('[role=\"dialog\"][aria-label$=\" 的 MCP 服务\"]')")
 
@@ -522,14 +553,29 @@ void app.whenReady().then(async () => {
   await clickText('重新加载')
   await waitFor("document.querySelector('textarea[aria-label=\"编辑项目记忆\"]')?.value.includes('external.md：外部记忆') && !document.body.textContent.includes('当前草稿尚未覆盖')")
   await clickAria('打开文件面板')
-  await assert("document.querySelector('button[aria-label=\"打开文件面板\"]').getAttribute('aria-pressed') === 'true'")
+  await assert("[...document.querySelectorAll('button[aria-label=\"打开文件面板\"]')].find(item => item.offsetParent).getAttribute('aria-pressed') === 'true'")
+  // 没有打开文件时只弹出文件树，不占右栏；选择和关闭文件驱动实际布局。
+  await assert("![...document.querySelectorAll('[aria-label=\"文件预览\"]')].find(item => item.offsetParent) && !document.querySelector('[aria-label=\"调整右侧栏宽度\"]')")
+  await assert("(() => { const tree = [...document.querySelectorAll('[aria-label=\"工作区文件树\"]')].find(item => item.offsetParent); const button = [...document.querySelectorAll('[aria-label=\"打开文件面板\"]')].find(item => item.offsetParent); const rect = tree.getBoundingClientRect(); const anchor = button.getBoundingClientRect(); const pointer = tree.querySelector('.workspace-file-tree-pointer').getBoundingClientRect(); return rect.right < anchor.left && anchor.left - rect.right < 24 && Math.abs((pointer.top + pointer.bottom) / 2 - (anchor.top + anchor.bottom) / 2) < 2 && getComputedStyle(tree).backgroundColor.includes('0.72') })()")
+  await clickAria('预览 workspace-tree-marker.txt')
+  await waitFor("[...document.querySelectorAll('[aria-label=\"文件预览\"]')].find(item => item.offsetParent)?.textContent.includes('workspace tree smoke')")
+  await clickAria('关闭文件 workspace-tree-marker.txt')
+  await waitFor("![...document.querySelectorAll('[aria-label=\"文件预览\"]')].find(item => item.offsetParent) && !document.querySelector('[aria-label=\"调整右侧栏宽度\"]')")
+  await clickAria('预览 workspace-tree-marker.txt')
+  await waitFor("!!document.querySelector('[aria-label=\"调整右侧栏宽度\"]')")
   const rightWidth = await run("[...document.querySelectorAll('[aria-label=\"工作区文件面板\"]')].find(item => item.offsetParent).getBoundingClientRect().width") as number
   await run("document.querySelector('[aria-label=\"调整右侧栏宽度\"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))")
   await waitFor(`[...document.querySelectorAll('[aria-label="工作区文件面板"]')].find(item => item.offsetParent).getBoundingClientRect().width === ${rightWidth + 16}`)
   await clickAria('收起右侧栏')
-  await waitFor("!!document.querySelector('[aria-label=\"展开右侧栏\"]') && ![...document.querySelectorAll('[aria-label=\"工作区文件面板\"]')].some(item => item.offsetParent)")
+  await waitFor("!!document.querySelector('[aria-label=\"展开右侧栏\"]') && ![...document.querySelectorAll('[aria-label=\"文件预览\"]')].find(item => item.offsetParent)")
   await clickAria('打开文件面板')
   await waitFor("document.body.textContent.includes('workspace-tree-marker.txt')")
+  await assert("[...document.querySelectorAll('[aria-label=\"文件预览\"]')].find(item => item.offsetParent)?.textContent.includes('workspace tree smoke')")
+  // 缓存中的后台会话不能修改前台布局；空会话收栏，返回后恢复已打开文件。
+  await run("document.querySelector('[aria-label=\"项目 Agent 冒烟项目\"] [aria-label^=\"删除 Agent 会话\"]').previousElementSibling.click()")
+  await waitFor("![...document.querySelectorAll('[aria-label=\"文件预览\"]')].find(item => item.offsetParent) && !document.querySelector('[aria-label=\"调整右侧栏宽度\"]')")
+  await run("document.querySelector('[aria-label=\"项目 Agent 本地项目\"] [aria-label^=\"删除 Agent 会话\"]').previousElementSibling.click()")
+  await waitFor("[...document.querySelectorAll('[aria-label=\"文件预览\"]')].find(item => item.offsetParent)?.textContent.includes('workspace tree smoke')")
   writeFileSync(join(directory, 'auto-refresh-marker.txt'), 'watcher smoke')
   await waitFor("document.body.textContent.includes('auto-refresh-marker.txt')")
   await clickAria('打开终端面板')
@@ -539,7 +585,17 @@ void app.whenReady().then(async () => {
   await clickAria('打开文件面板')
   await waitFor("document.body.textContent.includes('auto-refresh-marker.txt')")
   await clickAria('预览 auto-refresh-marker.txt')
-  await waitFor("document.querySelector('[aria-label=\"文件预览\"]')?.textContent.includes('watcher smoke')")
+  await waitFor("[...document.querySelectorAll('[aria-label=\"文件预览\"]')].find(item => item.offsetParent)?.textContent.includes('watcher smoke')")
+  // 文件树浮层收起只改变可见性，已选预览和监听刷新仍然有效。
+  await clickAria('收起工作区文件树')
+  await waitFor("![...document.querySelectorAll('[aria-label=\"工作区文件树\"]')].some(item => item.offsetParent)")
+  await assert("[...document.querySelectorAll('[aria-label=\"文件预览\"]')].find(item => item.offsetParent)?.textContent.includes('watcher smoke')")
+  await assert("document.activeElement?.getAttribute('aria-label') === '打开文件面板'")
+  writeFileSync(join(directory, 'auto-refresh-marker.txt'), 'watcher smoke after hiding tree')
+  await waitFor("[...document.querySelectorAll('[aria-label=\"文件预览\"]')].find(item => item.offsetParent)?.textContent.includes('watcher smoke after hiding tree')")
+  await clickAria('打开文件面板')
+  await waitFor("[...document.querySelectorAll('[aria-label=\"工作区文件树\"]')].some(item => item.offsetParent)")
+  await assert("document.querySelector('button[aria-label=\"预览 auto-refresh-marker.txt\"]')?.getAttribute('aria-pressed') === 'true'")
   await assert("(() => { const panel = [...document.querySelectorAll('[aria-label=\"Agent 右侧工具面板\"]')].find(item => item.offsetParent); return panel.previousElementSibling && Math.abs(panel.getBoundingClientRect().top - panel.previousElementSibling.getBoundingClientRect().top) < 2 })()")
   await assert(`[...document.querySelectorAll('select[aria-label="选择 Agent 渠道和模型"]')].find(item => item.offsetParent).value === JSON.stringify([${JSON.stringify(channel.id)}, 'gpt-5.6-smoke'])`)
   // 思考等级通过现有会话更新链落盘，下一轮再交给 adapter，运行中不允许漂移。
@@ -553,7 +609,7 @@ void app.whenReady().then(async () => {
   await waitFor(`[...document.querySelectorAll('select[aria-label="选择 Agent 思考等级"]')].find(item => item.offsetParent)?.value === 'high'`)
   await assert("!document.querySelector('button[aria-label=\"粗体\"]') && !document.querySelector('button[aria-label=\"无序列表\"]')")
   await typeEditor('执行本地 Agent 冒烟任务')
-  await clickText('发送')
+  await clickAria('发送消息')
   await waitFor("document.body.textContent.includes('正在处理') && document.body.textContent.includes('Agent 运行中')")
   await waitFor("document.body.textContent.includes('Agent 请求扩展沙箱权限：Bash') && document.body.textContent.includes('网络访问')")
   await assert("document.body.textContent.includes('命令可能已产生部分本地副作用') && document.body.textContent.includes('批准后只携带本项权限重试当前工具一次')")
@@ -567,6 +623,7 @@ void app.whenReady().then(async () => {
   await assert("[...document.querySelectorAll('summary')].some(item => item.textContent.includes('思考过程'))")
   await run("document.querySelector('summary[aria-label=\"工具调用 Bash\"]').click()")
   await waitFor("document.body.textContent.includes('测试通过')")
+  await assert("document.querySelector('summary[aria-label=\"工具调用 Bash\"]').nextElementSibling.getBoundingClientRect().height < 224")
   await waitFor("!!document.querySelector('[aria-label=\"查看子任务 检查子流程\"]') && document.body.textContent.includes('已完成')")
   await clickAria('查看子任务 检查子流程')
   await waitFor("document.querySelector('[role=\"dialog\"][aria-label=\"子任务：检查子流程\"]')?.textContent.includes('子 Agent 已完成检查')")
@@ -644,8 +701,39 @@ void app.whenReady().then(async () => {
   await clickAria('关闭子任务详情')
   await assert("document.body.textContent.includes('本轮使用') && document.body.textContent.includes('review-code')")
   await assert(`document.querySelector('[aria-label="左侧会话栏"]').getBoundingClientRect().width === ${leftWidth + 16}`)
-  await assert(`[...document.querySelectorAll('[aria-label="工作区文件面板"]')].find(item => item.offsetParent).getBoundingClientRect().width === ${rightWidth + 16}`)
+  await assert("![...document.querySelectorAll('[aria-label=\"文件预览\"]')].find(item => item.offsetParent) && !document.querySelector('[aria-label=\"调整右侧栏宽度\"]')")
+  await clickAria('打开文件面板')
+  await clickAria('预览 auto-refresh-marker.txt')
+  await waitFor(`[...document.querySelectorAll('[aria-label="工作区文件面板"]')].find(item => item.offsetParent).getBoundingClientRect().width === ${rightWidth + 16}`)
   await assert(`[...document.querySelectorAll('select[aria-label="选择 Agent 思考等级"]')].find(item => item.offsetParent)?.value === 'high'`)
+
+  // 用真实流式投影检查滚动位置，而不是只断言 CSS 类名或组件内部状态。
+  await typeEditor('验证消息阅读体验')
+  await clickAria('发送消息')
+  await waitFor("document.body.textContent.includes('阅读验证段落 60')")
+  const readingScroller = "[...document.querySelectorAll('main .overflow-y-auto')].find(item => item.offsetParent && item.querySelector('article'))"
+  await assert(`(() => { const element = ${readingScroller}; return element.scrollHeight - element.scrollTop - element.clientHeight < 2 })()`)
+  const readingPosition = await run(`(() => {
+    const element = ${readingScroller};
+    element.scrollTop = element.scrollHeight / 3;
+    element.dispatchEvent(new Event('scroll'));
+    return element.scrollTop;
+  })()`)
+  if (typeof readingPosition !== 'number' || readingPosition <= 0 || !resumeReadingCheck) throw new Error('消息阅读验证未进入暂停输出状态')
+  await waitFor("[...document.querySelectorAll('button')].some(item => item.offsetParent && item.textContent.trim() === '回到最新')")
+  resumeReadingCheck()
+  await waitFor("document.body.textContent.includes('阅读验证新增输出一')")
+  await assert(`Math.abs((${readingScroller}).scrollTop - ${readingPosition}) < 2`)
+  writeFileSync(join(directory, 'agent-reading-history.png'), (await win.webContents.capturePage()).toPNG())
+  await clickText('回到最新')
+  await assert(`(() => { const element = ${readingScroller}; return element.scrollHeight - element.scrollTop - element.clientHeight < 2 })()`)
+  await waitFor("![...document.querySelectorAll('button')].some(item => item.offsetParent && item.textContent.trim() === '回到最新')")
+  resumeReadingCheck()
+  await waitFor("document.body.textContent.includes('阅读验证新增输出二') && !document.body.textContent.includes('Agent 运行中')")
+  await assert(`(() => { const element = ${readingScroller}; return element.scrollHeight - element.scrollTop - element.clientHeight < 2 })()`)
+  await run("document.querySelector('summary[aria-label=\"工具调用 Read\"]').click()")
+  await assert("(() => { const detail = document.querySelector('summary[aria-label=\"工具调用 Read\"]').nextElementSibling; return detail.clientHeight <= 224 && detail.scrollHeight > detail.clientHeight })()")
+  writeFileSync(join(directory, 'agent-reading-long-output.png'), (await win.webContents.capturePage()).toPNG())
 
   if (zimaAdapter) {
     await clickAria('在 Agent 本地项目 中新建会话')
@@ -653,7 +741,7 @@ void app.whenReady().then(async () => {
     await waitFor("!!document.querySelector('.ProseMirror[contenteditable=true]') && document.body.textContent.includes('Runtime: Zima')")
     await assert("![...document.querySelectorAll('select[aria-label=\"选择 Agent 思考等级\"]')].some(item => item.offsetParent)")
     await typeEditor('Zima 桌面冒烟')
-    await clickText('发送')
+    await clickAria('发送消息')
     await waitFor("document.body.textContent.includes('Zima 回复：Zima 桌面冒烟') && !document.body.textContent.includes('Agent 运行中')")
     await assert("document.querySelector('[role=img][aria-label*=\"上下文窗口 128K\"]') !== null")
     writeFileSync(join(directory, 'zima-complete.png'), (await win.webContents.capturePage()).toPNG())
@@ -672,7 +760,7 @@ void app.whenReady().then(async () => {
     modelServer?.close()
   }
 
-  console.log(`Agent 冒烟验证通过：项目工作区、思考等级、项目指令、Skills、MCP 配置、项目记忆与变化刷新、沙箱升级权限卡与精确 Grant、协作子 Agent 任务卡与详情、双侧栏、文件树、用量圆环、变更汇总、Diff、流式消息、聚合 state/JSONL 与重载恢复${zimaAdapter ? '、Zima 创建/发送/恢复及 Pi 并存' : ''}。截图目录：${directory}`)
+  console.log(`Agent 冒烟验证通过：项目工作区、思考等级、项目指令、Skills、MCP 配置、项目记忆与变化刷新、沙箱升级权限卡与精确 Grant、协作子 Agent 任务卡与详情、双侧栏、文件树、用量圆环、变更汇总、Diff、流式消息、聚合 state/JSONL 与重载恢复、阅读历史不抢滚动、回到最新后恢复跟随及工具详情自适应高度${zimaAdapter ? '、Zima 创建/发送/恢复及 Pi 并存' : ''}。截图目录：${directory}`)
   clearTimeout(timeout)
   win.destroy()
   app.exit(0)

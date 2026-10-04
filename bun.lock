@@ -25,6 +25,7 @@
         "@earendil-works/pi-ai": "0.84.2",
         "@earendil-works/pi-coding-agent": "0.84.2",
         "@modelcontextprotocol/sdk": "1.29.0",
+        "@react-symbols/icons": "^1.4.1",
         "@tiptap/extension-placeholder": "^3.19.0",
         "@tiptap/react": "^3.19.0",
         "@tiptap/starter-kit": "^3.19.0",
@@ -1643,6 +1644,17 @@
       "",
       {},
       "sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug=="
+    ],
+    "@react-symbols/icons": [
+      "@react-symbols/icons@1.4.1",
+      "",
+      {
+        "peerDependencies": {
+          "react": ">= 16.8",
+          "react-dom": ">= 16.8"
+        }
+      },
+      "sha512-LJ9eiCJOoWrT4sjsamUBoSjbRkEeo6CYxqbEuicYib/cwwbN0ndTTGFx4at9D9CwEVdFxW/ZZfNrIdzjA4scIg=="
     ],
     "@rolldown/pluginutils": [
       "@rolldown/pluginutils@1.0.0-beta.27",

@@ -8,6 +8,7 @@ export default {
     extend: {
       colors: {
         border: 'hsl(var(--border) / <alpha-value>)',
+        'border-subtle': 'hsl(var(--border-subtle) / <alpha-value>)',
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',
         background: 'hsl(var(--background) / <alpha-value>)',
@@ -51,20 +52,10 @@ export default {
         },
         'content-area': 'hsl(var(--content-area) / <alpha-value>)',
       },
-      // ===== 字体栈：Inter Variable 优先，回退 SF Pro Text / 系统中文字体 =====
+      // 字体栈统一由 globals.css 提供；正文、技术标签和富文本代码保持相同回退规则。
       fontFamily: {
-        sans: [
-          'Inter Variable',
-          'Inter',
-          '-apple-system',
-          'BlinkMacSystemFont',
-          'SF Pro Text',
-          'PingFang SC',
-          'Segoe UI',
-          'Microsoft YaHei',
-          'system-ui',
-          'sans-serif',
-        ],
+        sans: ['var(--font-sans)'],
+        mono: ['var(--font-mono)'],
       },
       // ===== 圆角：覆写标准三档，全部由 --radius 派生 =====
       // 改一处 --radius 即可整站统一调圆角节奏，无需 grep 替换 rounded-*

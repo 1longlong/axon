@@ -1,10 +1,11 @@
 import * as React from 'react'
 import { useAtom, useAtomValue } from 'jotai'
-import { ArrowLeft, Bot, Info, Keyboard, Palette, UserRound, Plug } from 'lucide-react'
+import { ArrowLeft, Info, Keyboard, Palette, UserRound, Plug, Settings } from 'lucide-react'
 import { settingsTabAtom, settingsEditingAtom } from '@/atoms/settings-tab'
 import { canLeaveSettings } from '@/lib/channel-form'
 import type { SettingsTab } from '@/atoms/settings-tab'
 import { cn } from '@/lib/utils'
+import { AgentModeIcon } from '@/components/icons/WorkbenchIcons'
 import { AppearanceSettings } from './AppearanceSettings'
 import { UserProfileSettings } from './UserProfileSettings'
 import { ChannelSettings } from './ChannelSettings'
@@ -18,14 +19,15 @@ interface SettingsNavigationItem {
 }
 
 const NAVIGATION_ITEMS: readonly SettingsNavigationItem[] = [
-  { id: 'profile', label: '用户资料', icon: <UserRound size={16} /> },
-  { id: 'appearance', label: '外观设置', icon: <Palette size={16} /> },
-  { id: 'agent', label: 'Agent 设置', icon: <Bot size={16} /> },
-  { id: 'shortcuts', label: '快捷键', icon: <Keyboard size={16} /> },
-  { id: 'channels', label: '模型渠道', icon: <Plug size={16} /> },
-  { id: 'about', label: '关于 Axon', icon: <Info size={16} /> },
+  { id: 'profile', label: '用户资料', icon: <UserRound size={14} /> },
+  { id: 'appearance', label: '外观设置', icon: <Palette size={14} /> },
+  { id: 'agent', label: 'Agent 设置', icon: <AgentModeIcon size={14} /> },
+  { id: 'shortcuts', label: '快捷键', icon: <Keyboard size={14} /> },
+  { id: 'channels', label: '模型渠道', icon: <Plug size={14} /> },
+  { id: 'about', label: '关于 Axon', icon: <Info size={14} /> },
 ]
 
+/** 设置框架按分类原子挂载现有页面；切换守住未保存边界，关闭交由 AppShell 再校验。 */
 export function SettingsPanel({ onClose }: { onClose: () => void }): React.ReactElement {
   const [activeTab, setActiveTab] = useAtom(settingsTabAtom)
   const editing = useAtomValue(settingsEditingAtom)
@@ -40,43 +42,49 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.React
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-content-area text-foreground">
-      <div className="titlebar-drag-region h-10 shrink-0 border-b bg-[hsl(var(--sidebar-surface))]" />
+      <div className="titlebar-drag-region h-10 shrink-0 border-b border-border-subtle bg-[hsl(var(--sidebar-surface))]" />
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-64 shrink-0 flex-col border-r bg-[hsl(var(--sidebar-surface))] p-3">
-          <div className="px-3 pb-3 pt-2 text-sm font-semibold">设置</div>
-          <nav className="space-y-1">
+        <aside className="flex w-56 shrink-0 flex-col border-r border-border-subtle bg-[hsl(var(--sidebar-surface))] p-2">
+          <div className="flex h-10 shrink-0 items-center gap-2 px-2 text-xs font-semibold">
+            <Settings size={14} aria-hidden="true" className="shrink-0 text-muted-foreground" />
+            设置
+          </div>
+          <nav aria-label="设置分类" className="space-y-0.5">
             {NAVIGATION_ITEMS.map((item) => (
               <button
                 key={item.id}
                 type="button"
+                aria-current={activeTab === item.id ? 'page' : undefined}
                 onClick={() => {
                   if (item.id !== activeTab && canLeaveSettings(editing, () => window.confirm('放弃未保存的渠道更改？'))) setActiveTab(item.id)
                 }}
                 className={cn(
-                  'flex h-10 w-full items-center gap-2 rounded-lg px-3 text-sm transition-colors',
+                  'flex h-8 w-full items-center gap-2 rounded-md border px-2 text-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
                   activeTab === item.id
-                    ? 'bg-muted font-medium text-foreground'
-                    : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+                    ? 'border-border-subtle bg-[hsl(var(--input-surface))] font-medium text-foreground shadow-xs'
+                    : 'border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground',
                 )}
               >
-                {item.icon}
-                {item.label}
+                <span aria-hidden="true" className={cn('shrink-0', activeTab === item.id && 'text-indigo-500 dark:text-indigo-400')}>{item.icon}</span>
+                <span className="truncate">{item.label}</span>
               </button>
             ))}
           </nav>
-          <button
-            type="button"
-            onClick={onClose}
-            className="mt-auto flex h-10 w-full items-center gap-2 rounded-lg px-3 text-sm text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-          >
-            <ArrowLeft size={16} />
-            返回工作区
-            <span className="ml-auto text-[10px] opacity-60">Esc</span>
-          </button>
+          <div className="mt-auto border-t border-border-subtle pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <ArrowLeft size={14} aria-hidden="true" className="shrink-0" />
+              返回工作区
+              <span className="ml-auto font-mono text-[10px]">Esc</span>
+            </button>
+          </div>
         </aside>
 
         <main className="min-w-0 flex-1 overflow-y-auto bg-content-area scrollbar-none">
-          <div className="mx-auto w-full max-w-4xl px-8 py-10">
+          <div className="mx-auto w-full max-w-4xl px-6 py-6">
             {activeTab === 'profile' && <UserProfileSettings />}
             {activeTab === 'appearance' && <AppearanceSettings />}
             {activeTab === 'agent' && <AgentSettings />}

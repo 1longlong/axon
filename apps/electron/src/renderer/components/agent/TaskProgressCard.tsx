@@ -69,11 +69,11 @@ export function TaskProgressCard({ rootSessionId, toolUse }: { rootSessionId: st
   }
 
   return <>
-    <button type="button" aria-label={`查看子任务 ${task.title}`} onClick={() => setOpen(true)} className="group w-full rounded-md border bg-muted/20 px-3 py-2 text-left text-xs transition-colors hover:bg-muted/40">
+    <button type="button" aria-label={`查看子任务 ${task.title}`} onClick={() => setOpen(true)} className="group w-full rounded-md border bg-muted/20 px-3 py-2 text-left text-xs transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
       <div className="flex items-center gap-2">
         <TaskStatusIcon status={task.status} />
         <span className="min-w-0 flex-1 truncate font-medium">{task.title}</span>
-        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{ROLE_LABELS[task.subagentType]}</span>
+        <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{ROLE_LABELS[task.subagentType]}</span>
         <span className={cn('text-[11px]', task.status === 'failed' ? 'text-destructive' : 'text-muted-foreground')}>{STATUS_LABELS[task.status]}</span>
         <ChevronRight size={13} className="text-muted-foreground transition-transform group-hover:translate-x-0.5" />
       </div>
@@ -107,14 +107,14 @@ function TaskProgressOverlay({ rootSessionId, task, onClose }: { rootSessionId: 
   }, [onClose])
 
   return <div role="dialog" aria-modal="true" aria-label={`子任务：${task.title}`} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }} className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
-    <div className="flex h-[min(720px,calc(100vh-32px))] w-full max-w-3xl flex-col rounded-lg border bg-background shadow-xl">
-      <header className="flex items-start gap-3 border-b px-5 py-4">
-        <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground"><Bot size={16} /></span>
-        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="font-medium">{task.title}</h2><span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{ROLE_LABELS[task.subagentType]}</span><span className="flex items-center gap-1 text-xs text-muted-foreground"><TaskStatusIcon status={task.status} />{STATUS_LABELS[task.status]}{duration ? ` · ${duration}` : ''}</span></div><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{task.objective}</p></div>
-        <button type="button" aria-label="关闭子任务详情" onClick={onClose} className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"><X size={15} /></button>
+    <div className="flex h-[min(720px,calc(100vh-32px))] w-full max-w-3xl flex-col rounded-lg border bg-dialog text-dialog-foreground shadow-lg">
+      <header className="flex items-start gap-3 border-b border-border-subtle px-4 py-3">
+        <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-muted/50 text-muted-foreground"><Bot size={16} /></span>
+        <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h2 className="text-sm font-semibold">{task.title}</h2><span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{ROLE_LABELS[task.subagentType]}</span><span className="flex items-center gap-1 text-xs text-muted-foreground"><TaskStatusIcon status={task.status} />{STATUS_LABELS[task.status]}{duration ? ` · ${duration}` : ''}</span></div><p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{task.objective}</p></div>
+        <button type="button" aria-label="关闭子任务详情" onClick={onClose} className="flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"><X size={15} /></button>
       </header>
-      <main className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
-        <div className="mx-auto flex max-w-2xl flex-col gap-5">
+      <main className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        <div className="mx-auto flex max-w-2xl flex-col gap-4">
           {messageStatus === 'loading' && messages.length === 0 && <p className="py-10 text-center text-xs text-muted-foreground">正在读取子 Agent 消息…</p>}
           {messageStatus === 'error' && messages.length === 0 && <p className="py-10 text-center text-xs text-destructive">读取子 Agent 消息失败</p>}
           {displayGroups.map((group, index) => group.kind === 'user'

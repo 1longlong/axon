@@ -58,5 +58,5 @@ function TabPane({ tab, isActive }: { tab: TabItem; isActive: boolean }): React.
     )
   }
 
-  return <div aria-hidden={!isActive} className={cn('absolute inset-0', !isActive && 'hidden')}><React.Suspense fallback={<div className="flex h-full items-center justify-center text-xs text-muted-foreground">正在加载 Agent…</div>}><AgentViewShell sessionId={tab.sessionId} /></React.Suspense></div>
+  return <div aria-hidden={!isActive} className={cn('absolute inset-0', !isActive && 'hidden')}><React.Suspense fallback={<div className="flex h-full items-center justify-center text-xs text-muted-foreground">正在加载 Agent…</div>}><AgentViewShell sessionId={tab.sessionId} isActive={isActive} /></React.Suspense></div>
 }

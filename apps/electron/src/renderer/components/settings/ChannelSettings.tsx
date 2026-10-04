@@ -62,21 +62,21 @@ export function ChannelSettings(): React.ReactElement {
   )
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-start justify-between">
-        <div><h1 className="text-xl font-semibold">模型渠道</h1><p className="mt-1 text-sm text-muted-foreground">管理 AI 供应商连接与 API Key。</p></div>
-        <button type="button" disabled={loading || busy} onClick={() => { setEditingChannel(null); setViewMode('create') }} className="ml-4 flex h-9 shrink-0 items-center gap-2 rounded-lg bg-primary px-3 text-sm text-primary-foreground disabled:opacity-40"><Plus size={16} />添加配置</button>
+    <div className="max-w-3xl space-y-4">
+      <div className="flex items-start justify-between gap-3">
+        <div><h1 className="text-sm font-semibold">模型渠道</h1><p className="mt-1 text-xs leading-5 text-muted-foreground">管理 AI 供应商连接与 API Key。</p></div>
+        <button type="button" disabled={loading || busy} onClick={() => { setEditingChannel(null); setViewMode('create') }} className="flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-primary px-3 text-xs text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"><Plus size={16} />添加配置</button>
       </div>
-      {error && <div role="alert" className="text-sm text-destructive">{error}<button type="button" disabled={loading || busy} className="ml-3 underline" onClick={() => void loadChannels()}>重新加载</button></div>}
-      {loading ? <p className="py-8 text-center text-sm text-muted-foreground">加载中…</p> : (
-        <div className="divide-y rounded-xl border bg-card">
-          {channels.length === 0 ? <p className="py-12 text-center text-sm text-muted-foreground">{error ? '暂时无法读取渠道。' : '还没有配置任何模型，点击上方“添加配置”开始。'}</p> : channels.map((channel) => (
-            <div key={channel.id} className="group flex items-center justify-between gap-4 px-4 py-3">
-              <div className="min-w-0"><p className="truncate text-sm font-medium">{channel.name}</p><p className="mt-1 text-xs text-muted-foreground">{PROVIDER_LABELS[channel.provider]} · {channel.models.filter((model) => model.enabled).length} 个模型已启用 · {channel.hasApiKey ? '已配置密钥' : '未配置密钥'}</p></div>
+      {error && <div role="alert" className="text-xs text-destructive">{error}<button type="button" disabled={loading || busy} className="ml-3 underline" onClick={() => void loadChannels()}>重新加载</button></div>}
+      {loading ? <p className="py-8 text-center text-xs text-muted-foreground">加载中…</p> : (
+        <div className="divide-y divide-border-subtle overflow-hidden rounded-md border bg-[hsl(var(--input-surface))]">
+          {channels.length === 0 ? <p className="py-12 text-center text-xs text-muted-foreground">{error ? '暂时无法读取渠道。' : '还没有配置任何模型，点击上方“添加配置”开始。'}</p> : channels.map((channel) => (
+            <div key={channel.id} className="group flex items-center justify-between gap-3 px-3 py-3">
+              <div className="min-w-0"><p className="truncate text-[13px] font-medium">{channel.name}</p><p className="mt-1 text-[11px] leading-5 text-muted-foreground">{PROVIDER_LABELS[channel.provider]} · {channel.models.filter((model) => model.enabled).length} 个模型已启用 · {channel.hasApiKey ? '已配置密钥' : '未配置密钥'}</p></div>
               <div className="flex shrink-0 items-center gap-2">
-                <button type="button" disabled={busy} aria-label={`编辑 ${channel.name}`} title="编辑" className="rounded-md p-1.5 text-muted-foreground hover:bg-muted/50 hover:text-foreground disabled:opacity-40" onClick={() => { setEditingChannel(channel); setViewMode('edit') }}><Pencil size={14} /></button>
-                <button type="button" disabled={busy} aria-label={`删除 ${channel.name}`} title="删除" className="rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-40" onClick={() => void mutate(channel, 'delete')}><Trash2 size={14} /></button>
-                <label className="flex items-center gap-1 text-xs"><input type="checkbox" role="switch" aria-label={`启用 ${channel.name}`} disabled={busy} checked={channel.enabled} onChange={() => void mutate(channel, 'toggle')} />启用</label>
+                <button type="button" disabled={busy} aria-label={`编辑 ${channel.name}`} title="编辑" className="rounded-md p-1.5 text-muted-foreground hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40" onClick={() => { setEditingChannel(channel); setViewMode('edit') }}><Pencil size={14} /></button>
+                <button type="button" disabled={busy} aria-label={`删除 ${channel.name}`} title="删除" className="rounded-md p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40" onClick={() => void mutate(channel, 'delete')}><Trash2 size={14} /></button>
+                <label className="flex items-center gap-1 text-xs"><input type="checkbox" className="accent-primary focus-visible:ring-1 focus-visible:ring-ring" role="switch" aria-label={`启用 ${channel.name}`} disabled={busy} checked={channel.enabled} onChange={() => void mutate(channel, 'toggle')} />启用</label>
               </div>
             </div>
           ))}

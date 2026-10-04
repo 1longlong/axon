@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { Loader2, Settings, Square } from 'lucide-react'
+import { ArrowUp, ChevronDown, Loader2, Settings, Square } from 'lucide-react'
 import { agentStateAtom } from '@/atoms/agent-state'
 import { chatStateAtom } from '@/atoms/chat-state'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
@@ -9,12 +9,13 @@ import { useAgentController } from './AgentStateProvider'
 import { RichTextInput } from '@/components/chat/RichTextInput'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import { AgentMessageQueue } from './AgentMessageQueue'
+import { AgentPermissionMenu } from './AgentPermissionMenu'
+import type { AgentPermissionProfile } from './AgentPermissionMenu'
 import { AGENT_RUNTIME_CAPABILITIES } from '@axon/shared'
 import type { AgentReasoningCapability, AgentThinkingLevel } from '@axon/shared'
 
 const MAX_AGENT_INPUT_LENGTH = 100_000
 const THINKING_LEVELS: readonly AgentThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
-type AgentPermissionProfile = 'askApproval' | 'approveForMe' | 'fullAccess'
 
 /** 与 adapter 的档位收窄方向一致，保证模型切换时选择框显示实际生效值。 */
 function visibleThinkingLevel(level: AgentThinkingLevel, available: readonly AgentThinkingLevel[]): AgentThinkingLevel {
@@ -125,46 +126,35 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
 
   const inputError = modelError ?? thinkingLevelError ?? (value.length > MAX_AGENT_INPUT_LENGTH ? `输入超过 ${MAX_AGENT_INPUT_LENGTH.toLocaleString()} 字` : undefined)
 
-  return <div className="shrink-0 px-4 pb-4 pt-2">
+  return <div className="shrink-0 px-5 pb-3 pt-2">
     <AgentMessageQueue sessionId={sessionId} messages={queuedMessages} />
-    <div className="mx-auto max-w-3xl rounded-xl border bg-[hsl(var(--input-surface))] p-2 shadow-sm">
-      <RichTextInput value={value} disabled={externalRunning || unavailable} onChange={setValue} onSubmit={send} />
-      <div className="flex items-center justify-between gap-3 px-1 pt-1">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <ContextUsageIndicator messages={messages} draft={value} />
-          <span className="truncate text-[11px] text-destructive">{inputError}</span>
+    <div className="mx-auto max-w-3xl rounded-[12px] border border-border bg-[hsl(var(--input-surface))] px-3 py-2 shadow-sm focus-within:border-ring/50 focus-within:ring-1 focus-within:ring-ring/15">
+      <div className="[&_.chat-rich-input]:min-h-12 [&_.chat-rich-input]:px-1 [&_.chat-rich-input]:text-[13px]">
+        <RichTextInput value={value} disabled={externalRunning || unavailable} onChange={setValue} onSubmit={send} />
+      </div>
+      <div className="flex items-center justify-between gap-2 pt-2">
+        <div className="flex min-w-0 max-w-[25%] shrink-0 items-center gap-1.5">
+          <ContextUsageIndicator messages={messages} draft={value} appearance="workbench" />
+          <span className="min-w-0 truncate text-[11px] text-destructive" title={inputError}>{inputError}</span>
         </div>
-        <div className="flex items-center gap-1.5">
-          {capability ? <select
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
+          {capability ? <div className="relative shrink-0"><select
             aria-label="选择 Agent 思考等级"
             title="选择 Agent 思考等级"
             value={visibleThinkingLevel(thinkingLevel, capability.levels)}
             disabled={running || savingModel || savingThinkingLevel}
             onChange={(event) => void selectThinkingLevel(event.target.value as AgentThinkingLevel)}
-            className="h-8 rounded-md border bg-background px-2 text-xs text-foreground outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+            className="h-7 w-full appearance-none rounded bg-transparent pl-1.5 pr-5 font-mono text-[11px] text-muted-foreground outline-none hover:bg-muted/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
           >
             {capability.levels.map((level) => <option key={level} value={level}>{level}</option>)}
-          </select> : null}
-          <select
-            aria-label="选择 Agent 权限预设"
-            title={session?.runtimeId === 'zima'
-              ? 'Zima 暂不支持操作系统沙箱，仅保留人工工具审批'
-              : '权限预设由沙箱、审批策略和审批者共同组成'}
-            value={permissionProfile}
-            disabled={running || savingModel || savingThinkingLevel}
-            onChange={() => {}}
-            className="h-8 rounded-md border bg-background px-2 text-xs text-foreground outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
-          >
-            <option value="askApproval">请求批准</option>
-            <option value="approveForMe" disabled>帮我批准（待实现）</option>
-            <option value="fullAccess" disabled>完全访问权限（暂不支持）</option>
-          </select>
-          {modelOptions.length > 0 ? <select
+          </select><ChevronDown size={10} strokeWidth={2.5} aria-hidden="true" className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground" /></div> : null}
+          <AgentPermissionMenu profile={permissionProfile} disabled={running || savingModel || savingThinkingLevel} supportsSandbox={session?.runtimeId !== 'zima'} />
+          {modelOptions.length > 0 ? <div className="relative min-w-0 max-w-48 flex-1"><select
             aria-label="选择 Agent 渠道和模型"
             value={hasModel ? currentModel : ''}
             disabled={running || savingModel || savingThinkingLevel}
             onChange={(event) => void selectModel(event.target.value)}
-            className="h-8 w-48 max-w-[55%] rounded-md border bg-background px-2 text-xs text-foreground outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+            className="h-7 w-full min-w-0 appearance-none rounded bg-transparent pl-1.5 pr-5 text-xs text-muted-foreground outline-none hover:bg-muted/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
           >
             <option value="" disabled>选择渠道 / 模型</option>
             {modelOptions.map((option) => <option
@@ -173,16 +163,16 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
             >
               {option.channelName} / {option.modelName}
             </option>)}
-          </select> : <button type="button" onClick={openChannelSettings} className="flex h-8 items-center gap-1.5 rounded-md border px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground">
+          </select><ChevronDown size={10} strokeWidth={2.5} aria-hidden="true" className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground" /></div> : <button type="button" onClick={openChannelSettings} className="flex h-7 min-w-0 items-center gap-1.5 whitespace-nowrap rounded px-2 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
             <Settings size={13} />{chatState.channelsStatus === 'loading' ? '加载渠道…' : '配置渠道'}
           </button>}
           {running ? externalRunning
-            ? <span className="flex h-8 items-center gap-1.5 rounded-md border px-3 text-xs text-muted-foreground"><Loader2 size={12} className="animate-spin" />外部运行中</span>
-            : <><button type="button" onClick={send} disabled={!value.trim() || savingModel || savingThinkingLevel} className="flex h-8 items-center rounded-md bg-primary px-3 text-xs text-primary-foreground disabled:opacity-40">排队</button><button type="button" onClick={() => void controller.stop(sessionId)} className="flex h-8 items-center gap-1.5 rounded-md bg-destructive px-3 text-xs text-destructive-foreground"><Square size={12} fill="currentColor" />停止</button></>
-            : <button type="button" onClick={send} disabled={!value.trim() || savingModel || savingThinkingLevel || unavailable} className="flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs text-primary-foreground disabled:opacity-40"><Loader2 size={12} className="hidden" />发送</button>}
+            ? <span className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-2 text-xs text-muted-foreground"><Loader2 size={12} className="animate-spin" />外部运行中</span>
+            : <><button type="button" onClick={send} disabled={!value.trim() || savingModel || savingThinkingLevel} className="flex h-8 shrink-0 items-center whitespace-nowrap rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground shadow-xs hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:opacity-40">排队</button><button type="button" onClick={() => void controller.stop(sessionId)} className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-destructive px-3 text-xs font-medium text-destructive-foreground hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1"><Square size={12} fill="currentColor" />停止</button></>
+            : <button type="button" aria-label="发送消息" title="发送消息" onClick={send} disabled={!value.trim() || savingModel || savingThinkingLevel || unavailable} className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-xs hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:opacity-40"><ArrowUp size={18} aria-hidden="true" /></button>}
         </div>
       </div>
     </div>
-    {session && <p className="mx-auto mt-1 max-w-3xl px-1 text-[10px] text-muted-foreground">Runtime: {session.runtimeId === 'zima' ? 'Zima' : 'Pi'}</p>}
+    {session && <p className="mx-auto mt-1.5 max-w-3xl px-1 font-mono text-[11px] text-muted-foreground">Runtime: {session.runtimeId === 'zima' ? 'Zima' : 'Pi'}</p>}
   </div>
 }

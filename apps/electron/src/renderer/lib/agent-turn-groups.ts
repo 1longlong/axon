@@ -1,4 +1,4 @@
-import type { SDKMessage, SDKUserMessage } from '@axon/shared'
+import type { SDKAssistantMessage, SDKMessage, SDKUserMessage } from '@axon/shared'
 
 export type AgentDisplayGroup =
   | { kind: 'user'; message: SDKMessage; index: number }
@@ -41,4 +41,19 @@ export function groupAgentTurns(messages: readonly SDKMessage[]): AgentDisplayGr
   }
   flush()
   return groups
+}
+
+/** 只检查尚未收束的当前回复；历史输出与空 delta 不应隐藏新一轮的等待提示。 */
+export function hasActiveAgentTurnOutput(groups: readonly AgentDisplayGroup[]): boolean {
+  const current = groups.at(-1)
+  if (current?.kind !== 'reply' || current.resultIndex !== undefined) return false
+  return current.messages.some((message) => {
+    if (message.type === 'assistant') return (message as SDKAssistantMessage).message.content.some((block) => {
+      if (block.type === 'text') return String(block.text ?? '').trim().length > 0
+      if (block.type === 'thinking') return String(block.thinking ?? '').trim().length > 0
+      return block.type !== 'unknown'
+    })
+    if (message.type === 'user') return ((message as SDKUserMessage).message?.content ?? []).some((block) => block.type === 'tool_result')
+    return message.type === 'system' && message.subtype === 'permission_denied'
+  })
 }

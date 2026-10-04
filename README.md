@@ -27,7 +27,7 @@ Axon 是一个本地优先的 AI 桌面应用，既可以用于日常对话，�
 ### 桌面使用体验
 
 - 左侧按“项目 → 会话”组织 Agent 工作。
-- 右侧可查看文件、记忆和其他项目面板。
+- 右侧支持多个只读文件标签、悬浮文件树与项目记忆面板。
 - 支持托盘运行、单实例唤起和 macOS Dock 状态。
 - 可以为已有会话绑定全局快捷键，通过轻量浮窗快速提问，并在主窗口继续查看完整历史。
 
@@ -133,5 +133,6 @@ Pi 在 macOS 上首次运行会话时异步捕获账户默认 Shell 的环境，
 ## 更多文档
 
 - [项目设计与迭代规划](./docs/axon-project-design.md)
+- [UI 设计与实现](docs/ui-design.md)
 - [当前开发进度](./docs/PROGRESS.md)
 - [LLM 文本生成 API 协议示例](./docs/llm-text-generation-api-protocol-examples.md)

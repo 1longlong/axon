@@ -283,30 +283,30 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
 
   return <div role="dialog" aria-modal="true" aria-label={`配置 ${projectName} 的 MCP 服务`}
     className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
-    <div className="flex h-[min(680px,calc(100vh-32px))] w-full max-w-4xl flex-col rounded-lg border bg-background shadow-xl">
-      <div className="flex items-start justify-between gap-3 border-b px-5 py-4">
+    <div className="flex h-[min(680px,calc(100vh-32px))] w-full max-w-4xl flex-col rounded-lg border bg-dialog text-dialog-foreground shadow-lg">
+      <div className="flex items-start justify-between gap-3 border-b border-border-subtle px-4 py-3">
         <div>
-          <h2 className="text-sm font-medium">MCP 服务 · {projectName}</h2>
+          <h2 className="text-sm font-semibold">MCP 服务 · {projectName}</h2>
           <p className="mt-1 text-xs text-muted-foreground">项目下全部 Agent 会话共享这些服务器；配置仅保存在应用私有目录。</p>
         </div>
         <button type="button" aria-label="关闭 MCP 配置" title="关闭" disabled={saving || testingId !== null || materializingId !== null} onClick={onClose}
-          className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40">
+          className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
           <X size={16} />
         </button>
       </div>
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-56 shrink-0 flex-col border-r p-3">
+        <aside className="flex w-48 shrink-0 flex-col border-r border-border-subtle bg-[hsl(var(--sidebar-surface))] p-3">
           <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null || drafts.length >= 64} onClick={addServer}
-            className="flex h-8 items-center justify-center gap-2 rounded-md border text-xs hover:bg-muted disabled:opacity-40">
+            className="flex h-8 items-center justify-center gap-2 rounded-md border text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
             <Plus size={13} />添加服务器
           </button>
           {presets.length > 0 && <div className="mt-3 border-b pb-3">
-            <p className="px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">内置预设</p>
+            <p className="px-1 text-[11px] font-medium text-muted-foreground">内置预设</p>
             <div className="mt-1 space-y-1">
               {presets.map((preset) => <button key={preset.id} type="button" title={preset.description}
                 disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null || drafts.length >= 64}
                 onClick={() => void addPreset(preset)}
-                className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40">
+                className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
                 <span className="truncate">{materializingId === preset.id ? '正在添加…' : preset.displayName}</span>
                 <Plus size={11} className="shrink-0" />
               </button>)}
@@ -315,19 +315,19 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
           <div className="mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto">
             {loading ? <p className="px-2 py-4 text-xs text-muted-foreground">正在读取…</p>
               : drafts.length === 0 ? <p className="px-2 py-4 text-xs text-muted-foreground">尚未配置服务器</p>
-                : drafts.map((draft) => <button key={draft.id} type="button" disabled={testingId !== null} onClick={() => { setSelectedId(draft.id); setTestResult(null) }}
-                  className={`flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-xs ${selectedId === draft.id ? 'bg-muted text-foreground' : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'}`}>
+                : drafts.map((draft) => <button key={draft.id} type="button" aria-pressed={selectedId === draft.id} disabled={testingId !== null} onClick={() => { setSelectedId(draft.id); setTestResult(null) }}
+                  className={`flex w-full items-center gap-2 rounded-md border px-2 py-2 text-left font-mono text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${selectedId === draft.id ? 'border-border bg-[hsl(var(--input-surface))] text-foreground' : 'border-transparent text-muted-foreground hover:bg-muted/60 hover:text-foreground'}`}>
                   <span className={`size-2 shrink-0 rounded-full ${draft.enabled ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
                   <span className="min-w-0 flex-1 truncate">{draft.name || '未命名'}</span>
-                  <span className="text-[10px] uppercase">{draft.type}</span>
+                  <span className="font-mono text-[11px]">{draft.type}</span>
                 </button>)}
           </div>
         </aside>
-        <main className="min-w-0 flex-1 overflow-y-auto p-5">
+        <main className="min-w-0 flex-1 overflow-y-auto p-4">
           {!loading && selected && <>
             <ServerEditor draft={selected} disabled={saving || testingId !== null} onChange={updateSelected} onDelete={removeSelected} />
             {testResult?.id === selected.id && <div className="mt-4 space-y-2 text-xs">
-              <p role="status" className={testResult.ok ? 'text-emerald-600' : 'text-destructive'}>
+              <p role="status" className={testResult.ok ? 'text-emerald-700 dark:text-emerald-400' : 'text-destructive'}>
                 {testResult.ok ? `连接成功，发现 ${testResult.tools.length} 个工具` : testResult.message}
               </p>
               {testResult.ok && <div className="rounded-md border bg-muted/30 p-3">
@@ -339,15 +339,15 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
           {!loading && !selected && <div className="flex h-full items-center justify-center text-xs text-muted-foreground">添加一个 stdio 或 HTTP MCP Server</div>}
         </main>
       </div>
-      <div className="border-t px-5 py-3">
+      <div className="border-t border-border-subtle px-4 py-3">
         {error && <p className="mb-2 text-xs text-destructive">{error}</p>}
-        {notice && <p role="status" className="mb-2 text-xs text-emerald-600">{notice}</p>}
-        <div className="flex justify-end gap-2">
-          <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null || !selected} onClick={() => void testConnection()} className="h-8 rounded-md border px-3 text-xs hover:bg-muted disabled:opacity-40">
+        {notice && <p role="status" className="mb-2 text-xs text-emerald-700 dark:text-emerald-400">{notice}</p>}
+        <div className="flex flex-wrap justify-end gap-2">
+          <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null || !selected} onClick={() => void testConnection()} className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
             {testingId ? '正在测试…' : '测试连接'}
           </button>
-          <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null} onClick={cancel} title="撤销本项目所有未保存的 MCP 修改" className="h-8 rounded-md border px-3 text-xs hover:bg-muted disabled:opacity-40">取消</button>
-          <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null} onClick={() => void save()} title="保存本项目所有 MCP 配置" className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground disabled:opacity-40">
+          <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null} onClick={cancel} title="撤销本项目所有未保存的 MCP 修改" className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">取消</button>
+          <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null} onClick={() => void save()} title="保存本项目所有 MCP 配置" className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
             {saving ? '正在保存…' : '保存'}
           </button>
         </div>
@@ -366,23 +366,23 @@ function ServerEditor({ draft, disabled, onChange, onDelete }: {
     <div className="flex items-start gap-3">
       <label className="min-w-0 flex-1 text-xs text-muted-foreground">服务器名称
         <input autoFocus value={draft.name} disabled={disabled} maxLength={64} onChange={(event) => onChange({ name: event.target.value })}
-          placeholder="filesystem" className="mt-1 h-9 w-full rounded-md border bg-background px-3 text-sm text-foreground outline-none focus:ring-1 focus:ring-ring" />
-        <span className="mt-1 block text-[10px]">小写 kebab-case；工具名会添加此前缀。</span>
+          placeholder="filesystem" className="mt-1 h-8 w-full rounded-md border bg-[hsl(var(--input-surface))] px-2 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-ring" />
+        <span className="mt-1 block text-[11px]">小写 kebab-case；工具名会添加此前缀。</span>
       </label>
       <button type="button" disabled={disabled} onClick={onDelete} aria-label="删除 MCP 服务器"
-        className="mt-5 flex size-9 items-center justify-center rounded-md border text-muted-foreground hover:bg-muted hover:text-destructive disabled:opacity-40">
+        className="mt-5 flex size-8 items-center justify-center rounded-md border text-muted-foreground hover:bg-muted hover:text-destructive focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
         <Trash2 size={14} />
       </button>
     </div>
-    <div className="grid grid-cols-2 gap-3">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <FieldLabel label="通信方式">
         <select value={draft.type} disabled={disabled} onChange={(event) => onChange({ type: event.target.value as 'stdio' | 'http' })}
-          className="h-9 w-full rounded-md border bg-background px-2 text-sm text-foreground outline-none focus:ring-1 focus:ring-ring">
+          className="h-8 w-full rounded-md border bg-[hsl(var(--input-surface))] px-2 text-xs text-foreground outline-none focus:ring-1 focus:ring-ring">
           <option value="stdio">stdio（本地进程）</option>
           <option value="http">HTTP（Streamable HTTP）</option>
         </select>
       </FieldLabel>
-      <div className="flex items-end gap-5 pb-2 text-xs">
+      <div className="flex flex-wrap items-end gap-x-3 gap-y-2 pb-2 text-xs">
         <CheckField label="启用" checked={draft.enabled} disabled={disabled} onChange={(enabled) => onChange({ enabled })} />
         <CheckField label="必需（失败时阻断本轮）" checked={draft.required} disabled={disabled} onChange={(required) => onChange({ required })} />
       </div>
@@ -390,27 +390,27 @@ function ServerEditor({ draft, disabled, onChange, onDelete }: {
     {draft.type === 'stdio' ? <>
       <FieldLabel label="启动命令">
         <input value={draft.command} disabled={disabled} onChange={(event) => onChange({ command: event.target.value })}
-          placeholder="npx" className="h-9 w-full rounded-md border bg-background px-3 text-sm text-foreground outline-none focus:ring-1 focus:ring-ring" />
+          placeholder="npx" className="h-8 w-full rounded-md border bg-[hsl(var(--input-surface))] px-2 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-ring" />
       </FieldLabel>
       <JsonField label="参数（JSON 字符串数组）" value={draft.argsJson} disabled={disabled} onChange={(argsJson) => onChange({ argsJson })} placeholder={'["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]'} />
       <JsonField label="环境变量（JSON 字符串对象）" value={draft.envJson} disabled={disabled} onChange={(envJson) => onChange({ envJson })} placeholder={'{"TOKEN": "..."}'} />
     </> : <>
       <FieldLabel label="Streamable HTTP URL">
         <input value={draft.url} disabled={disabled} onChange={(event) => onChange({ url: event.target.value })}
-          placeholder="https://example.com/mcp" className="h-9 w-full rounded-md border bg-background px-3 text-sm text-foreground outline-none focus:ring-1 focus:ring-ring" />
+          placeholder="https://example.com/mcp" className="h-8 w-full rounded-md border bg-[hsl(var(--input-surface))] px-2 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-ring" />
       </FieldLabel>
       <JsonField label="请求头（JSON 字符串对象）" value={draft.headersJson} disabled={disabled} onChange={(headersJson) => onChange({ headersJson })} placeholder={'{"Authorization": "Bearer ..."}'} />
     </>}
-    <div className="grid grid-cols-2 gap-3">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <FieldLabel label="启动超时（毫秒）">
         <input type="number" min={100} max={600000} step={100} value={draft.startupTimeoutMs} disabled={disabled}
           onChange={(event) => onChange({ startupTimeoutMs: event.target.value })}
-          className="h-9 w-full rounded-md border bg-background px-3 text-sm text-foreground outline-none focus:ring-1 focus:ring-ring" />
+          className="h-8 w-full rounded-md border bg-[hsl(var(--input-surface))] px-2 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-ring" />
       </FieldLabel>
       <FieldLabel label="请求超时（毫秒）">
         <input type="number" min={100} max={600000} step={100} value={draft.requestTimeoutMs} disabled={disabled}
           onChange={(event) => onChange({ requestTimeoutMs: event.target.value })}
-          className="h-9 w-full rounded-md border bg-background px-3 text-sm text-foreground outline-none focus:ring-1 focus:ring-ring" />
+          className="h-8 w-full rounded-md border bg-[hsl(var(--input-surface))] px-2 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-ring" />
       </FieldLabel>
     </div>
   </div>
@@ -427,7 +427,7 @@ function CheckField({ label, checked, disabled, onChange }: {
   onChange(value: boolean): void
 }): React.ReactElement {
   return <label className="flex items-center gap-2 text-muted-foreground">
-    <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}
+    <input type="checkbox" className="accent-primary focus-visible:ring-1 focus-visible:ring-ring" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />{label}
   </label>
 }
 
@@ -440,6 +440,6 @@ function JsonField({ label, value, disabled, placeholder, onChange }: {
 }): React.ReactElement {
   return <label className="block text-xs text-muted-foreground">{label}
     <textarea value={value} disabled={disabled} spellCheck={false} onChange={(event) => onChange(event.target.value)} placeholder={placeholder}
-      className="mt-1 h-24 w-full resize-y rounded-md border bg-background p-3 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-ring" />
+      className="mt-1 h-24 w-full resize-y rounded-md border bg-[hsl(var(--input-surface))] p-3 font-mono text-xs leading-5 text-foreground outline-none focus:ring-1 focus:ring-ring" />
   </label>
 }

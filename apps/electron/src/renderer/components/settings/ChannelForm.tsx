@@ -14,7 +14,7 @@ interface ChannelFormProps {
   onCancel: () => void
 }
 
-const INPUT_CLASS = 'mt-2 h-10 w-full rounded-lg border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring/30'
+const INPUT_CLASS = 'mt-1.5 h-8 w-full rounded-md border bg-[hsl(var(--input-surface))] px-2 text-[13px] outline-none focus:ring-1 focus:ring-ring'
 
 export function ChannelForm({ channel, onSaved, onCancel }: ChannelFormProps): React.ReactElement {
   const [initial] = React.useState(() => createChannelDraft(channel))
@@ -118,17 +118,17 @@ export function ChannelForm({ channel, onSaved, onCancel }: ChannelFormProps): R
   }
 
   return (
-    <form className="space-y-6" onSubmit={(event) => void handleSave(event)}>
+    <form className="max-w-3xl space-y-4" onSubmit={(event) => void handleSave(event)}>
       <div className="flex items-center gap-3">
-        <button type="button" aria-label="返回渠道列表" disabled={busy} onClick={handleCancel} className="h-8 w-8 rounded-md hover:bg-muted disabled:opacity-40"><ArrowLeft size={18} /></button>
-        <h3 className="flex-1 text-lg font-medium">{channel ? '编辑模型配置' : '添加模型配置'}</h3>
-        <button type="submit" disabled={busy || hasPendingChannelModel(draft.pendingModel) || !draft.name.trim() || (!!channel && !dirty)} className="flex h-9 items-center gap-2 rounded-lg bg-primary px-4 text-sm text-primary-foreground disabled:opacity-40">
+        <button type="button" aria-label="返回渠道列表" disabled={busy} onClick={handleCancel} className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"><ArrowLeft size={16} /></button>
+        <h3 className="flex-1 text-sm font-semibold">{channel ? '编辑模型配置' : '添加模型配置'}</h3>
+        <button type="submit" disabled={busy || hasPendingChannelModel(draft.pendingModel) || !draft.name.trim() || (!!channel && !dirty)} className="flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
           {saving && <Loader2 size={14} className="animate-spin" />}{saving ? '保存中…' : channel ? '保存' : '创建'}
         </button>
       </div>
-      <fieldset disabled={busy} className="space-y-4 rounded-xl border bg-card p-5">
-        <legend className="px-1 text-sm font-medium">基本信息</legend>
-        <label className="block text-sm font-medium">供应商类型
+      <fieldset disabled={busy} className="space-y-3 rounded-md border bg-[hsl(var(--input-surface))] p-4">
+        <legend className="px-1 text-xs font-medium">基本信息</legend>
+        <label className="block text-xs font-medium">供应商类型
           <select className={INPUT_CLASS} value={draft.provider} onChange={(event) => {
             const provider = event.target.value
             if (isProviderType(provider)) setDraft((current) => ({ ...current, provider, baseUrl: PROVIDER_DEFAULT_URLS[provider] }))
@@ -136,22 +136,22 @@ export function ChannelForm({ channel, onSaved, onCancel }: ChannelFormProps): R
             {PROVIDER_TYPES.map((provider) => <option key={provider} value={provider}>{PROVIDER_LABELS[provider]}</option>)}
           </select>
         </label>
-        <label className="block text-sm font-medium">供应商名称
+        <label className="block text-xs font-medium">供应商名称
           <input className={INPUT_CLASS} required maxLength={MAX_CHANNEL_NAME_LENGTH} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：我的模型渠道" />
         </label>
-        <label className="block text-sm font-medium">Base URL
-          <input className={INPUT_CLASS} type="url" required value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder="https://…" />
+        <label className="block text-xs font-medium">Base URL
+          <input className={`${INPUT_CLASS} font-mono text-xs`} type="url" required value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder="https://…" />
         </label>
-        <label className="block text-sm font-medium">API Key
-          <input className={INPUT_CLASS} type="password" autoComplete="new-password" spellCheck={false} value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder={channel?.hasApiKey ? '已配置；留空保留原密钥' : '输入 API Key（无鉴权服务可留空）'} />
+        <label className="block text-xs font-medium">API Key
+          <input className={`${INPUT_CLASS} font-mono text-xs`} type="password" autoComplete="new-password" spellCheck={false} value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder={channel?.hasApiKey ? '已配置；留空保留原密钥' : '输入 API Key（无鉴权服务可留空）'} />
         </label>
         <p className="text-xs text-muted-foreground">密钥在保存、测试或获取模型时交给主进程，不从存储中回显。测试时留空会使用已保存密钥；更改供应商或地址不会清除原密钥，请核对目标是否匹配。</p>
       </fieldset>
       <div className="space-y-3">
-        <p className="break-all text-xs text-muted-foreground">目录地址：{endpoint || '请填写不含鉴权查询参数的有效 HTTP(S) 地址'}</p>
-        <div className="flex items-center gap-2">
-          <button type="button" disabled={busy || !endpoint} onClick={() => void handleNetwork('test')} className="h-8 rounded-md border px-3 text-xs disabled:opacity-40">测试目录连接</button>
-          <button type="button" disabled={busy || !endpoint || hasPendingChannelModel(draft.pendingModel)} onClick={() => void handleNetwork('models')} className="flex h-8 items-center gap-2 rounded-md border px-3 text-xs disabled:opacity-40"><Download size={12} />从供应商获取</button>
+        <p className="break-all font-mono text-[11px] leading-5 text-muted-foreground">目录地址：{endpoint || '请填写不含鉴权查询参数的有效 HTTP(S) 地址'}</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" disabled={busy || !endpoint} onClick={() => void handleNetwork('test')} className="h-8 rounded-md border bg-[hsl(var(--input-surface))] px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">测试目录连接</button>
+          <button type="button" disabled={busy || !endpoint || hasPendingChannelModel(draft.pendingModel)} onClick={() => void handleNetwork('models')} className="flex h-8 items-center gap-2 rounded-md border bg-[hsl(var(--input-surface))] px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"><Download size={12} />从供应商获取</button>
           {requesting && <><Loader2 size={14} className="animate-spin" /><button type="button" onClick={cancelNetwork} className="text-xs underline">取消请求</button></>}
         </div>
         {networkResult && <p role="status" className={`text-xs ${networkResult.success ? 'text-muted-foreground' : 'text-destructive'}`}>{networkResult.message}{networkResult.success && `（${networkResult.elapsedMs} ms）`}</p>}
@@ -159,7 +159,7 @@ export function ChannelForm({ channel, onSaved, onCancel }: ChannelFormProps): R
       <ChannelModelsEditor models={draft.models} pending={draft.pendingModel} disabled={busy}
         onChange={(models, pendingModel) => setDraft((current) => ({ ...current, models, pendingModel }))} />
       <p className="text-xs text-muted-foreground">目录测试只检查目录接口，不发送对话、不验证生成能力。获取后保留已有配置，新模型默认未启用；请启用所需模型并保存。第三方或 HTTP 目标每次请求前需要确认。</p>
-      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+      {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
     </form>
   )
 }

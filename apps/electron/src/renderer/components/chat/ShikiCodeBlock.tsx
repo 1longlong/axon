@@ -8,17 +8,26 @@ interface HighlightToken {
 }
 
 interface HighlightResult {
+  source: string
+  language: string
+  theme: 'light' | 'dark'
   lines: HighlightToken[][]
   foreground: string
 }
 
+interface ShikiCodeBlockProps {
+  code: string
+  language?: string
+  appearance?: 'message' | 'workspace'
+}
+
 /** 按需加载 Shiki 并把 token 渲染为 React 节点，避免注入高亮器生成的 HTML。 */
-export function ShikiCodeBlock({ code: rawCode, language: rawLanguage }: { code: string; language?: string }): React.ReactElement {
+export function ShikiCodeBlock({ code: rawCode, language: rawLanguage, appearance = 'message' }: ShikiCodeBlockProps): React.ReactElement {
   // 高亮器与背景都读取 DOM 最终主题，避免 atom 更新和 .dark class 更新之间出现混色。
   const [theme, setTheme] = React.useState<'light' | 'dark'>(() => (
     typeof document !== 'undefined' && document.documentElement.classList.contains('dark') ? 'dark' : 'light'
   ))
-  const code = trimMarkdownCodeFenceNewline(rawCode)
+  const code = appearance === 'workspace' ? rawCode : trimMarkdownCodeFenceNewline(rawCode)
   const language = normalizeShikiLanguage(rawLanguage)
   const [highlight, setHighlight] = React.useState<HighlightResult | null>(null)
   const [copied, setCopied] = React.useState(false)
@@ -49,6 +58,9 @@ export function ShikiCodeBlock({ code: rawCode, language: rawLanguage }: { code:
         }
         if (cancelled) return
         setHighlight({
+          source: code,
+          language,
+          theme,
           lines: result.tokens.map((line) => line.map((token) => ({
             content: token.content,
             ...(token.color ? { color: token.color } : {}),
@@ -75,8 +87,19 @@ export function ShikiCodeBlock({ code: rawCode, language: rawLanguage }: { code:
     }
   }
 
-  const lines: HighlightToken[][] = highlight?.lines ?? code.split('\n').map((line) => [{ content: line }])
+  // 工作区切换文件、内容或主题时先展示当前源码；上一轮高亮不能配上新的文件标题。
+  const visibleHighlight = appearance === 'workspace'
+    && (highlight?.source !== code || highlight.language !== language || highlight.theme !== theme)
+    ? null : highlight
+  const lines: HighlightToken[][] = visibleHighlight?.lines ?? code.split('\n').map((line) => [{ content: line }])
   const fallbackForeground = theme === 'dark' ? '#e1e4e8' : '#24292f'
+  if (appearance === 'workspace') return <pre className="min-w-max px-4 py-4 font-mono text-[12px] leading-6" style={{ color: visibleHighlight?.foreground ?? fallbackForeground }}><code>
+    {lines.map((line, lineIndex) => <React.Fragment key={lineIndex}>
+      {lineIndex > 0 && '\n'}
+      <span aria-hidden="true" className="mr-4 inline-block w-8 select-none text-right text-muted-foreground/60">{lineIndex + 1}</span>
+      {line.map((token, tokenIndex) => <span key={tokenIndex} style={token.color ? { color: token.color } : undefined}>{token.content}</span>)}
+    </React.Fragment>)}
+  </code></pre>
   return (
     <div
       className="my-2 overflow-hidden rounded-lg border border-border/60"

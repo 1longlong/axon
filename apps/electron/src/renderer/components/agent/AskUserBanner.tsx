@@ -37,10 +37,10 @@ export function AskUserBanner({ sessionId }: { sessionId: string }): React.React
   }))
   const canSubmit = Object.values(answers).every((answer) => answer.length > 0)
 
-  return <div className="mx-4 mt-3 shrink-0 rounded-lg border border-blue-500/40 bg-blue-500/5 p-3 text-sm">
+  return <div className="mx-4 mt-3 shrink-0 rounded-md border border-indigo-500/30 bg-[hsl(var(--input-surface))] p-3 text-[13px]">
     <div className="flex items-start gap-2">
-      <HelpCircle size={17} className="mt-0.5 shrink-0 text-blue-600" />
-      <div className="min-w-0 flex-1 space-y-4">
+      <HelpCircle size={17} className="mt-0.5 shrink-0 text-indigo-500 dark:text-indigo-400" />
+      <div className="min-w-0 flex-1 space-y-3">
         <p className="font-medium">Agent 需要你的回答</p>
         {request.questions.map((question) => {
           const draft = draftFor(question.question)
@@ -49,9 +49,9 @@ export function AskUserBanner({ sessionId }: { sessionId: string }): React.React
             {question.options.length > 0 && <div className="flex flex-wrap gap-2">
               {question.options.map((option) => {
                 const selected = draft.selected.includes(option.label)
-                return <button key={option.label} type="button" title={option.description} onClick={() => toggleOption(question, option.label)} className={`rounded-md border px-2.5 py-1.5 text-left text-xs ${selected ? 'border-primary bg-primary/10 text-foreground' : 'text-muted-foreground hover:bg-muted'}`}>
+                return <button key={option.label} type="button" aria-pressed={selected} title={option.description} onClick={() => toggleOption(question, option.label)} className={`rounded-md border px-2.5 py-1.5 text-left text-xs focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${selected ? 'border-indigo-500/40 bg-indigo-500/5 text-foreground dark:border-indigo-400/50' : 'text-muted-foreground hover:bg-muted'}`}>
                   <span className="block">{option.label}</span>
-                  {option.description && <span className="mt-0.5 block text-[10px] opacity-75">{option.description}</span>}
+                  {option.description && <span className="mt-0.5 block text-[11px] text-muted-foreground">{option.description}</span>}
                 </button>
               })}
             </div>}
@@ -63,14 +63,14 @@ export function AskUserBanner({ sessionId }: { sessionId: string }): React.React
               })}
               maxLength={10_000}
               rows={2}
-              className="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring"
+              className="w-full resize-y rounded-md border bg-[hsl(var(--input-surface))] px-2 py-1.5 text-xs outline-none focus:ring-1 focus:ring-ring"
               placeholder={question.options.length > 0 ? '其他答案（可选）' : '请输入回答'}
             />
           </fieldset>
         })}
         <div className="flex gap-2">
-          <button type="button" disabled={!canSubmit} onClick={() => void controller.respondAskUser({ requestId: request.requestId, behavior: 'answer', answers })} className="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-40">提交回答</button>
-          <button type="button" onClick={() => void controller.respondAskUser({ requestId: request.requestId, behavior: 'cancel' })} className="rounded-md border px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted">取消</button>
+          <button type="button" disabled={!canSubmit} onClick={() => void controller.respondAskUser({ requestId: request.requestId, behavior: 'answer', answers })} className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">提交回答</button>
+          <button type="button" onClick={() => void controller.respondAskUser({ requestId: request.requestId, behavior: 'cancel' })} className="h-8 rounded-md border px-3 text-xs text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">取消</button>
         </div>
       </div>
     </div>

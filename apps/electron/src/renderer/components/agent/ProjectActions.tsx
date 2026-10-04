@@ -9,6 +9,10 @@ interface CommonProps {
   onError(message: string | null): void
 }
 
+interface ProjectCreateActionsProps extends CommonProps {
+  compact?: boolean
+}
+
 /** 点击详情菜单外部或按 Escape 时关闭，避免原生 details 弹层滞留。 */
 function useDismissibleDetails(ref: React.RefObject<HTMLDetailsElement>): void {
   React.useEffect(() => {
@@ -28,7 +32,7 @@ function useDismissibleDetails(ref: React.RefObject<HTMLDetailsElement>): void {
 }
 
 /** 左侧栏的新建入口；名称和可选工作区在同一对话框内一次确认。 */
-export function ProjectCreateActions({ disabled = false, onError }: CommonProps): React.ReactElement {
+export function ProjectCreateActions({ disabled = false, onError, compact = false }: ProjectCreateActionsProps): React.ReactElement {
   const controller = useAgentController()
   const [open, setOpen] = React.useState(false)
   const [busy, setBusy] = React.useState(false)
@@ -66,8 +70,10 @@ export function ProjectCreateActions({ disabled = false, onError }: CommonProps)
     <button type="button" aria-label="新建 Agent 项目" disabled={disabled || busy} onClick={() => {
       onError(null)
       setOpen(true)
-    }} className="mt-3 flex h-9 w-full items-center justify-center gap-2 rounded-lg border border-dashed text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40">
-      <Plus size={15} />{busy ? '正在处理…' : '新建项目'}
+    }} title={compact ? '新建项目' : undefined} className={compact
+      ? 'titlebar-no-drag flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40'
+      : 'mt-3 flex h-9 w-full items-center justify-center gap-2 rounded-lg border border-dashed text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-40'}>
+      <Plus size={compact ? 12 : 15} />{!compact && (busy ? '正在处理…' : '新建项目')}
     </button>
     {open && <ProjectCreateDialog busy={busy} onCancel={() => setOpen(false)} onChooseLocal={chooseLocal} onSubmit={submit} />}
   </>
@@ -123,10 +129,10 @@ export function ProjectActions({ project, sessionCount, disabled = false, onErro
   return <>
     <details ref={menuRef} className="relative shrink-0">
       <summary aria-label={`管理项目 ${project.name}`} title="管理项目"
-        className="flex size-7 cursor-pointer list-none items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-foreground [&::-webkit-details-marker]:hidden">
-        <MoreHorizontal size={14} />
+        className="flex size-6 cursor-pointer list-none items-center justify-center rounded text-muted-foreground hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+        <MoreHorizontal size={12} />
       </summary>
-      <div className="absolute right-0 top-7 z-30 w-48 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
+      <div className="absolute right-0 top-6 z-30 w-48 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
         <MenuAction disabled={disabled || busy} onClick={() => {
           menuRef.current?.removeAttribute('open')
           setRenaming(true)
@@ -180,30 +186,30 @@ function ProjectCreateDialog({ busy, onCancel, onChooseLocal, onSubmit }: {
     : '未选择本地文件夹，将使用默认目录'
 
   return <div role="dialog" aria-modal="true" aria-label="创建项目" className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
-    <form className="w-full max-w-sm rounded-lg border bg-background p-4 shadow-xl" onSubmit={(event) => {
+    <form className="w-full max-w-sm rounded-lg border bg-dialog p-4 text-dialog-foreground shadow-lg" onSubmit={(event) => {
       event.preventDefault()
       const normalized = name.trim()
       if (normalized && !busy) onSubmit(normalized, workspace)
     }}>
-      <h2 className="text-sm font-medium">创建项目</h2>
+      <h2 className="text-sm font-semibold">创建项目</h2>
       <p className="mt-1 text-xs text-muted-foreground">项目下的所有会话共享同一个工作区。</p>
       <label className="mt-4 block text-xs text-muted-foreground">项目名称</label>
       <input autoFocus aria-label="项目名称" value={name} disabled={busy} maxLength={100}
         onChange={(event) => setName(event.target.value)}
-        className="mt-1 h-9 w-full rounded-md border bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring" />
+        className="mt-1 h-8 w-full rounded-md border bg-[hsl(var(--input-surface))] px-2 text-[13px] outline-none focus:ring-1 focus:ring-ring" />
       <span className="mt-4 block text-xs text-muted-foreground">本地工作区（可选）</span>
       <div className="mt-1 flex gap-2">
         <button type="button" disabled={busy} onClick={() => void chooseLocal()}
-          className={`h-8 flex-1 rounded-md border px-3 text-xs hover:bg-muted disabled:opacity-40 ${workspace.kind === 'local' ? 'border-primary bg-muted text-foreground' : ''}`}>
+          className={`h-8 flex-1 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40 ${workspace.kind === 'local' ? 'border-indigo-500/40 bg-indigo-500/5 text-foreground dark:border-indigo-400/50' : ''}`}>
           选择本地文件夹
         </button>
         {workspace.kind === 'local' && <button type="button" disabled={busy} onClick={() => setWorkspace({ kind: 'managed' })}
-          className="h-8 rounded-md border px-3 text-xs hover:bg-muted disabled:opacity-40">取消选择</button>}
+          className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">取消选择</button>}
       </div>
-      <p className="mt-2 truncate text-[11px] text-muted-foreground" title={workspaceDescription}>{workspaceDescription}</p>
+      <p className="mt-2 truncate font-mono text-[11px] text-muted-foreground" title={workspaceDescription}>{workspaceDescription}</p>
       <div className="mt-4 flex justify-end gap-2">
-        <button type="button" disabled={busy} onClick={onCancel} className="h-8 rounded-md border px-3 text-xs hover:bg-muted disabled:opacity-40">取消</button>
-        <button type="submit" disabled={busy || !name.trim()} className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground disabled:opacity-40">创建</button>
+        <button type="button" disabled={busy} onClick={onCancel} className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">取消</button>
+        <button type="submit" disabled={busy || !name.trim()} className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">创建</button>
       </div>
     </form>
   </div>
@@ -217,18 +223,18 @@ function ProjectNameDialog({ initialName, busy, onCancel, onSubmit }: {
 }): React.ReactElement {
   const [name, setName] = React.useState(initialName)
   return <div role="dialog" aria-modal="true" aria-label="重命名项目" className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
-    <form className="w-full max-w-sm rounded-lg border bg-background p-4 shadow-xl" onSubmit={(event) => {
+    <form className="w-full max-w-sm rounded-lg border bg-dialog p-4 text-dialog-foreground shadow-lg" onSubmit={(event) => {
       event.preventDefault()
       const normalized = name.trim()
       if (normalized && !busy) onSubmit(normalized)
     }}>
-      <h2 className="text-sm font-medium">重命名项目</h2>
+      <h2 className="text-sm font-semibold">重命名项目</h2>
       <input autoFocus aria-label="项目名称" value={name} disabled={busy} maxLength={100}
         onChange={(event) => setName(event.target.value)}
-        className="mt-4 h-9 w-full rounded-md border bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring" />
+        className="mt-4 h-8 w-full rounded-md border bg-[hsl(var(--input-surface))] px-2 text-[13px] outline-none focus:ring-1 focus:ring-ring" />
       <div className="mt-4 flex justify-end gap-2">
-        <button type="button" disabled={busy} onClick={onCancel} className="h-8 rounded-md border px-3 text-xs hover:bg-muted disabled:opacity-40">取消</button>
-        <button type="submit" disabled={busy || !name.trim()} className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground disabled:opacity-40">保存</button>
+        <button type="button" disabled={busy} onClick={onCancel} className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">取消</button>
+        <button type="submit" disabled={busy || !name.trim()} className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">保存</button>
       </div>
     </form>
   </div>
@@ -241,7 +247,7 @@ function MenuAction({ children, disabled, danger = false, onClick }: {
   onClick(): void
 }): React.ReactElement {
   return <button type="button" disabled={disabled} onClick={onClick}
-    className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted disabled:opacity-40 ${danger ? 'text-destructive' : ''}`}>
+    className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40 ${danger ? 'text-destructive' : ''}`}>
     {children}
   </button>
 }

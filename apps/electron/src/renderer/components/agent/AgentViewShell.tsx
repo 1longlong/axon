@@ -13,8 +13,15 @@ import { AgentHeader } from './AgentHeader'
 import { QuickConversationLayout, type QuickConversationLayoutOptions } from '@/components/app-shell/QuickConversationLayout'
 import { QuickComposer } from '@/components/app-shell/QuickComposer'
 
-/** Agent 页面按“项目归属、会话元数据、权限、消息流、输入动作”组合。 */
-export function AgentViewShell({ sessionId, compact = false, quick }: { sessionId: string; compact?: boolean; quick?: QuickConversationLayoutOptions & { onSent: () => void } }): React.ReactElement {
+interface AgentViewShellProps {
+  sessionId: string
+  isActive?: boolean
+  compact?: boolean
+  quick?: QuickConversationLayoutOptions & { onSent: () => void }
+}
+
+/** Agent 页面组合中立状态；向工具面板传递前台身份，后台缓存不参与共享布局变更。 */
+export function AgentViewShell({ sessionId, isActive = true, compact = false, quick }: AgentViewShellProps): React.ReactElement {
   const controller = useAgentController()
   const state = useAtomValue(agentStateAtom)
   const session = state.sessions.find((item) => item.id === sessionId)
@@ -78,6 +85,7 @@ export function AgentViewShell({ sessionId, compact = false, quick }: { sessionI
       <AgentInput sessionId={session.id} />
     </main>
     {!compact && <AgentSidePanel
+      isActive={isActive}
       projectId={currentProject?.id}
       workspaceUpdatedAt={currentProject?.updatedAt}
       memoryEnabled={currentProject?.memoryEnabled === true}

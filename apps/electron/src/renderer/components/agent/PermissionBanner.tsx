@@ -46,23 +46,23 @@ export function PermissionBanner({ sessionId }: { sessionId: string }): React.Re
     void controller.respondPermission({ requestId: request.requestId, behavior, alwaysAllow })
   }
 
-  return <div className="mx-4 mb-2 shrink-0 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+  return <div className="mx-4 mb-2 shrink-0 rounded-md border border-amber-500/30 bg-[hsl(var(--input-surface))] p-3 text-[13px]">
     <div className="flex items-start gap-2">
-      <ShieldAlert size={17} className="mt-0.5 shrink-0 text-amber-600" />
+      <ShieldAlert size={17} className="mt-0.5 shrink-0 text-amber-700 dark:text-amber-300" />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <p className="font-medium">{content.title}</p>
-          {content.kind && <span className="rounded-full border border-amber-500/40 bg-background/60 px-2 py-0.5 text-[10px] text-amber-700">{content.kind}</span>}
-          {pending.length > 1 && <span className="text-[10px] text-muted-foreground">另有 {pending.length - 1} 项等待确认</span>}
+          {content.kind && <span className="rounded border border-amber-500/30 bg-amber-500/5 px-1.5 py-0.5 text-[11px] text-amber-700 dark:text-amber-300">{content.kind}</span>}
+          {pending.length > 1 && <span className="text-[11px] text-muted-foreground">另有 {pending.length - 1} 项等待确认</span>}
         </div>
         <p className="mt-1 break-words text-xs text-muted-foreground">{content.description}</p>
         {content.target && <p className="mt-1 break-all font-mono text-[11px] text-foreground">{content.target}</p>}
-        {content.detail && <p className="mt-2 break-words text-xs text-amber-800">{content.detail}</p>}
+        {content.detail && <p className="mt-2 break-words text-xs text-amber-800 dark:text-amber-200">{content.detail}</p>}
         {request.sandboxEscalation && <p className="mt-1 text-[11px] text-muted-foreground">批准后只携带本项权限重试当前工具一次。</p>}
         <div className="mt-3 flex flex-wrap gap-2">
-          <button type="button" onClick={() => respond('allow')} className="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground">本次允许</button>
-          {request.allowAlways && <button type="button" onClick={() => respond('allow', true)} className="rounded-md border px-3 py-1.5 text-xs hover:bg-muted">当前会话允许</button>}
-          <button type="button" onClick={() => respond('deny')} className="rounded-md border border-destructive/40 px-3 py-1.5 text-xs text-destructive hover:bg-destructive/10">拒绝</button>
+          <button type="button" onClick={() => respond('allow')} className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">本次允许</button>
+          {request.allowAlways && <button type="button" onClick={() => respond('allow', true)} className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">当前会话允许</button>}
+          <button type="button" onClick={() => respond('deny')} className="h-8 rounded-md border border-destructive/40 px-3 text-xs text-destructive hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">拒绝</button>
         </div>
       </div>
     </div>
