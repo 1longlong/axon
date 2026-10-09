@@ -50,6 +50,26 @@ function permissionRequest(requestId: string): AgentGenerationEvent {
 }
 
 describe('DockAgentFeedbackController', () => {
+  test('页面失效只移除所属运行和交互，重复释放不影响其他窗口或请求注意力', () => {
+    const badges: string[] = []
+    let requests = 0
+    const controller = new DockAgentFeedbackController({
+      dock: { setBadge: (value) => badges.push(value), requestAttention: () => ++requests, cancelAttention: () => {} },
+      isForeground: () => false,
+    })
+    controller.handleEvent(runStarted('main', 1), 'main-client')
+    controller.handleEvent(runStarted('quick', 2), 'quick-client')
+    controller.handleEvent(permissionRequest('permission-main'), 'main-client')
+    controller.detachClient('main-client')
+    expect(badges.at(-1)).toBe('1')
+    expect(requests).toBe(1)
+    controller.detachClient('main-client')
+    expect(badges.at(-1)).toBe('1')
+    controller.detachClient('quick-client')
+    expect(badges.at(-1)).toBe('')
+    expect(requests).toBe(1)
+  })
+
   test('运行数量显示数字，待交互优先显示感叹号', () => {
     const badges: string[] = []
     const controller = new DockAgentFeedbackController({

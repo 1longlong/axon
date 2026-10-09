@@ -3,6 +3,9 @@ import { createStore } from 'jotai/vanilla'
 import { MAX_CHAT_INPUT_LENGTH } from '@axon/shared'
 import type {
   ChatGenerationEvent,
+  ChatGenerationIdentityEvent,
+  BackendChatGeneration,
+  ChatSendResult,
   ChatMessage,
   Channel,
   ConversationMeta,
@@ -79,6 +82,7 @@ function startedEvent(): ChatGenerationEvent {
 function createApi(overrides: Partial<ChatRendererApi> = {}): ChatRendererApi {
   return {
     listChannels: async () => [],
+    onChannelsChanged: () => () => {},
     listConversations: async () => [],
     createConversation: async () => conversation(),
     updateConversation: async (id, input) => ({
@@ -89,6 +93,8 @@ function createApi(overrides: Partial<ChatRendererApi> = {}): ChatRendererApi {
     getMessages: async () => [],
     send: async () => ({ success: true, message: assistantMessage() }),
     stop: async () => false,
+    getOwnedGeneration: async () => null,
+    onGenerationChanged: () => () => {},
     onEvent: () => () => {},
     ...overrides,
   }
@@ -203,6 +209,35 @@ describe('Chat renderer 流事件 reducer', () => {
 })
 
 describe('ChatRendererController preload 编排', () => {
+  test('渠道先订阅再读取；保存通知使旧列表失效，释放后的回调不覆盖新订阅', async () => {
+    const first = deferred<Channel[]>(), second = deferred<Channel[]>()
+    const callbacks: Array<(channels: Channel[]) => void> = []
+    const order: string[] = []
+    let calls = 0, released = 0
+    const store = createStore()
+    const controller = new ChatRendererController(createApi({
+      onChannelsChanged: (callback) => { order.push('subscribe'); callbacks.push(callback); return () => { released++ } },
+      listChannels: () => { order.push('list'); return ++calls === 1 ? first.promise : second.promise },
+    }), store)
+    const cleanup = controller.start()
+    expect(order).toEqual(['subscribe', 'list'])
+    callbacks[0]!([channel('saved')])
+    first.resolve([channel('stale')])
+    await Promise.resolve()
+    expect(store.get(chatStateAtom)).toMatchObject({ channels: [{ id: 'saved' }], channelsStatus: 'ready' })
+    cleanup()
+    callbacks[0]!([channel('late')])
+    expect(store.get(chatStateAtom).channels[0]?.id).toBe('saved')
+    const nextCleanup = controller.start()
+    callbacks[0]!([channel('old-page')])
+    callbacks[1]!([channel('new-page')])
+    second.resolve([channel('old-query')])
+    await Promise.resolve()
+    expect(store.get(chatStateAtom).channels[0]?.id).toBe('new-page')
+    nextCleanup()
+    expect(released).toBe(2)
+  })
+
   test('渠道读取只接受最新响应，失败时写入稳定状态', async () => {
     const first = deferred<Channel[]>()
     const second = deferred<Channel[]>()
@@ -280,7 +315,7 @@ describe('ChatRendererController preload 编排', () => {
     expect(store.get(chatStateAtom).messageStatusByConversation['conversation-1']).toBe('ready')
   })
 
-  test('流事件使旧消息读取失效，旧列表响应不能回滚会话更新时间', async () => {
+  test('读取期间合并已落盘用户消息，旧列表响应不能回滚会话更新时间', async () => {
     const list = deferred<ConversationMeta[]>()
     const messages = deferred<ChatMessage[]>()
     let messageCalls = 0
@@ -376,7 +411,13 @@ describe('ChatRendererController preload 编排', () => {
       code: 'internal_error',
     })
     expect(JSON.stringify(store.get(chatStateAtom))).not.toContain('secret transport detail')
-    expect(await controller.stop('conversation-1')).toBe(false)
+    // 无控制身份不能调用停止；此处用所属恢复验证真实传输失败的边界。
+    const stopped = new ChatRendererController(createApi({
+      getOwnedGeneration: async () => ({ conversationId: 'conversation-1', generationId: 'actual' }),
+      stop: async () => { throw new Error('closed') },
+    }), store)
+    await stopped.loadMessages('conversation-1')
+    expect(await stopped.stop('conversation-1')).toBe(false)
     expect(store.get(chatStateAtom).lastError?.message).toBe('停止生成失败')
   })
 
@@ -403,6 +444,163 @@ describe('ChatRendererController preload 编排', () => {
     pending.resolve([userMessage()])
     await loading
     expect(store.get(chatStateAtom).messagesByConversation['conversation-1']).toBeUndefined()
+  })
+})
+
+function controls(overrides: Partial<ChatRendererApi> = {}) {
+  let identity: ((event: ChatGenerationIdentityEvent) => void) | undefined
+  let event: ((event: ChatGenerationEvent) => void) | undefined
+  const store = createStore()
+  const controller = new ChatRendererController(createApi({
+    onGenerationChanged: (callback) => { identity = callback; return () => {} },
+    onEvent: (callback) => { event = callback; return () => {} },
+    ...overrides,
+  }), store)
+  const cleanup = controller.start()
+  const generation = (generationId: string, phase: 'started' | 'finished' = 'started'): void => {
+    identity?.({ phase, generation: { conversationId: 'conversation-1', generationId } })
+  }
+  const started = (generationId: string, id = 'user-1'): void => {
+    const base = startedEvent()
+    if (base.type === 'started') event?.({ ...base, generationId, userMessage: userMessage(id) })
+  }
+  const completed = (generationId: string, id = 'assistant-1'): void => {
+    event?.({ type: 'completed', conversationId: 'conversation-1', generationId, message: assistantMessage(id) })
+  }
+  return { store, controller, cleanup, generation, started, completed,
+    emit: (value: ChatGenerationEvent) => event?.(value) }
+}
+
+describe('Chat 精确控制与并行历史', () => {
+  test('预检已有真实身份可停止；旧点击/结束不影响新轮，未知身份不查询或停止', async () => {
+    const calls: BackendChatGeneration[] = [], stopped = deferred<boolean>()
+    let queries = 0
+    const f = controls({ stop: (target) => { calls.push(target); return calls.length === 1 ? stopped.promise : Promise.resolve(true) },
+      getOwnedGeneration: async () => { queries += 1; return null } })
+    expect(await f.controller.stop('conversation-1')).toBe(false)
+    expect(queries).toBe(0)
+    f.generation('old')
+    const oldClick = f.controller.stop('conversation-1')
+    f.generation('new'); f.generation('old', 'finished')
+    expect(await f.controller.stop('conversation-1')).toBe(true)
+    stopped.resolve(true)
+    expect(await oldClick).toBe(true)
+    expect(calls.map((item) => item.generationId)).toEqual(['old', 'new'])
+    f.cleanup(); f.generation('late')
+    expect(await f.controller.stop('conversation-1')).toBe(false)
+    expect(calls).toHaveLength(2)
+  })
+
+  test('所属恢复迟到不能覆盖新身份；观察者、删除后或释放后恢复不授予控制权', async () => {
+    for (const mode of ['new', 'observer', 'dispose', 'delete']) {
+      const queried = deferred<BackendChatGeneration | null>(), calls: BackendChatGeneration[] = []
+      const f = controls({ getOwnedGeneration: () => queried.promise, stop: async (target) => { calls.push(target); return true } })
+      await f.controller.loadMessages('conversation-1')
+      if (mode === 'new') f.generation('new')
+      if (mode === 'dispose') f.cleanup()
+      if (mode === 'delete') await f.controller.deleteConversation('conversation-1')
+      queried.resolve(mode === 'observer' ? null : { conversationId: 'conversation-1', generationId: 'old' })
+      await Promise.resolve()
+      expect(await f.controller.stop('conversation-1')).toBe(mode === 'new')
+      expect(calls.map((item) => item.generationId)).toEqual(mode === 'new' ? ['new'] : [])
+      f.cleanup()
+    }
+  })
+
+  test('完整快照合并读取期间的用户/终态，保留附件；流草稿不混入历史，旧流不能撤销新轮', async () => {
+    const history = deferred<ChatMessage[]>()
+    const f = controls({ getMessages: () => history.promise })
+    const loading = f.controller.loadMessages('conversation-1')
+    f.generation('g1'); f.started('g1'); f.completed('g1')
+    f.generation('g2'); f.started('g2', 'user-2')
+    f.emit({ type: 'stream', conversationId: 'conversation-1', generationId: 'g2', event: { type: 'text_delta', delta: '草稿' } })
+    f.completed('g1', 'stale')
+    const original = { ...userMessage('original'), attachments: [{ id: 'file', filename: 'x.txt', mediaType: 'text/plain', localPath: 'conversation-1/x.txt', size: 1, createdAt: 1 }] }
+    history.resolve([original, userMessage(), { ...assistantMessage(), content: [{ type: 'text', text: '旧值' }] }])
+    await loading
+    expect(f.store.get(chatStateAtom).messagesByConversation['conversation-1']).toEqual([original, userMessage(), assistantMessage(), userMessage('user-2')])
+    expect(f.store.get(chatStateAtom).generationsByConversation['conversation-1']?.blocks).toEqual([{ type: 'text', text: '草稿' }])
+    f.cleanup()
+  })
+
+  test('旧发送返回及刷新收尾不能清掉新生成，也不能覆盖它的错误', async () => {
+    const first = deferred<ChatSendResult>(), second = deferred<ChatSendResult>()
+    let sends = 0
+    const f = controls({ send: () => ++sends === 1 ? first.promise : second.promise })
+    const oldSend = f.controller.send({ conversationId: 'conversation-1', text: '旧' })
+    f.generation('old'); f.started('old'); f.completed('old'); f.generation('old', 'finished')
+    const newSend = f.controller.send({ conversationId: 'conversation-1', text: '新' })
+    f.generation('new'); f.started('new', 'user-new')
+    first.resolve({ success: false, code: 'provider_failed', message: '旧错误' })
+    await oldSend
+    expect(f.store.get(chatStateAtom).generationsByConversation['conversation-1']?.generationId).toBe('new')
+    expect(f.store.get(chatStateAtom).sendingByConversation['conversation-1']).toBe(true)
+    expect(f.store.get(chatStateAtom).lastError).toBeNull()
+    f.completed('new', 'assistant-new'); f.generation('new', 'finished')
+    second.resolve({ success: true, message: assistantMessage('assistant-new') })
+    await newSend
+    f.cleanup()
+  })
+
+  test('释放使旧事件、发送响应和历史读取失效；再次订阅可清掉漏失终态的旧草稿', async () => {
+    const result = deferred<ChatSendResult>(), history = deferred<ChatMessage[]>()
+    let reads = 0
+    const f = controls({ send: () => result.promise, getMessages: () => { reads += 1; return history.promise } })
+    const sending = f.controller.send({ conversationId: 'conversation-1', text: '输入' })
+    f.generation('g1'); f.started('g1')
+    f.cleanup()
+    const snapshot = f.store.get(chatStateAtom)
+    f.completed('g1'); f.generation('late')
+    result.resolve({ success: false, code: 'provider_failed', message: '旧错误' })
+    history.resolve([assistantMessage()])
+    await sending; await Promise.resolve()
+    expect(f.store.get(chatStateAtom)).toBe(snapshot)
+    expect(reads).toBe(1)
+    const release = f.controller.start()
+    await Promise.resolve()
+    expect(f.store.get(chatStateAtom).generationsByConversation['conversation-1']).toBeUndefined()
+    expect(f.store.get(chatStateAtom).sendingByConversation['conversation-1']).toBeUndefined()
+    release()
+  })
+
+  test('旧发送已进入历史校准时，新轮开始仍不会被旧刷新收尾清掉；失败读取保留实时消息', async () => {
+    const reply = deferred<ChatSendResult>(), history = deferred<ChatMessage[]>(), entered = deferred<void>()
+    let reading = 0
+    const f = controls({ send: () => reply.promise, getMessages: () => { if (++reading === 2) entered.resolve(); return history.promise } })
+    const oldSend = f.controller.send({ conversationId: 'conversation-1', text: '旧' })
+    f.generation('old'); f.started('old'); f.completed('old'); f.generation('old', 'finished')
+    reply.resolve({ success: true, message: assistantMessage() })
+    await entered.promise
+    f.generation('new'); f.started('new', 'new-user')
+    history.resolve([userMessage(), assistantMessage()])
+    await oldSend
+    expect(f.store.get(chatStateAtom).sendingByConversation['conversation-1']).toBe(true)
+    expect(f.store.get(chatStateAtom).generationsByConversation['conversation-1']?.generationId).toBe('new')
+    expect(f.store.get(chatStateAtom).messagesByConversation['conversation-1']?.at(-1)?.id).toBe('new-user')
+    f.cleanup()
+    const failed = controls({ getMessages: async () => { throw new Error('secret') } })
+    failed.generation('current'); failed.started('current', 'live-user')
+    await Promise.resolve()
+    expect(failed.store.get(chatStateAtom).messagesByConversation['conversation-1']).toEqual([userMessage('live-user')])
+    expect(failed.store.get(chatStateAtom).messageStatusByConversation['conversation-1']).toBe('error')
+    failed.cleanup()
+  })
+
+  test('预检尚无用户消息时重新订阅，恢复所属停止身份；无所属运行则清除遗留发送状态', async () => {
+    for (const exists of [true, false]) {
+      const store = createStore()
+      store.set(chatStateAtom, { ...createInitialChatRendererState(), sendingByConversation: { 'conversation-1': true } })
+      const target = { conversationId: 'conversation-1', generationId: 'preflight' }
+      const calls: BackendChatGeneration[] = []
+      const controller = new ChatRendererController(createApi({ getOwnedGeneration: async () => exists ? target : null,
+        stop: async (value) => { calls.push(value); return true } }), store)
+      const cleanup = controller.start()
+      await Promise.resolve()
+      expect(await controller.stop('conversation-1')).toBe(exists)
+      expect(calls).toEqual(exists ? [target] : [])
+      expect(store.get(chatStateAtom).sendingByConversation['conversation-1']).toBe(exists ? true : undefined)
+      cleanup()
+    }
   })
 })
 

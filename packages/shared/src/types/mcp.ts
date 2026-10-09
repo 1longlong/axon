@@ -48,6 +48,14 @@ export type McpConnectionTestResult =
   | { ok: true; tools: McpListedToolInfo[] }
   | { ok: false; message: string }
 
+/** requestId 只关联当前页面的临时测试，不进入配置或 Agent 运行历史。 */
+export interface McpConnectionTestInput {
+  requestId: string
+  projectId: string
+  serverName: string
+  server: McpServerConfig
+}
+
 export type BuiltinMcpPresetCategory = 'workspace' | 'reference'
 
 /** renderer 可见的安全目录元数据；不包含命令、路径、请求头或环境变量。 */
@@ -95,6 +103,7 @@ export const MCP_IPC_CHANNELS = {
   GET_PROJECT_CONFIG: 'axon:mcp:get-project-config',
   SAVE_PROJECT_CONFIG: 'axon:mcp:save-project-config',
   TEST_SERVER_CONNECTION: 'axon:mcp:test-server-connection',
+  CANCEL_CONNECTION_TEST: 'axon:mcp:cancel-connection-test',
   LIST_BUILTIN_PRESETS: 'axon:mcp:list-builtin-presets',
   MATERIALIZE_BUILTIN_PRESET: 'axon:mcp:materialize-builtin-preset',
 } as const

@@ -1,15 +1,23 @@
 {
   "name": "@axon/core",
-  "version": "0.1.1",
-  "description": "Axon Provider 适配层（LLM 渠道适配、SSE 解析等，迭代 2 起充实）",
+  "version": "0.1.4",
+  "description": "Axon 通用后端业务、持久化与 Provider 协议",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./credential-codec": "./src/channel/credential-codec.ts"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@axon/shared": "workspace:*"
+    "@axon/shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "mammoth": "^1.12.2",
+    "pdf-parse": "1.1.1",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

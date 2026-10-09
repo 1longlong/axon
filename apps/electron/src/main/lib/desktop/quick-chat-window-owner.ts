@@ -1,4 +1,4 @@
-import type { QuickChatShortcutBinding } from '../../../types'
+import type { QuickChatShortcutBinding } from '@axon/shared'
 
 const owners = new Map<number, Pick<QuickChatShortcutBinding, 'sessionType' | 'sessionId'>>()
 

@@ -1,0 +1,18 @@
+{
+  "name": "@axon/host-node",
+  "version": "0.1.4",
+  "description": "Axon 宿主工具执行、Shell 快照与 macOS Seatbelt",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@axon/core": "workspace:*",
+    "@axon/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

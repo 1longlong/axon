@@ -34,27 +34,32 @@ function requestId(event: InteractionRequestEvent | InteractionResolvedEvent): s
 export class DockAgentFeedbackController {
   private readonly activeRuns = new Set<string>()
   private readonly pendingInteractions = new Set<string>()
+  private readonly runOwners = new Map<string, string>()
+  private readonly interactionOwners = new Map<string, string>()
   private attentionId: number | null = null
 
   constructor(private readonly options: DockAgentFeedbackOptions) {}
 
-  /** 启动时用 AgentService 的权威快照校准角标，避免窗口重载影响运行计数。 */
+  /** 在开放 UI 请求前用后端权威快照校准角标，后续按实际入口事件更新。 */
   initialize(activeRuns: readonly AgentActiveRun[]): void {
     this.activeRuns.clear()
+    this.runOwners.clear()
     for (const run of activeRuns) this.activeRuns.add(runKey(run.sessionId, run.runStartedAt))
     this.renderBadge()
   }
 
   /** 消费运行和交互事件；只有应用不在前台时才请求系统注意力。 */
-  handleEvent(event: AgentGenerationEvent): void {
+  handleEvent(event: AgentGenerationEvent, clientId?: string): void {
     if (event.type === 'run_started') {
       this.activeRuns.add(runKey(event.sessionId, event.runStartedAt))
+      if (clientId) this.runOwners.set(runKey(event.sessionId, event.runStartedAt), clientId)
       this.renderBadge()
       return
     }
 
     if (event.type === 'run_finished') {
       this.activeRuns.delete(runKey(event.sessionId, event.runStartedAt))
+      this.runOwners.delete(runKey(event.sessionId, event.runStartedAt))
       this.renderBadge()
       if (!event.completion.stoppedByUser) this.requestAttentionWhenBackground()
       return
@@ -65,6 +70,7 @@ export class DockAgentFeedbackController {
       || event.type === 'ask_user_request'
     ) {
       this.pendingInteractions.add(requestId(event))
+      if (clientId) this.interactionOwners.set(requestId(event), clientId)
       this.renderBadge()
       this.requestAttentionWhenBackground()
       return
@@ -75,8 +81,16 @@ export class DockAgentFeedbackController {
       || event.type === 'ask_user_resolved'
     ) {
       this.pendingInteractions.delete(requestId(event))
+      this.interactionOwners.delete(requestId(event))
       this.renderBadge()
     }
+  }
+
+  /** 入口失效后的终态不再投递；立即移除该入口角标，不清除其他窗口运行或请求注意力。 */
+  detachClient(clientId: string): void {
+    for (const [key, owner] of this.runOwners) if (owner === clientId) { this.runOwners.delete(key); this.activeRuns.delete(key) }
+    for (const [key, owner] of this.interactionOwners) if (owner === clientId) { this.interactionOwners.delete(key); this.pendingInteractions.delete(key) }
+    this.renderBadge()
   }
 
   /** 窗口重新获得焦点后停止动画；未解决交互仍由感叹号角标持续表达。 */
@@ -90,6 +104,8 @@ export class DockAgentFeedbackController {
     this.acknowledgeAttention()
     this.activeRuns.clear()
     this.pendingInteractions.clear()
+    this.runOwners.clear()
+    this.interactionOwners.clear()
     this.options.dock?.setBadge('')
   }
 

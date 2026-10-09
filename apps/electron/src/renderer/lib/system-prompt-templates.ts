@@ -1,4 +1,4 @@
-import type { SystemPromptTemplate } from '@/types/settings'
+import type { SystemPromptTemplate } from '@axon/shared'
 
 export const SOFTWARE_ENGINEERING_AGENT_TEMPLATE: SystemPromptTemplate = {
   id: 'builtin-software-engineering-agent',

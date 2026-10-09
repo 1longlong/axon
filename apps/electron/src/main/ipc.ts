@@ -1,112 +1,51 @@
-/** 主进程 IPC 装配入口；具体通道绑定按领域位于 `main/ipc/`。 */
-
-import { AGENT_IPC_CHANNELS } from '@axon/shared'
-import { AgentIpcController } from './lib/agent/agent-ipc-handlers'
-import {
-  getAgentCollaborationService,
-  getAgentEventBus,
-  getAgentService,
-  validateAgentRuntimeCreate,
-} from './lib/agent/agent-service-instance'
-import { getAgentSessionManager } from './lib/agent/agent-session-manager-instance'
-import { getAgentPermissionService } from './lib/agent/agent-permission-service'
-import { getAgentAskUserService } from './lib/agent/agent-ask-user-service'
-import { getAttachmentService } from './lib/chat/attachment-service-instance'
-import { ChatIpcController } from './lib/chat/chat-ipc-handlers'
-import { getChannelManager } from './lib/channel/channel-manager-instance'
-import { getChatService } from './lib/chat/chat-service-instance'
-import { getConversationManager } from './lib/chat/conversation-manager-instance'
-import type { QuickChatShortcutService } from './lib/desktop/quick-chat-shortcut-service'
-import { getMainWindow } from './lib/desktop/main-window-store'
-import { AgentProjectIpcController } from './lib/project/agent-project-ipc-handlers'
-import { getAgentProjectManager } from './lib/project/agent-project-manager-instance'
-import { getWorkspaceWatcher } from './lib/project/workspace-watcher-instance'
-import { McpProjectIpcController } from './lib/mcp/mcp-project-ipc-handlers'
-import { getMcpProjectConfigManager } from './lib/mcp/mcp-project-config-manager-instance'
-import { getMcpToolProvider } from './lib/mcp/mcp-tool-provider-instance'
-import { AgentMemoryIpcController } from './lib/memory/agent-memory-ipc-handlers'
-import { getAgentMemoryService } from './lib/memory/agent-memory-service-instance'
-import { getAgentMemoryWatcher } from './lib/memory/agent-memory-watcher-instance'
-import { buildBackgroundTaskNotificationPrompt } from './lib/collaboration/agent-collaboration-tools'
-import { AgentTaskIpcController } from './lib/collaboration/agent-task-ipc-handlers'
-import { getAgentDelegationManager } from './lib/collaboration/agent-delegation-manager-instance'
-import { refreshTrayContextMenu } from './tray'
-import { registerAgentIpcHandlers } from './ipc/agent-ipc-handlers'
-import { registerAgentMemoryIpcHandlers } from './ipc/agent-memory-ipc-handlers'
-import { registerAgentSkillIpcHandlers } from './ipc/agent-skill-ipc-handlers'
-import { pickAgentProjectRoot, registerAgentProjectIpcHandlers } from './ipc/agent-project-ipc-handlers'
-import { registerAgentTaskIpcHandlers } from './ipc/agent-task-ipc-handlers'
-import { registerAttachmentIpcHandlers } from './ipc/attachment-ipc-handlers'
-import { registerChannelIpcHandlers } from './ipc/channel-ipc-handlers'
-import { registerChatIpcHandlers } from './ipc/chat-ipc-handlers'
-import { registerMcpProjectIpcHandlers } from './ipc/mcp-project-ipc-handlers'
-import { registerSettingsIpcHandlers } from './ipc/settings-ipc-handlers'
+/** 桌面 IPC 装配只绑定固定代理；业务服务和持久化统一在独立后端。 */
+import { ipcMain } from 'electron'
+import type { AppServerProcess } from './lib/desktop/app-server-process'
+import type { AppServerWindowClients } from './lib/desktop/app-server-window-clients'
+import type { AppServerEvents } from './lib/desktop/app-server-events'
+import type { AppServerSettingsTransaction } from './lib/desktop/app-server-settings-transaction'
+import { pickAgentProjectRoot } from './lib/desktop/native-backend-dialogs'
+import { registerAppServerAgentIpcHandlers } from './ipc/app-server-agent-ipc'
+import { registerAppServerChatIpcHandlers } from './ipc/app-server-chat-ipc'
+import { registerAppServerChannelIpcHandlers } from './ipc/app-server-channel-ipc'
+import { registerAppServerSettingsIpcHandlers } from './ipc/app-server-settings-ipc'
+import { registerAppServerProjectIpcHandlers } from './ipc/app-server-project-ipc'
+import { registerAppServerMcpIpcHandlers } from './ipc/app-server-mcp-ipc'
+import { registerAppServerSkillIpcHandlers } from './ipc/app-server-skill-ipc'
+import { registerAppServerTaskIpcHandlers } from './ipc/app-server-task-ipc'
 import { registerWindowIpcHandlers } from './ipc/window-ipc-handlers'
-import { agentSkillSettingsController } from './lib/project/agent-skill-settings-controller-instance'
+import type { AgentWorkspaceDirectorySelection } from '@axon/shared'
+import type { WebContents } from 'electron'
 
-/** 装配全部领域 registrar；跨领域后台续跑在 controller 都创建后绑定。 */
-export function registerIpcHandlers(shortcuts?: QuickChatShortcutService): void {
-  registerChannelIpcHandlers(getChannelManager())
-  registerAttachmentIpcHandlers(getAttachmentService())
-  registerChatIpcHandlers(new ChatIpcController({
-    conversations: getConversationManager(),
-    chat: getChatService(),
-    attachments: getAttachmentService(),
-  }))
+export interface DesktopIpcOptions {
+  backend: AppServerProcess
+  clients: AppServerWindowClients
+  interactions: AppServerEvents
+  transaction: AppServerSettingsTransaction
+  pickLocalWorkspace?: (sender: WebContents) => Promise<AgentWorkspaceDirectorySelection>
+}
 
-  const projectManager = getAgentProjectManager()
-  const agentController = new AgentIpcController({
-    sessions: getAgentSessionManager(),
-    agent: getAgentService(),
-    events: getAgentEventBus(),
-    permissions: getAgentPermissionService(),
-    askUsers: getAgentAskUserService(),
-    validateCreate: validateAgentRuntimeCreate,
-  })
-  // 后台子任务结束时由当前主窗口承接隐藏续跑；无窗口时保留任务结果供稍后查询。
-  getAgentCollaborationService().setBackgroundCompletionHandler(async (delegation) => {
-    const window = getMainWindow()
-    if (!window || window.webContents.isDestroyed()) throw new Error('主窗口不可用')
-    const result = await agentController.sendBackgroundNotification(
-      window.webContents.id,
-      {
-        sessionId: delegation.rootSessionId,
-        text: buildBackgroundTaskNotificationPrompt(delegation),
-      },
-      (agentEvent) => {
-        if (!window.webContents.isDestroyed()) window.webContents.send(AGENT_IPC_CHANNELS.EVENT, agentEvent)
-      },
-    )
-    if (!result.success) throw new Error(result.message)
-  })
-  registerAgentIpcHandlers(agentController, {
-    resolveProjectCwd: (projectId) => projectManager.resolveProjectCwd(projectId),
-  })
-  registerAgentTaskIpcHandlers(new AgentTaskIpcController({
-    sessions: getAgentSessionManager(),
-    tasks: getAgentDelegationManager(),
-    events: getAgentEventBus(),
-  }))
-  registerAgentProjectIpcHandlers(new AgentProjectIpcController({
-    projects: projectManager,
-    sessions: getAgentSessionManager(),
-    watcher: getWorkspaceWatcher(),
-  }), {
-    pickLocalWorkspace: pickAgentProjectRoot,
-    onProjectsChanged: refreshTrayContextMenu,
-  })
-  registerMcpProjectIpcHandlers(new McpProjectIpcController({
-    configs: getMcpProjectConfigManager(),
-    tools: getMcpToolProvider(),
-    projects: projectManager,
-  }))
-  registerAgentMemoryIpcHandlers(new AgentMemoryIpcController({
-    memory: getAgentMemoryService(),
-    projects: projectManager,
-    watcher: getAgentMemoryWatcher(),
-  }))
-  registerAgentSkillIpcHandlers(agentSkillSettingsController)
-
-  registerSettingsIpcHandlers(shortcuts)
-  registerWindowIpcHandlers()
+/** 握手成功后一次装配所有领域；部分绑定失败先撤销本次注册，不启动第二套业务后端。 */
+export function registerIpcHandlers(options: DesktopIpcOptions): () => void {
+  const releases: Array<() => void> = []
+  let disposed = false
+  const dispose = (): void => {
+    if (disposed) return
+    disposed = true
+    for (const release of releases.reverse()) {
+      try { release() } catch { console.warn('[IPC] 单项释放失败，继续清理其他入口') }
+    }
+  }
+  try {
+    releases.push(registerAppServerChannelIpcHandlers(ipcMain, options))
+    releases.push(registerAppServerChatIpcHandlers(ipcMain, options))
+    releases.push(registerAppServerAgentIpcHandlers(ipcMain, options))
+    releases.push(registerAppServerProjectIpcHandlers(ipcMain, { ...options, pickLocalWorkspace: options.pickLocalWorkspace ?? pickAgentProjectRoot }))
+    releases.push(registerAppServerMcpIpcHandlers(ipcMain, options))
+    releases.push(registerAppServerSkillIpcHandlers(ipcMain, options))
+    releases.push(registerAppServerTaskIpcHandlers(ipcMain, options))
+    releases.push(registerAppServerSettingsIpcHandlers(ipcMain, options))
+    releases.push(registerWindowIpcHandlers())
+  } catch (error) { dispose(); throw error }
+  return dispose
 }

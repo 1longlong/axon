@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { useAtom } from 'jotai'
 import { Trash2 } from 'lucide-react'
-import type { SystemPromptTemplate } from '@/types/settings'
+import type { SystemPromptTemplate } from '@axon/shared'
 import {
   agentSystemPromptAtom,
   agentSystemPromptTemplatesAtom,
@@ -25,6 +25,7 @@ export function AgentSettings(): React.ReactElement {
   const [promptTouched, setPromptTouched] = React.useState(false)
   const [promptSaving, setPromptSaving] = React.useState(false)
   const [newTemplateName, setNewTemplateName] = React.useState('')
+  const settingsVersion = React.useRef(0)
   const templates = React.useMemo(
     () => [...BUILTIN_SYSTEM_PROMPT_TEMPLATES, ...customTemplates],
     [customTemplates],
@@ -39,17 +40,23 @@ export function AgentSettings(): React.ReactElement {
 
   React.useEffect(() => {
     let cancelled = false
+    const version = settingsVersion.current
+    const unsubscribe = window.axon.settings.onChanged((settings) => {
+      if (cancelled) return
+      settingsVersion.current++; setEnabled(settings.gitAttributionEnabled)
+    })
     void window.axon.settings.get()
       .then((settings) => {
-        if (!cancelled) setEnabled(settings.gitAttributionEnabled)
+        if (!cancelled && version === settingsVersion.current) setEnabled(settings.gitAttributionEnabled)
       })
-      .catch(() => { if (!cancelled) setMessage('读取 Agent 设置失败') })
+      .catch(() => { if (!cancelled && version === settingsVersion.current) setMessage('读取 Agent 设置失败') })
       .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
+    return () => { cancelled = true; unsubscribe() }
   }, [])
 
   /** 乐观更新开关；写盘失败时回滚，避免界面状态与实际 system prompt 不一致。 */
   const changeAttribution = async (next: boolean): Promise<void> => {
+    const version = settingsVersion.current
     const previous = enabled
     setEnabled(next)
     setSaving(true)
@@ -58,7 +65,7 @@ export function AgentSettings(): React.ReactElement {
       await window.axon.settings.update({ gitAttributionEnabled: next })
       setMessage('Agent 设置已保存')
     } catch {
-      setEnabled(previous)
+      if (version === settingsVersion.current) setEnabled(previous)
       setMessage('保存 Agent 设置失败')
     } finally {
       setSaving(false)
@@ -67,12 +74,13 @@ export function AgentSettings(): React.ReactElement {
 
   /** 只有显式“应用”才替换 Agent 当前提示词；预设选择只更新本页草稿。 */
   const applyPrompt = async (): Promise<void> => {
+    const version = settingsVersion.current
     const normalized = promptDraft.trim()
     setPromptSaving(true)
     setMessage(null)
     try {
       await updateAgentSystemPrompt(normalized)
-      setAppliedPrompt(normalized)
+      if (version === settingsVersion.current) setAppliedPrompt(normalized)
       setPromptDraft(normalized)
       setPromptTouched(false)
       setMessage(normalized ? 'Agent 系统提示词已应用' : 'Agent 系统提示词已清空')
@@ -83,7 +91,9 @@ export function AgentSettings(): React.ReactElement {
     }
   }
 
+  /** 保存草稿为用户模板；新通知已经同步模板时，不用旧保存收尾覆盖它。 */
   const saveCustomTemplate = async (): Promise<void> => {
+    const version = settingsVersion.current
     const name = newTemplateName.trim()
     const content = promptDraft.trim()
     if (!name || !content) {
@@ -96,7 +106,7 @@ export function AgentSettings(): React.ReactElement {
     ]
     try {
       await updateAgentSystemPromptTemplates(next)
-      setCustomTemplates(next)
+      if (version === settingsVersion.current) setCustomTemplates(next)
       setPromptDraft(content)
       setNewTemplateName('')
       setMessage('新预设已保存；点击应用后才会用于 Agent')
@@ -105,11 +115,13 @@ export function AgentSettings(): React.ReactElement {
     }
   }
 
+  /** 删除所选模板但保留生效提示词；共享模板快照优先于迟到响应。 */
   const deleteCustomTemplate = async (id: string): Promise<void> => {
+    const version = settingsVersion.current
     const next = customTemplates.filter((template) => template.id !== id)
     try {
       await updateAgentSystemPromptTemplates(next)
-      setCustomTemplates(next)
+      if (version === settingsVersion.current) setCustomTemplates(next)
       setMessage('预设已删除；当前生效提示词未变')
     } catch {
       setMessage('预设删除失败')

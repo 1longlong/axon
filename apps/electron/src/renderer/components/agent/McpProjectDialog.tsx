@@ -6,6 +6,7 @@ import {
   MCP_PROJECT_CONFIG_VERSION,
 } from '@axon/shared'
 import type { BuiltinMcpPresetSummary, McpConnectionTestResult, McpProjectConfig, McpServerConfig } from '@axon/shared'
+import { McpConnectionTestRunner } from '../../lib/mcp-connection-test'
 
 interface McpServerDraft {
   id: string
@@ -155,9 +156,34 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
   const [materializingId, setMaterializingId] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [notice, setNotice] = React.useState<string | null>(null)
+  const testRunner = React.useRef<McpConnectionTestRunner | null>(null)
+  const testedDraftId = React.useRef<string | null>(null)
+  const modalVersion = React.useRef(0)
+
+  React.useEffect(() => {
+    const runner = new McpConnectionTestRunner(window.axon.mcpProjects, {
+      started: () => { setTestingId(testedDraftId.current); setTestResult(null); setError(null) },
+      result: (result) => { if (testedDraftId.current) setTestResult({ id: testedDraftId.current, ...result }) },
+      finished: () => setTestingId(null),
+    })
+    testRunner.current = runner
+    setTestingId(null)
+    setTestResult(null)
+    return () => { runner.dispose(); if (testRunner.current === runner) testRunner.current = null }
+  }, [projectId])
+
+  /** 关闭只取消未完成测试，不保存草稿；卸载时再幂等释放同一代次。 */
+  const close = React.useCallback((): void => {
+    modalVersion.current += 1
+    testRunner.current?.dispose()
+    onClose()
+  }, [onClose])
 
   React.useEffect(() => {
     let disposed = false
+    modalVersion.current += 1
+    setLoading(true); setLoadFailed(false); setDrafts([]); setSavedDrafts([]); setPresets([]); setSelectedId(null)
+    setSaving(false); setMaterializingId(null); setError(null); setNotice(null)
     void Promise.all([
       window.axon.mcpProjects.getConfig(projectId),
       window.axon.mcpProjects.listBuiltinPresets(),
@@ -176,16 +202,16 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
     }).finally(() => {
       if (!disposed) setLoading(false)
     })
-    return () => { disposed = true }
+    return () => { disposed = true; modalVersion.current += 1 }
   }, [projectId])
 
   React.useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !saving && !testingId && !materializingId) onClose()
+      if (event.key === 'Escape' && !saving && !materializingId) close()
     }
     document.addEventListener('keydown', closeOnEscape)
     return () => document.removeEventListener('keydown', closeOnEscape)
-  }, [onClose, saving, testingId, materializingId])
+  }, [close, saving, materializingId])
 
   const selected = drafts.find((draft) => draft.id === selectedId) ?? null
   const updateSelected = (update: Partial<McpServerDraft>): void => {
@@ -207,10 +233,12 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
   /** 预设由主进程展开可信工作区路径；这里只加入未保存草稿，保留最终确认步骤。 */
   const addPreset = async (preset: BuiltinMcpPresetSummary): Promise<void> => {
     if (materializingId || saving) return
+    const version = modalVersion.current
     setMaterializingId(preset.id)
     setError(null)
     try {
       const materialized = await window.axon.mcpProjects.materializeBuiltinPreset(projectId, preset.id)
+      if (modalVersion.current !== version) return
       const name = uniqueServerName(materialized.name, drafts.map((item) => item.name))
       const draft = configToDraft(name, materialized.config)
       setDrafts((current) => [...current, draft])
@@ -218,9 +246,9 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
       setTestResult(null)
       setNotice(null)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '添加 MCP 预设失败')
+      if (modalVersion.current === version) setError(cause instanceof Error ? cause.message : '添加 MCP 预设失败')
     } finally {
-      setMaterializingId(null)
+      if (modalVersion.current === version) setMaterializingId(null)
     }
   }
 
@@ -246,38 +274,35 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
     setNotice('已撤销未保存的修改')
   }
 
-  /** 测试选中的未保存草稿；主进程独立连接并关闭，不改变项目已生效配置。 */
+  /** 校验当前草稿后交给可取消测试；请求与结果绑定原弹窗及原服务器。 */
   const testConnection = async (): Promise<void> => {
     if (!selected || saving || testingId || materializingId) return
-    setTestingId(selected.id)
-    setTestResult(null)
-    setError(null)
     try {
       const config = draftsToConfig([selected])
       const serverName = selected.name.trim()
-      const result = await window.axon.mcpProjects.testConnection(projectId, serverName, config.servers[serverName]!)
-      setTestResult({ id: selected.id, ...result })
+      testedDraftId.current = selected.id
+      await testRunner.current?.run({ projectId, serverName, server: config.servers[serverName]! })
     } catch (cause) {
       setTestResult({ id: selected.id, ok: false, message: cause instanceof Error ? cause.message : '连接测试失败' })
-    } finally {
-      setTestingId(null)
     }
   }
 
   const save = async (): Promise<void> => {
     if (saving || materializingId || testingId) return
+    const version = modalVersion.current
     setSaving(true)
     setError(null)
     setNotice(null)
     try {
       const config = draftsToConfig(drafts)
       await window.axon.mcpProjects.saveConfig(projectId, config)
+      if (modalVersion.current !== version) return
       setSavedDrafts(drafts.map((draft) => ({ ...draft })))
       setNotice('配置已保存')
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '保存 MCP 配置失败')
+      if (modalVersion.current === version) setError(cause instanceof Error ? cause.message : '保存 MCP 配置失败')
     } finally {
-      setSaving(false)
+      if (modalVersion.current === version) setSaving(false)
     }
   }
 
@@ -289,7 +314,7 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
           <h2 className="text-sm font-semibold">MCP 服务 · {projectName}</h2>
           <p className="mt-1 text-xs text-muted-foreground">项目下全部 Agent 会话共享这些服务器；配置仅保存在应用私有目录。</p>
         </div>
-        <button type="button" aria-label="关闭 MCP 配置" title="关闭" disabled={saving || testingId !== null || materializingId !== null} onClick={onClose}
+        <button type="button" aria-label="关闭 MCP 配置" title="关闭" disabled={saving || materializingId !== null} onClick={close}
           className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
           <X size={16} />
         </button>
@@ -343,6 +368,7 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
         {error && <p className="mb-2 text-xs text-destructive">{error}</p>}
         {notice && <p role="status" className="mb-2 text-xs text-emerald-700 dark:text-emerald-400">{notice}</p>}
         <div className="flex flex-wrap justify-end gap-2">
+          {testingId && <button type="button" onClick={() => testRunner.current?.cancel()} className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">取消测试</button>}
           <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null || !selected} onClick={() => void testConnection()} className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
             {testingId ? '正在测试…' : '测试连接'}
           </button>

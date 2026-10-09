@@ -57,7 +57,7 @@ export interface ChannelCreateInput {
   name: string
   provider: ProviderType
   baseUrl?: string
-  /** 明文 API Key，只允许进入主进程。 */
+  /** 明文 API Key，只进入可信后端与私有宿主链，不出现在返回 DTO。 */
   apiKey: string
   models?: ChannelModel[]
   enabled?: boolean
@@ -73,7 +73,7 @@ export interface ChannelUpdateInput {
   enabled?: boolean
 }
 
-/** 仅供主进程 Provider adapter 消费的运行时渠道。 */
+/** 仅供后端 Provider/Runtime adapter 消费的运行时渠道。 */
 export interface ResolvedChannel extends Omit<Channel, 'hasApiKey'> {
   apiKey: string
 }
@@ -88,6 +88,7 @@ export const CHANNEL_IPC_CHANNELS = {
   DELETE: 'axon:channels:delete',
   REQUEST: 'axon:channels:request',
   CANCEL: 'axon:channels:cancel',
+  CHANGED: 'axon:channels:changed',
 } as const
 
 export function isProviderType(value: unknown): value is ProviderType {

@@ -1,4 +1,5 @@
 /** Agent 项目长期记忆的中立文件契约。 */
+import type { AgentProjectWatchTarget } from './agent-project'
 
 export const AGENT_MEMORY_DIRECTORY = 'memory'
 export const AGENT_MEMORY_INDEX_FILE = 'MEMORY.md'
@@ -28,8 +29,7 @@ export interface AgentMemoryFile {
 }
 
 /** memory/ 变化只携带定位提示；renderer 会重新读取权威文件列表。 */
-export interface AgentMemoryChangedEvent {
-  projectId: string
+export interface AgentMemoryChangedEvent extends AgentProjectWatchTarget {
   changedAt: number
   relativePath?: string
 }

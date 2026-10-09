@@ -5,6 +5,7 @@ import type { AgentWorkspaceTreeEntry } from '@axon/shared'
 import { ProjectFolderIcon } from '@/components/icons/WorkbenchIcons'
 import { cn } from '@/lib/utils'
 import { EMPTY_WORKSPACE_FILE_TABS, workspaceFileTabsReducer } from '@/lib/workspace-file-tabs'
+import { observeProjectWatch } from '@/lib/project-watch'
 import { useAgentController } from './AgentStateProvider'
 import { WorkspaceFileTabs } from './WorkspaceFileTabs'
 
@@ -97,19 +98,32 @@ export function WorkspaceFileTree({ projectId, workspaceUpdatedAt, treeOpen, tre
   React.useEffect(() => {
     workspaceVersion.current += 1
     dispatchFiles({ type: 'clear' })
-    void load()
     setWatchFailed(false)
-    const unsubscribe = controller.onProjectDirectoryChanged((event) => {
-      if (event.projectId !== projectId) return
-      void load()
-      for (const tab of filesRef.current.tabs) void loadPreview(tab.relativePath, false)
+    const stopWatch = observeProjectWatch({
+      projectId, kind: 'workspace',
+      watch: (id) => controller.watchProjectDirectory(id),
+      unwatch: (target) => controller.unwatchProjectDirectory(target),
+      onChanged: (callback) => controller.onProjectDirectoryChanged(callback),
+      onClosed: (callback) => controller.onProjectWatchClosed(callback),
+      ready: () => { setWatchFailed(false); void load() },
+      changed: () => {
+        void load()
+        for (const tab of filesRef.current.tabs) void loadPreview(tab.relativePath, false)
+      },
+      closed: (event) => {
+        // 目录已经失效，先拒绝旧树/预览结果；重新订阅后才读取新的工作区。
+        requestVersion.current++; workspaceVersion.current++
+        dispatchFiles({ type: 'clear' }); setEntries([])
+        setWatchFailed(event.reason !== 'project_changed')
+        setError(event.reason === 'project_deleted')
+        setLoading(event.reason === 'project_changed')
+      },
+      failed: () => { setWatchFailed(true); void load() },
     })
-    void controller.watchProjectDirectory(projectId).catch(() => setWatchFailed(true))
     return () => {
       requestVersion.current += 1
       workspaceVersion.current += 1
-      unsubscribe()
-      void controller.unwatchProjectDirectory(projectId).catch(() => {})
+      stopWatch()
     }
   }, [controller, load, loadPreview, projectId, workspaceUpdatedAt])
 

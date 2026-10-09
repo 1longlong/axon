@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import { Brain, FolderOpen, MoreHorizontal, Pencil, Plug, Plus, RotateCcw, Trash2 } from 'lucide-react'
 import type { AgentProject, AgentProjectWorkspaceInput } from '@axon/shared'
 import { useAgentController } from './AgentStateProvider'
@@ -158,9 +159,10 @@ export function ProjectActions({ project, sessionCount, disabled = false, onErro
         </MenuAction>
       </div>
     </details>
-    {renaming && <ProjectNameDialog initialName={project.name} busy={busy} onCancel={() => setRenaming(false)} onSubmit={(name) => void submitRename(name)} />}
-    {editingMcp && <McpProjectDialog projectId={project.id} projectName={project.name}
-      onClose={() => setEditingMcp(false)} />}
+    {/* 弹窗不能继承项目悬停工具栏的透明度/点击限制；页面顶层保持独立交互。 */}
+    {renaming && createPortal(<ProjectNameDialog initialName={project.name} busy={busy} onCancel={() => setRenaming(false)} onSubmit={(name) => void submitRename(name)} />, document.body)}
+    {editingMcp && createPortal(<McpProjectDialog projectId={project.id} projectName={project.name}
+      onClose={() => setEditingMcp(false)} />, document.body)}
   </>
 }
 

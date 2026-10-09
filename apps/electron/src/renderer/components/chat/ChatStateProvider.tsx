@@ -12,6 +12,7 @@ export function ChatStateProvider({ children }: { children: ReactNode }) {
     () => new ChatRendererController({
       ...window.axon.chat,
       listChannels: window.axon.channels.list,
+      onChannelsChanged: window.axon.channels.onChanged,
     }, store),
     [store],
   )

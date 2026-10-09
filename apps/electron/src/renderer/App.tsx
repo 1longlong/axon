@@ -1,18 +1,18 @@
 import { useEffect, useState } from 'react'
 import { useAtom, useSetAtom } from 'jotai'
-import { themeModeAtom, systemIsDarkAtom, applyThemeToDOM, initializeTheme } from './atoms/theme'
+import { themeModeAtom, systemIsDarkAtom, applyThemeToDOM, cacheThemeMode } from './atoms/theme'
 import { userProfileAtom } from './atoms/user-profile'
-import { initializeMarkdownFontSize, markdownFontSizeAtom } from './atoms/markdown-font-size'
-import { agentSystemPromptAtom, agentSystemPromptTemplatesAtom, initializeAgentSystemPrompt } from './atoms/system-prompt'
+import { applyMarkdownFontSizeToDOM, markdownFontSizeAtom } from './atoms/markdown-font-size'
+import { agentSystemPromptAtom, agentSystemPromptTemplatesAtom } from './atoms/system-prompt'
+import { subscribeRendererPreferences } from './atoms/renderer-preferences'
 import { AppShell } from './components/app-shell/AppShell'
 import { ChatStateProvider } from './components/chat/ChatStateProvider'
 import { AgentStateProvider } from './components/agent/AgentStateProvider'
 import { QuickChatWindow } from './components/app-shell/QuickChatWindow'
-import type { UserProfile } from '@/types/user-profile'
+import { DEFAULT_MARKDOWN_FONT_SIZE } from '@axon/shared'
 
 /**
- * 应用入口只负责初始化跨页面主题，再挂载稳定的 AppShell。
- * 设置页会在 B3 通过同一主题 atom 提供切换入口。
+ * 应用入口同步已保存全局偏好和资料，再挂载稳定的会话壳；不重放用户输入。
  */
 export function App() {
   const quickWindow = new URLSearchParams(window.location.search).get('quick') === '1'
@@ -24,37 +24,26 @@ export function App() {
   const setSystemPromptTemplates = useSetAtom(agentSystemPromptTemplatesAtom)
   const [error, setError] = useState<string | null>(null)
 
-  // 初始化：从主进程读设置 + 监听系统主题
+  // 系统主题监听独立于后端请求；卸载时同步清理，不等待初始化 Promise。
   useEffect(() => {
-    let cleanup: (() => void) | undefined
-    initializeTheme(setThemeMode, setSystemIsDark)
-      .then((fn) => { cleanup = fn })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-    return () => cleanup?.()
-  }, [setThemeMode])
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    setSystemIsDark(media.matches)
+    const changed = (event: MediaQueryListEvent): void => setSystemIsDark(event.matches)
+    media.addEventListener('change', changed)
+    return () => media.removeEventListener('change', changed)
+  }, [setSystemIsDark])
 
-  useEffect(() => {
-    void initializeMarkdownFontSize(setMarkdownFontSize)
-  }, [setMarkdownFontSize])
-
-  useEffect(() => {
-    void initializeAgentSystemPrompt(setSystemPrompt, setSystemPromptTemplates)
-  }, [setSystemPrompt, setSystemPromptTemplates])
-
-  // 用户资料是 Chat 与 Agent 的共享身份，在应用根部统一加载一次。
-  useEffect(() => {
-    let cancelled = false
-    void window.axon.userProfile.get()
-      .then((profile: UserProfile) => {
-        if (!cancelled) setUserProfile(profile)
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [setUserProfile])
+  useEffect(() => subscribeRendererPreferences(window.axon, {
+    settings: (settings) => {
+      setThemeMode(settings.themeMode); cacheThemeMode(settings.themeMode)
+      const size = settings.markdownFontSize ?? DEFAULT_MARKDOWN_FONT_SIZE
+      setMarkdownFontSize(size); applyMarkdownFontSizeToDOM(size)
+      setSystemPrompt(settings.agentSystemPrompt ?? '')
+      setSystemPromptTemplates(settings.agentSystemPromptTemplates)
+    },
+    profile: setUserProfile,
+    error: setError,
+  }), [setThemeMode, setMarkdownFontSize, setSystemPrompt, setSystemPromptTemplates, setUserProfile])
 
   // 主题变化 → 应用到 DOM
   useEffect(() => {

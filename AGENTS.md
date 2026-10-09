@@ -8,6 +8,23 @@ Axon 是一个本地优先、支持可插拔 Agent Runtime 的 Electron AI 桌�
 
 **核心设计文档**：`docs/axon-project-design.md`。文档统一描述产品范围、总体架构、可插拔 Agent Runtime 契约、核心子系统和迭代计划。动工前必读。
 
+## 当前架构与目录边界
+
+```text
+apps/electron：renderer → preload → 固定 main IPC / 可信窗口身份
+                                      ↕ 双向 stdio JSON-RPC
+apps/app-server：独立装配入口 → packages/core → runtime-adapters / host-node
+```
+
+- 一个 Electron 父进程管理一个共享 app-server child；主窗口和快捷浮窗分别登记 clientId。桌面只保留窗口/托盘/Dock/快捷键、picker、safeStorage 私有桥及协议代理，不直接装配业务服务、adapter 或执行器，不提供进程内生产回退。
+- `packages/shared` 保存中立 DTO、消息、IPC/RPC 与能力契约；`packages/core` 是不依赖 Electron/具体 Runtime 的后端业务库，统一拥有会话、渠道、项目、上下文、队列、审批/追问、MCP、Skills、记忆、Task 与业务持久化。
+- `packages/runtime-adapters` 负责 Runtime 接入，SDK、工具 shape、artifact 和私有协议只在对应 adapter；`packages/host-node` 负责文件/Shell/Seatbelt/快照/环境探测，不导入 Runtime SDK。core 不反向导入这两个执行实现包。
+- `packages/app-server` 是协议库（peer、身份/路由、私有桥、历史客户端）；`apps/app-server` 才是组合 core、adapter 与宿主的可执行服务入口。完整应用命令不可用仅有 adapter.query 代替。
+- app-server 是业务文件唯一写入者；应用 JSONL 是 UI 历史源，Runtime artifact 优先用于精确续跑。持久化布局不因入口改变，不允许多个后端共写正式目录。
+- 跨进程新增能力应先维护 shared RPC 契约及 server 路由，再接桌面 main/preload/renderer；不暴露任意 RPC 或私有加解密给页面。控制与交互校验原 clientId、真实 runId/generationId 和 requestId，重载不改投新页面，交付未知不自动重发。
+- 资源先 dispose 封口/取消，再 await drain 等实际 Promise/finally/close；入口必须登记自有 adapter/执行器并回收迟到初始化。主窗口关闭留托盘不停止后端，真正退出或父 stdio 断开才收束。
+- 包可在 monorepo/Bun 或源码构建环境中独立复用，不是已发布 npm SDK。TUI/exec/daemon/远程入口后置；使用入口见 README，运行契约以核心设计文档为准。
+
 ## 必须一直遵守的约束
 
 ### 1. 按核心迭代计划推进，每轮交付可运行版本
@@ -78,6 +95,7 @@ Axon 是一个本地优先、支持可插拔 Agent Runtime 的 Electron AI 桌�
 - [x] 迭代 21：多级 Skills 与 Axon 管理安装（2026-09-21；完成四级优先级发现、统一 `SkillRead`、受控原子安装、专用 IPC、Agent Skills 设置 UI、主/子 Agent 继承与真实 Electron 验证；catalog provider 按计划保留为空，远程/市场来源后置）
 - [x] 迭代 22：macOS Seatbelt 工具沙箱与细粒度审批（2026-09-27；Pi 内置工具宿主委托、不可用时拒绝原生回退、命令规则、精确 Grant、按实际执行来源审批、只读子 Agent 边界、权限 UI 与真实 Electron 验收完成；Zima 沙箱、完全自动和域名网络代理按计划后置）
 - [x] 迭代 23：Agent Shell 文件快照执行（2026-10-04；完成会话异步预热、私有文件发布、条件选择、沙箱内恢复、原始命令归因、主/子会话释放和遗留清理；全仓检查、真实 Seatbelt 与 Electron 冒烟通过）
+- [x] 迭代 24：后端模块化与独立 app-server（2026-10-08；七阶段源码实现、真实 stdio/SDK/Seatbelt、Electron 桥接/组合退出和集中回归完成；按用户要求不验收打包后 GUI/Keychain，已知偶发就绪超时保留诊断，TUI/exec/daemon 后置）
 
 ## 可扩展功能迭代（暂不实现）
 

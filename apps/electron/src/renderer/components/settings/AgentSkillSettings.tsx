@@ -1,6 +1,8 @@
 import * as React from 'react'
 import { Loader2 } from 'lucide-react'
 import type { AgentSkillSettingsSnapshot } from '@axon/shared'
+import { RendererSkillSettings, skillSettingsCanApply } from '../../lib/agent-skill-settings'
+import type { RendererSkillSettingsState } from '../../lib/agent-skill-settings'
 
 const SOURCE_LABELS: Record<AgentSkillSettingsSnapshot['discovered'][number]['directoryKind'], string> = {
   axon: '项目 .axon',
@@ -11,52 +13,27 @@ const SOURCE_LABELS: Record<AgentSkillSettingsSnapshot['discovered'][number]['di
 
 /** Skills 设置只操作 catalog 选择；renderer 不读取目录或处理安装包。 */
 export function AgentSkillSettings(): React.ReactElement {
-  const [snapshot, setSnapshot] = React.useState<AgentSkillSettingsSnapshot | null>(null)
-  const [selected, setSelected] = React.useState<string[]>([])
-  const [loading, setLoading] = React.useState(true)
-  const [saving, setSaving] = React.useState(false)
-  const [message, setMessage] = React.useState<string | null>(null)
+  const [state, setState] = React.useState<RendererSkillSettingsState>({ snapshot: null, selected: [], loading: true, refreshing: false, readFailed: false, saving: false, message: null, failures: [] })
+  const controller = React.useRef<RendererSkillSettings | null>(null)
+  const { snapshot, selected, loading, saving, refreshing, message, failures } = state
 
   React.useEffect(() => {
-    let cancelled = false
-    void window.axon.agentSkills.getSettings()
-      .then((value) => {
-        if (cancelled) return
-        setSnapshot(value)
-        setSelected(value.desiredCatalogIds)
-      })
-      .catch(() => { if (!cancelled) setMessage('读取 Skills 设置失败') })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
+    const current = new RendererSkillSettings(window.axon, setState)
+    controller.current = current
+    current.start()
+    return () => { current.dispose(); if (controller.current === current) controller.current = null }
   }, [])
 
   const applied = snapshot?.desiredCatalogIds ?? []
-  const dirty = [...selected].sort().join('\0') !== [...applied].sort().join('\0')
   const unavailableIds = [...new Set([
     ...(snapshot?.installed.map((item) => item.catalogId) ?? []),
     ...applied,
+    ...selected,
   ])].filter((id) => !snapshot?.available.some((item) => item.catalogId === id))
-
-  const apply = async (): Promise<void> => {
-    setSaving(true)
-    setMessage(null)
-    try {
-      const next = await window.axon.agentSkills.applySettings(selected)
-      setSnapshot(next)
-      setSelected(next.desiredCatalogIds)
-      setMessage(next.failures.length > 0
-        ? `Skills 设置已保存，${next.failures.length} 项处理失败`
-        : 'Skills 设置已应用')
-    } catch {
-      setMessage('应用 Skills 设置失败')
-    } finally {
-      setSaving(false)
-    }
-  }
 
   return <div className="mt-4 rounded-md border border-border-subtle bg-[hsl(var(--input-surface))] p-4">
     <div>
-      <h2 className="text-xs font-medium">Skills</h2>
+      <h2 className="text-xs font-medium">Skills{refreshing && !loading && <span className="ml-2 text-muted-foreground">正在刷新…</span>}</h2>
       <p className="mt-1 text-xs leading-5 text-muted-foreground">
         Axon 管理项安装到 ~/.axon/skills；项目和用户全局 Skills 仍由文件目录提供。
       </p>
@@ -71,16 +48,14 @@ export function AgentSkillSettings(): React.ReactElement {
           {snapshot?.available.map((skill) => {
             const checked = selected.includes(skill.catalogId)
             const installed = snapshot.installed.some((item) => (
-              item.catalogId === skill.catalogId && item.contentHash === skill.contentHash
+              item.catalogId === skill.catalogId && item.contentHash === skill.contentHash && item.version === skill.version
             ))
             return <label key={skill.catalogId} className="flex cursor-pointer items-start gap-3 p-3 hover:bg-muted/40">
               <input
                 type="checkbox"
                 checked={checked}
                 disabled={saving}
-                onChange={(event) => setSelected((current) => event.target.checked
-                  ? [...current, skill.catalogId]
-                  : current.filter((id) => id !== skill.catalogId))}
+                onChange={(event) => controller.current?.select(skill.catalogId, event.target.checked)}
                 className="mt-0.5 accent-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               />
               <span className="min-w-0 flex-1">
@@ -100,9 +75,7 @@ export function AgentSkillSettings(): React.ReactElement {
                 type="checkbox"
                 checked={selected.includes(catalogId)}
                 disabled={saving}
-                onChange={(event) => setSelected((current) => event.target.checked
-                  ? [...current, catalogId]
-                  : current.filter((id) => id !== catalogId))}
+                onChange={(event) => controller.current?.select(catalogId, event.target.checked)}
                 className="mt-0.5 accent-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               />
               <span className="min-w-0 flex-1">
@@ -139,19 +112,21 @@ export function AgentSkillSettings(): React.ReactElement {
         </p>}
       </div>
 
-      {snapshot?.failures.length ? <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
-        {snapshot.failures.map((failure) => <p key={failure.catalogId}>{failure.catalogId}：{failure.message}</p>)}
+      {failures.length ? <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+        <p className="mb-1">最近一次应用结果</p>
+        {failures.map((failure) => <p key={failure.catalogId}>{failure.catalogId}：{failure.message}</p>)}
       </div> : null}
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <button
           type="button"
-          disabled={!dirty || saving}
-          onClick={() => void apply()}
+          disabled={!skillSettingsCanApply(state)}
+          onClick={() => void controller.current?.apply()}
           className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
         >
           {saving ? '正在应用…' : '应用 Skills 设置'}
         </button>
+        <button type="button" disabled={refreshing || saving} onClick={() => controller.current?.refresh()} className="h-8 rounded-md border px-3 text-xs hover:bg-muted disabled:opacity-50">刷新状态</button>
         <p className="text-xs text-muted-foreground" role="status">{message}</p>
       </div>
     </>}

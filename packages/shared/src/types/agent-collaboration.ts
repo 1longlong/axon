@@ -1,5 +1,6 @@
 import type { AgentTypedError } from './agent-message'
 import type { AgentGenerationEvent } from './agent-run'
+import type { BackendOwnedRun } from './backend'
 
 /** 单个根任务最多同时运行的子 Agent，避免模型无界并发。 */
 export const MAX_AGENT_DELEGATION_CONCURRENCY = 4
@@ -90,14 +91,22 @@ export interface AgentTaskRunEvent {
   rootSessionId: string
   taskId: string
   agentId: string
+  /** 执行层提供的真实轮次；元数据事件没有轮次，只读投影不授予控制权。 */
+  run?: BackendOwnedRun
   event: AgentGenerationEvent
 }
 
 export type AgentTaskEvent = AgentTaskChangedEvent | AgentTaskRunEvent
 
+/** 页面持有后端生成的代次；只读观察不授予停止或审批权限。 */
+export interface AgentTaskSubscription { subscriptionId: string }
+export interface AgentTaskSubscriptionEvent extends AgentTaskSubscription { event: AgentTaskEvent }
+
 export const AGENT_TASK_IPC_CHANNELS = {
   LIST: 'axon:agent:tasks:list',
   GET: 'axon:agent:tasks:get',
   GET_MESSAGES: 'axon:agent:tasks:get-messages',
+  SUBSCRIBE: 'axon:agent:tasks:subscribe',
+  UNSUBSCRIBE: 'axon:agent:tasks:unsubscribe',
   EVENT: 'axon:agent:tasks:event',
 } as const

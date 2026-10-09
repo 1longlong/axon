@@ -1171,13 +1171,14 @@ Axon 的 SSE 解析层只负责把字节流转换成 `{ event, data, id, retry }
 
 ## 13. Axon 一次 Chat 的完整数据流（OpenAI Chat 格式）
 
-本节对应当前已经过真实 Electron + 本地 SSE 冒烟验证的实现。先看完整主线：
+本节描述当前独立后端实现。Chat 源码桌面发送、本地 SSE、摘要、附件、停止与 JSONL 重启恢复已通过；迭代 24 的整体状态见 PROGRESS.md。先看完整主线：
 
 ```text
-TipTap → ChatInput → ChatRendererController → preload → Chat IPC
+TipTap → ChatInput → ChatRendererController → preload → 固定 Chat IPC
+  → 双向 stdio JSON-RPC → app-server → ChatRunCoordinator
   → ChatService → ChannelManager / ConversationManager
   → Provider 请求编码 → fetch → SSE 解析 → OpenAI 适配器
-  → 中立流事件 → 定向 IPC → Jotai 流式草稿 → ChatMessages
+  → 中立流事件 → 定向 JSON-RPC/IPC → Jotai 流式草稿 → ChatMessages
   → assistant 终态 JSONL → 消息回读 → Markdown / Shiki
 ```
 
@@ -1187,7 +1188,8 @@ TipTap → ChatInput → ChatRendererController → preload → Chat IPC
 | --- | --- | --- | --- |
 | `RichTextInput` / `ChatInput` | 用户富文本操作 | 转成 Markdown，检查空白、长度、模型与生成状态 | `ChatSendInput` |
 | `ChatRendererController` | `ChatSendInput` | 管理发送状态、订阅流事件、终态后回读磁盘 | preload Chat API / Jotai |
-| preload + Chat IPC | renderer 不可信参数 | contextBridge 隔离、主框架校验、负载校验、窗口所有权 | `ChatIpcController` |
+| preload + 固定 Chat IPC | renderer 不可信参数 | contextBridge 隔离、主 frame/负载校验、登记可信原页面 | app-server 固定命令 |
+| app-server / `ChatRunCoordinator` | 可信 clientId 和发送 DTO | 复核来源、会话及运行归属 | `ChatService` |
 | `ChatService` | 已校验的发送参数 | 解析渠道、用户消息预落盘、构造历史、累计流、保存助手终态 | Provider 层 / JSONL / Chat 事件 |
 | Provider 请求层 | 中立 `ProviderStreamRequest` | 生成 URL/header/body，执行 fetch，解析 SSE | 供应商 adapter |
 | OpenAI Chat adapter | 原始 SSE JSON | 把正文、工具、用量、结束原因转成中立事件 | `ChatService` 与 renderer |
@@ -1222,7 +1224,9 @@ ChatInput.send
   → window.axon.chat.send
   → ipcRenderer.invoke("axon:chat:send", input)
   → ipcMain handler
-  → ChatIpcController.send
+  → AppServerProcess.request（固定 Chat 命令）
+  → app-server ChatRpcRouter
+  → ChatRunCoordinator.send
 ```
 
 这里同时存在两条异步通道：
@@ -1232,9 +1236,9 @@ ChatInput.send
 
 因此，不能等 `send()` Promise 完成后才显示 token；那样会把流式请求退化成非流式体验。
 
-### 13.3 主进程先落用户消息，再构造请求
+### 13.3 后端先落用户消息，再构造请求
 
-`ChatService` 先通过会话元数据找到 `channelId + modelId`，再由 `ChannelManager.resolve()` 在主进程解密凭据。renderer 看到的渠道 DTO 只有：
+独立后端中的 `ChatService` 通过会话元数据找到 `channelId + modelId`，再等待 `ChannelManager.resolve()` 经私有宿主桥请求 Electron safeStorage 解密；结果只交还可信后端，不给 renderer。等待期间可停止本轮，迟到的解密结果不会启动模型请求。renderer 看到的渠道 DTO 只有：
 
 ```json
 {
@@ -1287,7 +1291,7 @@ URL 和请求头由 Provider 请求层统一生成：
 
 ```text
 POST https://api.openai.com/v1/chat/completions
-Authorization: Bearer <仅主进程可见的 API Key>
+Authorization: Bearer <仅可信后端与私有宿主链可见的 API Key>
 Accept: text/event-stream
 Content-Type: application/json
 User-Agent: Axon/<版本号>
@@ -1632,7 +1636,7 @@ AgentInput
 | runtime | prompt、历史、工具 | 多次调用模型、执行工具、压缩、模型调用级自动重试 | Provider API / adapter |
 | Provider | 厂商协议 JSON | 流式生成正文、推理和工具调用 | runtime |
 
-### 14.2 renderer 到主进程的输入
+### 14.2 renderer 到独立后端的输入
 
 renderer 只发送业务标识与本次文本：
 
@@ -1643,7 +1647,7 @@ renderer 只发送业务标识与本次文本：
 }
 ```
 
-主进程解析会话后构造中立查询。下面是便于理解的等价 JSON；真实对象还包含不可 JSON 化的 `AbortSignal`、权限回调和 runtime 会话回调：
+主进程只转发固定 JSON-RPC 命令；app-server/core 解析会话后构造中立查询。下面是便于理解的等价 JSON；真实对象还包含 `AbortSignal`、权限回调和 runtime 会话回调，它们留在子进程内部，不跨 JSON 边界：
 
 ```json
 {
@@ -1654,7 +1658,7 @@ renderer 只发送业务标识与本次文本：
   "connection": {
     "provider": "openai",
     "baseUrl": "https://api.openai.com/v1",
-    "apiKey": "仅存在于主进程内"
+    "apiKey": "仅供可信后端与私有宿主链使用，不进入 renderer"
   },
   "systemPrompt": "你是 Axon Agent……",
   "executionPolicy": {

@@ -1,7 +1,7 @@
 import { app, BrowserWindow, nativeImage, shell } from 'electron'
 import { join } from 'node:path'
 import { DESKTOP_IPC_CHANNELS } from '../../../types'
-import type { QuickChatShortcutBinding } from '../../../types'
+import type { QuickChatShortcutBinding } from '@axon/shared'
 import { getIsQuitting } from './app-lifecycle'
 import { registerQuickChatWindowOwner, unregisterQuickChatWindowOwner } from './quick-chat-window-owner'
 import { QUICK_CHAT_COMPACT_HEIGHT, setQuickChatWindowExpanded } from './quick-chat-window-layout'

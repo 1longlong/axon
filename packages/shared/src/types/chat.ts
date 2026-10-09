@@ -202,5 +202,7 @@ export const CHAT_IPC_CHANNELS = {
   GET_MESSAGES: 'axon:chat:messages:list',
   SEND: 'axon:chat:send',
   STOP: 'axon:chat:stop',
+  GET_OWNED_GENERATION: 'axon:chat:generation:get-owned',
+  GENERATION_EVENT: 'axon:chat:generation:event',
   EVENT: 'axon:chat:event',
 } as const

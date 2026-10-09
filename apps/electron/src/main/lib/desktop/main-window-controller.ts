@@ -3,8 +3,8 @@ import type { NativeImage } from 'electron'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DESKTOP_IPC_CHANNELS, WINDOW_IPC_CHANNELS } from '../../../types'
-import type { AppSettings, DesktopAction } from '../../../types'
-import { getSettings, updateSettings } from '../settings/settings-service'
+import type { DesktopAction } from '../../../types'
+import type { MainWindowState } from '@axon/shared'
 import { getIsQuitting } from './app-lifecycle'
 import {
   ensureWindowBoundsVisible,
@@ -24,6 +24,8 @@ const MIN_MAIN_WINDOW_HEIGHT = 600
 export interface MainWindowControllerOptions {
   hasTray(): boolean
   onAttentionAcknowledged(): void
+  getWindowState(): MainWindowState | undefined
+  saveWindowState(state: MainWindowState): void | Promise<void>
 }
 
 /**
@@ -32,6 +34,8 @@ export interface MainWindowControllerOptions {
 export class MainWindowController {
   private mainWindow: BrowserWindow | null = null
   private startupSplashWindow: BrowserWindow | null = null
+  private flushScheduledState?: () => void
+  private readonly pendingStateSaves = new Set<Promise<void>>()
 
   constructor(private readonly options: MainWindowControllerOptions) {}
 
@@ -49,9 +53,9 @@ export class MainWindowController {
   createStartupSplashWindow(): void {
     if (this.startupSplashWindow && !this.startupSplashWindow.isDestroyed()) return
 
-    const savedState = getSettings().mainWindowState
     const splash = new BrowserWindow({
-      ...this.getInitialBounds(savedState),
+      // 后端初始化前只显示默认启动页，不提前读取业务配置。
+      ...this.getInitialBounds(undefined),
       show: false,
       frame: false,
       resizable: false,
@@ -67,7 +71,7 @@ export class MainWindowController {
     splash.setMenuBarVisibility(false)
     splash.once('ready-to-show', () => {
       if (splash.isDestroyed()) return
-      if (savedState?.isMaximized ?? true) splash.maximize()
+      splash.maximize()
       splash.show()
     })
     splash.once('closed', () => {
@@ -130,7 +134,7 @@ export class MainWindowController {
 
     const isMac = process.platform === 'darwin'
     const isDev = !app.isPackaged
-    const savedState = getSettings().mainWindowState
+    const savedState = this.options.getWindowState()
     const rendererPath = join(__dirname, 'renderer', 'index.html')
     const rendererEntryUrl = isDev ? 'http://127.0.0.1:5173' : pathToFileURL(rendererPath).toString()
     const window = new BrowserWindow({
@@ -231,6 +235,7 @@ export class MainWindowController {
       stateSaveTimer = null
       this.saveMainWindowState(window)
     }
+    this.flushScheduledState = () => { if (stateSaveTimer) flushState() }
     const scheduleStateSave = (): void => {
       if (stateSaveTimer) clearTimeout(stateSaveTimer)
       stateSaveTimer = setTimeout(flushState, 500)
@@ -273,17 +278,24 @@ export class MainWindowController {
     })
     window.on('closed', () => {
       if (stateSaveTimer) clearTimeout(stateSaveTimer)
-      if (this.mainWindow === window) this.mainWindow = null
+      if (this.mainWindow === window) { this.mainWindow = null; this.flushScheduledState = undefined }
       setStoredMainWindow(null)
     })
   }
 
-  /** 应用退出时清理仍存在的启动页引用。 */
+  /** 保存 flush 完成后销毁页面，停止延迟 IPC；启动失败也不留下可继续请求的窗口。 */
   dispose(): void {
     this.dismissStartupSplash()
+    this.getMainWindow()?.destroy()
   }
 
-  private getInitialBounds(savedState: AppSettings['mainWindowState']): Partial<WindowBounds> {
+  /** 在关闭后端前提交尚未防抖的窗口补丁，并等已发起保存结束；失败只记录原生诊断。 */
+  async flushWindowState(): Promise<void> {
+    this.flushScheduledState?.()
+    await Promise.all([...this.pendingStateSaves])
+  }
+
+  private getInitialBounds(savedState: MainWindowState | undefined): Partial<WindowBounds> {
     if (!savedState) return { width: DEFAULT_MAIN_WINDOW_WIDTH, height: DEFAULT_MAIN_WINDOW_HEIGHT }
     return normalizeWindowBoundsToVisibleArea(
       savedState,
@@ -312,10 +324,17 @@ export class MainWindowController {
     }
   }
 
+  /** 原生几何状态交给入口注入的保存函数；不在窗口类读写设置文件。 */
   private saveMainWindowState(window: BrowserWindow): void {
     if (window.isDestroyed()) return
     const mainWindowState = getPersistableMainWindowState(window)
-    if (mainWindowState) updateSettings({ mainWindowState })
+    if (!mainWindowState) return
+    try {
+      const pending = Promise.resolve(this.options.saveWindowState(mainWindowState))
+        .catch(() => { console.warn('[窗口] 窗口状态保存未确认') })
+      this.pendingStateSaves.add(pending)
+      void pending.then(() => this.pendingStateSaves.delete(pending))
+    } catch { console.warn('[窗口] 窗口状态保存未确认') }
   }
 
   private dismissStartupSplash(): void {

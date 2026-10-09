@@ -1,0 +1,18 @@
+{
+  "name": "@axon/app-server-app",
+  "version": "0.1.4",
+  "description": "Axon 独立后端 stdio 可执行入口",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@axon/app-server": "workspace:*",
+    "@axon/core": "workspace:*",
+    "@axon/host-node": "workspace:*",
+    "@axon/runtime-adapters": "workspace:*",
+    "@axon/shared": "workspace:*"
+  }
+}

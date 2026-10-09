@@ -1,4 +1,4 @@
-import type { MainWindowState } from '../../../types'
+import type { MainWindowState } from '@axon/shared'
 
 export interface WindowBounds {
   width: number

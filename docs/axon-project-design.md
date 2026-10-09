@@ -21,6 +21,8 @@ Axon 是本地优先的 Electron AI 桌面应用，同时提供两类会话：
 
 ## 2. 总体架构
 
+以下为迭代 24 已接入正式启动链的部署结构；业务统一在独立 app-server 子进程，生产异步退出、资源收束和源码桌面验收已完成；打包后验证按用户要求停止。
+
 ```text
 Renderer（React + Jotai）
   ├─ Chat / Agent 会话 UI
@@ -29,12 +31,16 @@ Renderer（React + Jotai）
                  │
 Preload Bridge（受控 IPC）
                  │
-Electron Main
-  ├─ Chat 编排
-  ├─ Agent 编排
-  ├─ 项目、渠道、设置与持久化服务
+Electron Main（父进程）
+  ├─ 窗口、托盘、Dock、快捷键与原生文件选择
+  ├─ 可信窗口身份校验与协议客户端
+  └─ app-server 子进程管理与 safeStorage 私有桥
+                 │ 双向 stdio JSON-RPC
+app-server（独立子进程）
+  ├─ core：Chat / Agent 编排、项目、渠道、设置与持久化
   ├─ 权限、Skills、MCP、记忆与协作服务
-  └─ AgentProviderAdapter
+  ├─ host-node：工具执行、Seatbelt 与 Shell 快照
+  └─ runtime-adapters：AgentProviderAdapter 实现
          ├─ Pi Adapter
          └─ Zima Adapter
                  │
@@ -47,11 +53,51 @@ Electron Main
 ### 分层边界
 
 - `packages/shared`：中立类型、DTO、IPC 常量和消息协议。
-- `packages/core`：Provider 文本生成协议和可复用核心逻辑。
-- `apps/electron/src/main`：主进程编排、持久化、权限与桌面生命周期。
+- `packages/core`：Provider 文本生成协议、持久化、设置/渠道、会话/任务、Agent/Chat/协作编排、附件解析、项目/工作区、指令/Skills、MCP 和记忆等可复用后端业务。
+- `packages/host-node`：Shell 解析/快照、Seatbelt 策略编译与能力探测、本地命令/文件执行及环境检查；不导入 Electron 或 Runtime SDK，接收显式快照目录和中立策略。
+- `packages/runtime-adapters`：Pi/Zima 接入及私有协议、SDK、工具 shape/artifact 处理；只通过 shared 的中立端口接收宿主能力，不反向依赖桌面或 host-node 实现。
+- `packages/app-server`：双向 stdio JSON-RPC、大消息分段、握手/身份、私有桥、Agent/Chat、附件、配置/渠道、项目/工作区/记忆、MCP、Skills、Task、能力查询及历史分页/完整汇聚；不导入 Electron、Runtime SDK 或宿主实现。
+- `apps/app-server`：已实现的独立入口，接收可信路径/版本/受控解释器参数，先隔离日志再组合 core、runtime-adapters、host-node 与协议服务，不加载 Electron；桌面复用应用自带执行器启动，随包 SDK/MCP/解析资源与只读冷包后端已验证，打包后 GUI 按用户要求暂不验收。
+- `apps/electron/src/main`：子进程管理、受控 IPC 转发、可信窗口映射及原生桌面生命周期；正式入口不再持有业务服务实例。
 - `apps/electron/src/preload`：最小权限 IPC bridge。
 - `apps/electron/src/renderer`：界面与可恢复状态投影。
 - `adapters`：唯一允许理解 Runtime SDK、工具 shape 和 artifact 格式的区域。
+
+### 后端复用与装配
+
+`createBackend` 接收显式目录、版本、异步凭据端口、Runtime 路由及自有资源，组合实际业务服务。core 可由非 Electron 宿主进程内复用；它提供的是内部服务集合，不是可绕过 owner/审批的公开网络 API。模型运行通过客户端登记和 Agent/Chat 运行协调，不能直接调用 adapter.query 代替完整应用链。具体示例见 [README 的独立复用说明](../README.md#不启动桌面单独复用后端)。
+
+桌面固定使用独立子进程：父端用应用自带 Electron Node 执行器启动 `dist/app-server.mjs`，不从 PATH 找用户 Node/Bun；独立开发入口可由 Bun 启动。后端只接受可信入口提供的绝对 `--data-dir`、`--home-dir`、`--application-version` 和可选 `--zima-python`，握手请求不能更改目录或执行权限。执行器标记 ELECTRON_RUN_AS_NODE 在导入业务前清除，避免进入工具环境。
+
+### 应用协议、身份与私有桥
+
+正式启动顺序为安装私有宿主桥/通知 → `axon/initialize` 校验版本并装配后端 → 登记逻辑客户端 → 读取设置及运行快照 → 绑定固定桌面 IPC、恢复快捷键并创建窗口。握手回应真实路径/版本及能力；重复初始化、错误协议或取消后迟到装配均拒绝，迟到资源纳入同一次清理。不回退进程内，不自动重投交付未知的用户请求。
+
+`axon/client/register` 由服务端产生 clientId，kind 为 main/quick/external。业务参数使用 `{ clientId, input }`，只读无输入请求可仅传 clientId；来源/owner/合成轮及角色不能由业务 input 自报。页面重载/销毁先使身份失效，取消所属运行、交互和订阅，其他入口不受影响，不将结果改投当前窗口。
+
+Agent 事件携带实际 `run: { sessionId, runId, runStartedAt }` 与可见父会话投影；子会话投影不能替换真实控制身份。停止/审批/追问复核原 owner、runId/generationId 和 requestId，过期或重复答复拒绝。审批/追问通过 `axon/client/agent/*` 反向 RPC 返回中立答复，不和普通流通知重复发送；缺少交互能力不能默认批准。
+
+safeStorage 留在 Electron，仅在可信父子管道的 `axon/host/*` 私有桥开放异步加解密/渠道目标确认。能力声明必须对应实际端口，不提供 renderer 通用解密接口，不把凭据放进 argv/日志或工具环境。保持 secure:v1: 封装，无安全后端拒绝非空凭据；取消后迟到批准不能触发联网。core/MCP 等服务只消费中立异步端口。
+
+主题/窗口/快捷键等业务设置由后端唯一写盘，原生效果由父端执行。快捷键变更预检会话，再 prepare→保存→commit，交付未知只重读确认、不自动重投。workspace/memory/Task 订阅用原 subscriptionId 精确取消；MCP 草稿测试保持独立连接，不关闭实际 Agent 工具租约。
+
+### 传输与完整历史
+
+双向换行 JSON-RPC 统一使用 `APP_SERVER_RPC_OPTIONS`：单行最多 1 MiB，完整逻辑消息最多 2 GiB。超长正文按 transferId/顺序/长度分段并恢复完整 UTF-8/JSON 后才处理；非法、超限、半条 EOF 或取消明确失败，不执行半份业务。输出有背压和积压上限，短控制可穿过大消息，通知保持顺序。DTO 用显式可序列化字段，不传函数、Signal 或 SDK 对象；不宣称零拷贝或无上限内存。
+
+stdout 专用于协议，JavaScript 日志/直接 write 转成 stderr 脱敏诊断；这不构成任意 native 写文件描述符的隔离。传输取消只结束对应请求等待，不代替真实 runId 的业务停止，也不代表已接受操作回滚。
+
+历史读取固定范围为 Chat/Agent/Task，不接受客户端指定文件路径或 Runtime artifact。一次打开 inode 形成只读快照，原子替换期间续页仍读同一版本；每页最多 100 条/约 1 MiB 正文，大单条保持完整并复用传输分段。续页绑定原 clientId/historyId 和随机游标，每次复核会话/任务存在；坏行只读隔离，不在分页期间重写源文件。现行 128 MiB 历史文件上限不变。
+
+每客户端最多 4 个、全后端最多 32 个历史快照，空闲 2 分钟释放，EOF/注销/退出关闭句柄。`AppServerHistoryClient.read` 完整汇聚到末页才返回，取消或页中失败不交付半份，finally 有界关闭快照。桌面先订阅事件再读历史，按消息 ID 合并读取期间新增完整消息；delta 不持久化，不承诺重连逐 token 重放。
+
+### 退出与故障边界
+
+主窗口关闭留托盘不停止后端；真正退出先禁用新入口/快捷键并 flush 窗口补丁，再撤销页面/IPC/身份、释放父端交互并等待唯一 child。子端先 dispose 封口/取消，再 drain 等实际 Promise/finally、TCP/stdio/受管进程 close，最后 flush 输出；迟到初始化、已淘汰但仍有租约的连接和已释放引用的预热仍须等待。逐项失败不跳过其他资源，只汇总脱敏错误。
+
+EOF、信号、协议/输出故障及未捕获异常共用 8 秒总期限，失败/超时非零退出。父端 10 秒 TERM、20 秒 KILL 只兜底本次自有 child；实际 close 不代表业务清理成功。异常退出失效旧交互/订阅，并向 UI 标记中断；新进程只恢复持久化状态，不自动重发或续跑。任意自行脱离受管组的后代不在清理保证内。
+
+一个服务持有一个数据目录，不能多个独立宿主共写正式目录；独立复用不等于接管已有桌面后端。首版没有 HTTP/WebSocket、TUI/exec 产品入口、daemon 或远程入口。Runtime 专属文件格式与 SDK 仍只由对应 adapter 理解，模型/工具恢复语义不因模块抽取改变。
 
 ## 3. 本地持久化
 
@@ -79,7 +125,7 @@ shared 常量与 DTO
   → renderer 调用
 ```
 
-Renderer 不直接访问文件系统、密钥、Runtime SDK 或 Node 特权能力。主进程负责输入校验、所有权判断、并发控制和错误收束。
+Renderer 不直接访问文件系统、密钥、Runtime SDK 或 Node 特权能力。独立部署后，main handler 校验真实调用窗口并转发固定协议方法；app-server/core 复核请求和可信客户端归属，执行运行控制、业务校验与错误收束。正式主进程不装配业务写入服务，旧业务单例、registrar 与身份表已删除；原生 safeStorage 端口只消费 core 的纯 `credential-codec` 子入口，不加载业务工厂。
 
 ## 5. Chat 设计
 
@@ -105,8 +151,11 @@ interface AgentProviderAdapter {
   abort(sessionId: string): void
   releaseSession?(sessionId: string): void
   dispose(): void
+  drain(): Promise<void>
 }
 ```
+
+`dispose()` 同步禁止新工作并取消自有工作，不代表资源已经结束；`drain()` 在 dispose 后等待实际查询、初始化、传输与回调清理。后端通过中立自有资源清单统一等待，失败逐项收束后脱敏汇总；编排层不依赖具体 SDK 的停止方式。
 
 `AgentQueryInput` 统一携带：
 
@@ -251,11 +300,11 @@ Skills 支持项目、Axon 管理和用户全局目录，并按稳定优先级�
 
 ### MCP
 
-MCP 是项目级配置，支持 stdio 和 Streamable HTTP。MCP Server 发现出的工具先转换成中立工具，再由当前 adapter 转为 Runtime shape。配置、连接测试、工具调用和超时均由主进程管理。
+MCP 是项目级配置，支持 stdio 和 Streamable HTTP。core 的 MCP 服务负责配置、连接测试、工具调用和超时，现行入口由独立后端装配。MCP Server 发现出的工具先转换成中立工具，再由当前 adapter 转为 Runtime shape；桌面 IPC 只绑定通道并校验真实调用来源。
 
 ### 记忆
 
-记忆只提供给 Agent，并由项目级开关控制。`MEMORY.md` 是索引，其他 Markdown 文件按需读取。每轮只比较记忆文件元信息；检测到外部修改后，通过系统提醒要求模型重新读取相关文件。
+记忆只提供给 Agent，并由项目级开关控制。core 的记忆服务约束所有读写；`MEMORY.md` 是索引，其他 Markdown 文件按需读取。每轮只扫描 memory/ 元信息并读取索引正文；已读主题的修改持续提醒到 MemoryRead 重读，成功读写只推进所属会话的 mtime/size 基线。正文不进入会话元数据；桌面变化订阅和逐轮陈旧检测是独立链路。
 
 ## 11. 协作子 Agent
 
@@ -320,6 +369,7 @@ MCP 是项目级配置，支持 stdio 和 Streamable HTTP。MCP Server 发现出
 | 21 | 多级 Skills、统一 SkillRead 与 Axon 管理安装 | 已完成 |
 | 22 | macOS Seatbelt 工具沙箱与细粒度审批 | 已完成 |
 | 23 | Agent Shell 文件快照执行 | 已完成 |
+| 24 | 后端模块化与独立 app-server | 已完成（源码范围；打包后 GUI/Keychain 不验收） |
 
 ### 迭代 1：应用骨架与本地底座
 
@@ -396,7 +446,7 @@ MCP 是项目级配置，支持 stdio 和 Streamable HTTP。MCP Server 发现出
 
 #### 阶段 2：Seatbelt 执行层
 
-- 主进程新增唯一的本地工具执行服务，负责规范化真实路径、生成 Seatbelt profile、启动/停止进程、流式输出和清理临时资源。
+- 宿主执行层提供唯一的本地工具执行服务，负责规范化真实路径、生成 Seatbelt profile、启动/停止进程、流式输出和清理临时资源。
 - Bash 使用 argv 启动 `sandbox-exec -p`，由 Seatbelt 约束整棵子进程树；禁止把未转义命令拼入 profile。
 - 默认文件只读，工作区和受控临时目录可写，命令网络关闭；`.git`、`.axon`、`.agents` 作为工作区内受保护只读目录。
 - 策略生成或平台能力检测失败时 fail closed，并归一成可展示的 sandbox 错误。
@@ -470,13 +520,33 @@ MCP 是项目级配置，支持 stdio 和 Streamable HTTP。MCP Server 发现出
 
 - 会话删除后释放对应引用，根会话同时释放子会话；应用退出释放全部引用。初始化时异步清理无归属或归属会话超过三天不活跃的遗留文件，排除预热及跨轮引用，不将快照作为永久配置复用。
 - 集中验证预热、cwd/参数匹配、失败回退、环境覆盖、特殊字符、停止清理及沙箱审批一致性，并完成全仓检查与真实桌面启动验证。
-- 新增 `bun run --cwd apps/electron test:agent:shell:smoke`：在真实 Electron 主进程使用隔离 HOME/ZDOTDIR 验证实际 Seatbelt、PATH 恢复、文件/网络精确授权、输出流、cwd 回退、超时/停止和释放清理；既有 `test:agent:smoke` 验证真实 UI、审批和 JSONL 重载。模型事件由夹具提供，本次不依赖外部模型 API。
+- 新增 `bun run --cwd apps/electron test:agent:shell:smoke`：通过 Electron 自带 Node 执行器启动独立测试 child，使用隔离 HOME/ZDOTDIR 验证实际 Seatbelt、PATH 恢复、文件/网络精确授权、输出流、cwd 回退、超时/停止和释放清理；既有 `test:agent:smoke` 验证真实 UI、审批和 JSONL 重载。模型事件由夹具提供，本次不依赖外部模型 API。
 - 2026-10-04 集中验收：全仓 90 个测试文件 572 项通过、2041 次断言；全仓类型检查、production build、两项真实 Electron 冒烟及 diff 格式检查通过。仅保留既有 renderer 大 chunk 提示。
 
 #### 本迭代明确不做
 
 - Zima 宿主 Shell 委托、执行器内存快照、常驻 Shell、PTY 和凭据代理。
 - 普通 `exec` 路线不承诺 alias 与普通函数跨 Shell 保留，也不自动把某次命令的 `export` 或 `cd` 写回会话快照。
+
+### 迭代 24：后端模块化与独立 app-server（源码范围已完成）
+
+目标：将业务后端拆成可复用包，由 Electron 启动一个共享 app-server 子进程。生产链不保留进程内后端回退；TUI、exec、daemon、远程入口和多宿主共写目录继续后置。现行契约见本文“总体架构”，复用示例见 README。
+
+1. **依赖显式化**：入口注入目录、版本、异步凭据与 Runtime。配置 DTO 位于 shared；安全后端不可用时拒绝非空凭据，不回退明文。
+2. **核心业务抽取**：core 的 `createBackend` 统一组合存储、上下文、主/子 Agent、Chat 与项目能力；不导入 Electron 或 Runtime SDK。
+3. **运行协调**：可信 clientId、实际 runId/generationId、队列、审批/追问、后台 Task 交付和订阅归 core。原入口失效不改投当前窗口；停止拒绝迟到结果，交付未知不自动重发。
+4. **执行模块分离**：host-node 负责 Shell/Seatbelt/快照/文件执行，runtime-adapters 负责 Pi/Zima SDK、工具 shape、artifact 和模型循环。编排只依赖中立接口。
+5. **独立服务与 stdio**：apps/app-server 组合实际后端；packages/app-server 维护固定双向 JSON-RPC、身份、私有桥、分段、取消和历史分页。stdout 专用于协议，未知错误脱敏，历史完整汇聚后才交付。
+6. **Electron 桥接**：父端仅管理窗口、托盘/Dock、快捷键、picker、safeStorage 和协议客户端。正式入口与测试父入口均使用独立 child；旧业务单例/装配已删除，无兼容转发层。
+7. **生命周期与源码验收**：先 dispose 封口/取消，再 drain 等实际 Promise、finally、TCP/进程 close，最后 flush 输出。连接登记迟到初始化和已释放后端，资源逐项失败不跳过其他清理。子端 8 秒总期限，父端 10 秒 TERM/20 秒 KILL 仅兜底自有 child；取消响应和进程消失不能替代终态落盘证明。
+
+主窗口关闭留托盘不停止后端；真正退出先禁用入口/快捷键、flush 窗口补丁，再撤页面身份/IPC并等待后端。一个应用只有一个业务写入者，主窗口与快捷浮窗分别登记身份。应用 JSONL、Runtime artifact、压缩摘要、精确 Grant 和 Shell 快照语义不变，不迁移用户数据。桌面复用自带 Electron Node 执行器，不要求用户安装 Bun/Node。
+
+2026-10-08 源码收尾：169 文件、1148 项/6697 次断言全部通过（86.21 秒）；7 workspace 类型检查、production build、diff 检查、六项源码 Electron 冒烟通过。真实生产桌面 `app.quit()` 同时收束实际 Chat/Pi 流、MCP 测试连接与原生确认；两条请求 TCP 实际关闭、队列未执行、唯一 stopped 终态和 Chat 局部文本落盘、窗口补丁保存通过。其他资源的实际 EOF/信号/异常及重启恢复由生产入口测试覆盖；不宣称所有资源排列组合都在 GUI 重演。
+
+本次只验收源码运行，打包后验证停止，不作为完成门槛；保留已有构建配置/冷包后端证据，未完成的打包 GUI/Keychain 不标记通过。快捷键冒烟使用确定性注册器，不冒充物理系统按键；Zima 使用真实子进程上的离线协议，不代表远端 SDK/Python 分发。Zima 宿主沙箱/快照、受控 Python 分发等既有后置项未恢复。
+
+Git/helper 退出测试现使用共享测试 helper 主动发送就绪通知，替代 Shell 写 PID 文件后的轮询；通知发出前已安装 TERM 处理，测试另验证 TERM 后仍存活。就绪仍限制三秒，管道 close 后有界等待真实 PID 的 ESRCH，EOF/SIGTERM、进程组、重启数据及订阅断言不变。该调整消除测试夹具的旧同步路径，不宣称已归因或修复原 Shell 偶发停顿的系统层原因。Zima accept 曾偶发超时仍未归因，保留 trace 诊断，不凭复跑通过宣称修复。
 
 ## 横切约束
 

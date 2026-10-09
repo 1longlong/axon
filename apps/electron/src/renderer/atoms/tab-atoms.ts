@@ -6,7 +6,7 @@
  */
 
 import { atom } from 'jotai'
-import type { PersistedTabState } from '@/types/settings'
+import type { PersistedTabState } from '@axon/shared'
 import type { AgentSessionMeta, ConversationMeta } from '@axon/shared'
 
 // ===== 类型定义 =====

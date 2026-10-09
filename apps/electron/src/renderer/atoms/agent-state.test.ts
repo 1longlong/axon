@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createStore } from 'jotai/vanilla'
-import type { AgentGenerationEvent, AgentProject, AgentSessionMeta, SDKMessage } from '@axon/shared'
+import type { AgentGenerationEvent, AgentProject, AgentSessionMeta, AgentRunIdentityEvent, BackendRunControlInput, BackendOwnedRun, SDKMessage } from '@axon/shared'
 import {
   AgentRendererController,
   agentStateAtom,
@@ -46,6 +46,7 @@ function createApi(overrides: Partial<AgentRendererApi> = {}): AgentRendererApi 
   return {
     listSessions: async () => [],
     listActiveRuns: async () => [],
+    getOwnedRun: async () => null,
     createSession: async () => session(),
     updateSession: async (id, input) => ({ ...session(id), ...(input.title ? { title: input.title } : {}) }),
     deleteSession: async (id) => session(id),
@@ -57,8 +58,10 @@ function createApi(overrides: Partial<AgentRendererApi> = {}): AgentRendererApi 
     cancelQueuedMessage: async () => false,
     moveQueuedMessage: async () => false,
     onEvent: () => () => {},
+    onRunChanged: () => () => {},
     onQueueChanged: () => () => {},
     listProjects: async () => [],
+    onProjectsChanged: () => () => {},
     createProject: async (input) => project('project-1', input.name),
     updateProject: async (id, input) => project(id, input.name ?? '项目'),
     deleteProject: async (id) => project(id),
@@ -67,8 +70,9 @@ function createApi(overrides: Partial<AgentRendererApi> = {}): AgentRendererApi 
     readProjectFile: async (projectId, relativePath) => ({
       projectId, relativePath, name: relativePath, size: 0, kind: 'text', content: '',
     }),
-    watchProjectDirectory: async () => {},
-    unwatchProjectDirectory: async () => {},
+    watchProjectDirectory: async (projectId) => ({ projectId, subscriptionId: 'workspace-test', kind: 'workspace' }),
+    unwatchProjectDirectory: async () => false,
+    onProjectWatchClosed: () => () => {},
     onProjectDirectoryChanged: () => () => {},
     listProjectMemory: async (projectId) => ({ projectId, indexExists: false, totalBytes: 0, files: [] }),
     readProjectMemory: async (projectId, relativePath) => ({
@@ -77,11 +81,23 @@ function createApi(overrides: Partial<AgentRendererApi> = {}): AgentRendererApi 
     writeProjectMemory: async (projectId, relativePath, content) => ({
       projectId, relativePath, content, size: content.length, updatedAt: 1,
     }),
-    watchProjectMemory: async () => {},
-    unwatchProjectMemory: async () => {},
+    watchProjectMemory: async (projectId) => ({ projectId, subscriptionId: 'memory-test', kind: 'memory' }),
+    unwatchProjectMemory: async () => false,
     onProjectMemoryChanged: () => () => {},
     ...overrides,
   }
+}
+
+function controlHarness(overrides: Partial<AgentRendererApi> = {}) {
+  let messageListener!: (event: AgentGenerationEvent) => void
+  let runListener!: (event: AgentRunIdentityEvent) => void
+  const store = createStore()
+  const controller = new AgentRendererController(createApi({ ...overrides,
+    onEvent: (callback) => { messageListener = callback; return () => {} },
+    onRunChanged: (callback) => { runListener = callback; return () => {} },
+  }), store)
+  return { store, controller, emit: (value: AgentGenerationEvent) => messageListener(value),
+    identify: (value: AgentRunIdentityEvent) => runListener(value) }
 }
 
 interface Deferred<T> { promise: Promise<T>; resolve(value: T): void }
@@ -250,6 +266,60 @@ describe('Agent renderer 运行事件 reducer', () => {
 })
 
 describe('AgentRendererController preload 编排', () => {
+  test('项目先订阅再读取；新快照使旧列表失效，释放后的通知不覆盖新订阅', async () => {
+    const list = deferred<AgentProject[]>(), callbacks: Array<(value: AgentProject[]) => void> = []
+    const order: string[] = [], store = createStore()
+    let released = 0
+    const controller = new AgentRendererController(createApi({
+      onProjectsChanged: (callback) => { order.push('subscribe'); callbacks.push(callback); return () => { released++ } },
+      listProjects: () => { order.push('list'); return list.promise },
+    }), store)
+    const cleanup = controller.start()
+    expect(order).toEqual(['subscribe', 'list'])
+    callbacks[0]!([project('new', '新项目')])
+    list.resolve([project('stale', '旧列表')]); await Promise.resolve()
+    expect(store.get(agentStateAtom)).toMatchObject({ projects: [{ id: 'new' }], projectsStatus: 'ready' })
+    cleanup(); callbacks[0]!([project('late')])
+    expect(store.get(agentStateAtom).projects[0]?.id).toBe('new')
+    const nextCleanup = controller.start()
+    callbacks[1]!([project('current')]); callbacks[0]!([project('old-page')])
+    await Promise.resolve()
+    expect(store.get(agentStateAtom).projects[0]?.id).toBe('current')
+    nextCleanup(); expect(released).toBe(2)
+  })
+
+  test('迟到创建/更新不能覆盖新项目快照，释放后的 CRUD 返回不修改共享状态', async () => {
+    for (const operation of ['create', 'update', 'delete'] as const) {
+      const gate = deferred<AgentProject>(), store = createStore()
+      let changed: ((value: AgentProject[]) => void) | undefined
+      const controller = new AgentRendererController(createApi({ listProjects: async () => [project()],
+        onProjectsChanged: (callback) => { changed = callback; return () => {} },
+        createProject: () => gate.promise, updateProject: () => gate.promise, deleteProject: () => gate.promise,
+      }), store)
+      const cleanup = controller.start(); await Promise.resolve()
+      const pending = operation === 'create' ? controller.createProject({ name: '旧创建' })
+        : operation === 'update' ? controller.updateProject('project-1', { name: '旧更新' }) : controller.deleteProject('project-1')
+      changed?.([project('project-1', '最新保存')])
+      if (operation === 'delete') cleanup()
+      gate.resolve(project('project-1', '迟到结果')); await pending
+      expect(store.get(agentStateAtom).projects).toEqual([project('project-1', '最新保存')])
+      cleanup()
+    }
+  })
+
+  test('释放后原生选择迟到成功/失败都不交付旧路径或污染项目错误', async () => {
+    for (const failed of [false, true]) {
+      const gate = Promise.withResolvers<Awaited<ReturnType<AgentRendererApi['pickLocalWorkspace']>>>(), store = createStore()
+      const controller = new AgentRendererController(createApi({ pickLocalWorkspace: () => gate.promise }), store)
+      const cleanup = controller.start(), selected = controller.pickLocalWorkspace()
+      cleanup()
+      if (failed) gate.reject(new Error('private selected path'))
+      else gate.resolve({ canceled: false, path: '/fixture/old', suggestedName: '旧选择' })
+      expect(await selected).toBeNull()
+      expect(store.get(agentStateAtom).lastError).toBeNull()
+    }
+  })
+
   test('初始化先订阅再读取会话，清理后可重启', async () => {
     const order: string[] = []
     let subscriptions = 0
@@ -267,7 +337,7 @@ describe('AgentRendererController preload 编排', () => {
     expect(subscriptions).toBe(2)
   })
 
-  test('事件使在途读取失效，run_finished 后以 JSONL 终态校准', async () => {
+  test('run_finished 启动新读取，旧读取不能覆盖 JSONL 终态', async () => {
     const oldLoad = deferred<SDKMessage[]>()
     const complete = assistant('磁盘终态')
     let calls = 0
@@ -313,13 +383,17 @@ describe('AgentRendererController preload 编排', () => {
     const failing = new AgentRendererController(createApi({
       send: async () => { throw new Error('secret transport') },
       stop: async () => { throw new Error('closed') },
+      onRunChanged: (callback) => { callback({ phase: 'started', run: { sessionId: 'session-1', runId: 'run-1', runStartedAt: 10 } }); return () => {} },
+      onEvent: (callback) => { callback(event({ type: 'run_started' })); return () => {} },
     }), store)
     expect(await failing.send({ sessionId: 'session-1', text: 'x' })).toMatchObject({
       success: false, code: 'internal_error',
     })
     expect(JSON.stringify(store.get(agentStateAtom))).not.toContain('secret transport')
+    const cleanup = failing.start()
     expect(await failing.stop('session-1')).toBe(false)
     expect(store.get(agentStateAtom).lastError?.message).toBe('停止 Agent 运行失败')
+    cleanup()
   })
 
   test('启动加载项目，项目 CRUD 保持同一状态快照', async () => {
@@ -353,5 +427,149 @@ describe('AgentRendererController preload 编排', () => {
       scope: 'projects', message: '打开本地项目目录失败',
     })
     expect(JSON.stringify(store.get(agentStateAtom))).not.toContain('private path')
+  })
+})
+
+describe('Agent 精确轮次与在途历史合并', () => {
+  test('停止同步捕获真实 ID；旧终态不撤销新目标，无目标时不查询当前轮', async () => {
+    const calls: BackendRunControlInput[] = [], gate = deferred<boolean>()
+    let queries = 0
+    const f = controlHarness({ stop: (target) => { calls.push(target); return calls.length === 1 ? gate.promise : Promise.resolve(true) },
+      getOwnedRun: async () => { queries += 1; return null } })
+    const cleanup = f.controller.start()
+    const first = { sessionId: 'session-1', runId: 'first', runStartedAt: 10 }, next = { ...first, runId: 'next', runStartedAt: 20 }
+    f.identify({ phase: 'started', run: first }); f.emit(event({ type: 'run_started' }, 10))
+    const stop = f.controller.stop('session-1')
+    f.identify({ phase: 'finished', run: first })
+    f.identify({ phase: 'started', run: next }); f.emit(event({ type: 'run_started' }, 20))
+    f.identify({ phase: 'finished', run: first }); f.emit(event({ type: 'run_finished', completion }, 10))
+    gate.resolve(false)
+    expect(await stop).toBe(false)
+    expect(await f.controller.stop('session-1')).toBe(true)
+    expect(calls).toEqual([{ sessionId: 'session-1', runId: 'first' }, { sessionId: 'session-1', runId: 'next' }])
+    expect(queries).toBe(0)
+    cleanup()
+    f.identify({ phase: 'started', run: next })
+    expect(await f.controller.stop('session-1')).toBe(false)
+    expect(calls).toHaveLength(2)
+  })
+
+  test('恢复中的旧所属查询不能覆盖新轮次；观察者即使看到活跃标记也不能发停止', async () => {
+    const gate = deferred<BackendOwnedRun | null>(), entered = deferred<void>(), calls: BackendRunControlInput[] = []
+    const f = controlHarness({ listActiveRuns: async () => [{ sessionId: 'session-1', runStartedAt: 10, source: 'renderer' }],
+      getOwnedRun: async () => { entered.resolve(); return await gate.promise }, stop: async (target) => { calls.push(target); return true } })
+    const cleanup = f.controller.start()
+    await entered.promise
+    f.identify({ phase: 'started', run: { sessionId: 'session-1', runId: 'new', runStartedAt: 20 } })
+    f.emit(event({ type: 'run_started' }, 20))
+    gate.resolve({ sessionId: 'session-1', runId: 'old', runStartedAt: 10 })
+    await Promise.resolve(); await Promise.resolve()
+    expect(await f.controller.stop('session-1')).toBe(true)
+    expect(calls).toEqual([{ sessionId: 'session-1', runId: 'new' }])
+    cleanup()
+
+    const observed = deferred<void>()
+    const observer = controlHarness({ listActiveRuns: async () => [{ sessionId: 'session-1', runStartedAt: 10, source: 'renderer' }],
+      getOwnedRun: async () => { observed.resolve(); return null }, stop: async (target) => { calls.push(target); return true } })
+    const stopObserver = observer.controller.start()
+    await observed.promise; await Promise.resolve()
+    expect(observer.store.get(agentStateAtom).activeRunsBySession['session-1']).toBe(10)
+    expect(await observer.controller.stop('session-1')).toBe(false)
+    expect(calls).toHaveLength(1)
+    stopObserver()
+  })
+
+  test('控制器重启重新获取所属身份；释放后的迟到事件/查询不复活控制或消息', async () => {
+    const queried = deferred<void>()
+    const run = { sessionId: 'session-1', runId: 'actual', runStartedAt: 10 }
+    let queries = 0
+    const f = controlHarness({ listActiveRuns: async () => [{ sessionId: 'session-1', runStartedAt: 10, source: 'renderer' }],
+      getOwnedRun: async () => { queries += 1; queried.resolve(); return run }, stop: async () => true })
+    f.controller.start()()
+    f.identify({ phase: 'started', run }); f.emit(event({ type: 'run_started' }))
+    expect(f.store.get(agentStateAtom).activeRunsBySession).toEqual({})
+    const cleanup = f.controller.start()
+    f.identify({ phase: 'started', run }); f.emit(event({ type: 'run_started' }))
+    cleanup()
+    const nextCleanup = f.controller.start()
+    await queried.promise; await Promise.resolve(); await Promise.resolve()
+    expect(queries).toBe(1)
+    expect(await f.controller.stop('session-1')).toBe(true)
+    nextCleanup()
+    expect(await f.controller.stop('session-1')).toBe(false)
+  })
+
+  test('所属身份查询尚未返回时释放，迟到成功不能重新获得停止能力', async () => {
+    const entered = deferred<void>(), gate = deferred<BackendOwnedRun | null>()
+    let stops = 0
+    const f = controlHarness({ listActiveRuns: async () => [{ sessionId: 'session-1', runStartedAt: 10, source: 'renderer' }],
+      getOwnedRun: async () => { entered.resolve(); return await gate.promise }, stop: async () => { stops += 1; return true } })
+    const cleanup = f.controller.start()
+    await entered.promise
+    cleanup()
+    gate.resolve({ sessionId: 'session-1', runId: 'late', runStartedAt: 10 })
+    await Promise.resolve(); await Promise.resolve()
+    expect(await f.controller.stop('session-1')).toBe(false)
+    expect(stops).toBe(0)
+  })
+
+  test('流式过程中读完旧快照，历史/摘要补齐而新完整回复与草稿不丢失；迟到旧流不合并', async () => {
+    const gate = deferred<SDKMessage[]>(), f = controlHarness({ getMessages: () => gate.promise })
+    const cleanup = f.controller.start()
+    f.emit(event({ type: 'run_started' }))
+    const loading = f.controller.loadMessages('session-1')
+    const live = assistant('新完整消息', 'new')
+    f.emit(event({ type: 'stream', payload: { kind: 'sdk_message', message: live } }))
+    f.emit(event({ type: 'stream', payload: { kind: 'sdk_delta', delta: { uuid: 'draft', deltas: [{ type: 'text_delta', contentIndex: 0, delta: '新草稿' }] } } }))
+    f.emit(event({ type: 'stream', payload: { kind: 'sdk_message', message: assistant('旧流', 'stale') } }, 9))
+    const summary: SDKMessage = { type: 'system', subtype: 'compact_boundary', uuid: 'summary', summary: '摘要', extra: { keep: true } }
+    gate.resolve([assistant('历史原文', 'history'), summary, assistant('较早快照值', 'new')])
+    await loading
+    const messages = f.store.get(agentStateAtom).messagesBySession['session-1']!
+    expect(messages.map((message) => 'uuid' in message ? message.uuid : undefined)).toEqual(['history', 'summary', 'new', 'draft'])
+    expect(messages[1]).toEqual(summary)
+    expect(messages[2]).toEqual(live)
+    expect(f.store.get(agentStateAtom).messageStatusBySession['session-1']).toBe('ready')
+    cleanup()
+  })
+
+  test('快照已有同 ID 完整回复，读取期间 delta 不降级完整值；重试撤回草稿不复活', async () => {
+    const gate = deferred<SDKMessage[]>(), f = controlHarness({ getMessages: () => gate.promise })
+    const cleanup = f.controller.start()
+    f.emit(event({ type: 'run_started' }))
+    const loading = f.controller.loadMessages('session-1')
+    f.emit(event({ type: 'stream', payload: { kind: 'sdk_delta', delta: { uuid: 'same', deltas: [{ type: 'text_delta', contentIndex: 0, delta: '片段' }] } } }))
+    f.emit(event({ type: 'stream', payload: { kind: 'sdk_message', message: assistant('撤回', 'discarded') } }))
+    f.emit(event({ type: 'stream', payload: { kind: 'retry_status', status: { phase: 'scheduled', attempt: 1, maxAttempts: 3, delayMs: 100, discardedAssistantUuid: 'discarded' } } }))
+    gate.resolve([assistant('完整终态', 'same'), assistant('过期快照', 'discarded')])
+    await loading
+    expect(f.store.get(agentStateAtom).messagesBySession['session-1']).toEqual([assistant('完整终态', 'same')])
+    cleanup()
+  })
+
+  test('较旧读取/释放后的读取失效，失败保留实时内容但不标为完整成功', async () => {
+    const first = deferred<SDKMessage[]>(), second = deferred<SDKMessage[]>(), third = deferred<SDKMessage[]>()
+    let count = 0
+    const f = controlHarness({ getMessages: () => [first, second, third][count++]!.promise })
+    const cleanup = f.controller.start()
+    f.emit(event({ type: 'run_started' }))
+    const old = f.controller.loadMessages('session-1'), current = f.controller.loadMessages('session-1')
+    f.emit(event({ type: 'stream', payload: { kind: 'sdk_message', message: assistant('实时', 'live') } }))
+    first.resolve([assistant('旧快照', 'old')]); await old
+    expect(f.store.get(agentStateAtom).messageStatusBySession['session-1']).toBe('loading')
+    second.resolve([assistant('当前历史', 'history')]); await current
+    expect(f.store.get(agentStateAtom).messagesBySession['session-1']?.map((message) => 'uuid' in message ? message.uuid : undefined)).toEqual(['history', 'live'])
+    const closed = f.controller.loadMessages('session-1')
+    cleanup()
+    third.resolve([assistant('释放后迟到', 'late')]); await closed
+    expect(f.store.get(agentStateAtom).messagesBySession['session-1']?.map((message) => 'uuid' in message ? message.uuid : undefined)).toEqual(['history', 'live'])
+    const failed = controlHarness({ getMessages: async () => { throw new Error('不可显示的内部错误') } })
+    const clear = failed.controller.start()
+    failed.emit(event({ type: 'run_started' }))
+    failed.emit(event({ type: 'stream', payload: { kind: 'sdk_message', message: assistant('保留实时') } }))
+    await failed.controller.loadMessages('session-1')
+    expect(failed.store.get(agentStateAtom).messagesBySession['session-1']).toEqual([assistant('保留实时')])
+    expect(failed.store.get(agentStateAtom).messageStatusBySession['session-1']).toBe('error')
+    clear()
   })
 })

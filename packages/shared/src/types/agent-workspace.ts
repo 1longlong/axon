@@ -1,4 +1,5 @@
 /** Agent 工作区的跨进程中立契约。 */
+import type { AgentProjectWatchTarget } from './agent-project'
 
 /** 系统目录选择器的安全结果；取消不视为错误。 */
 export type AgentWorkspaceDirectorySelection =
@@ -23,8 +24,7 @@ export interface AgentWorkspaceDirectoryListing {
 }
 
 /** 文件系统变化只作为重新读取信号，不跨 IPC 发送真实路径。 */
-export interface AgentWorkspaceDirectoryChangedEvent {
-  projectId: string
+export interface AgentWorkspaceDirectoryChangedEvent extends AgentProjectWatchTarget {
   changedAt: number
 }
 

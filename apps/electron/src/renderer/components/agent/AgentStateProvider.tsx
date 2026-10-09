@@ -13,6 +13,7 @@ export function AgentStateProvider({ children }: { children: ReactNode }): React
   const controller = useMemo(() => new AgentRendererController({
     ...window.axon.agent,
     listProjects: window.axon.agentProjects.list,
+    onProjectsChanged: window.axon.agentProjects.onChanged,
     createProject: window.axon.agentProjects.create,
     updateProject: window.axon.agentProjects.update,
     deleteProject: window.axon.agentProjects.delete,
@@ -23,6 +24,7 @@ export function AgentStateProvider({ children }: { children: ReactNode }): React
     watchProjectDirectory: window.axon.agentProjects.watchDirectory,
     unwatchProjectDirectory: window.axon.agentProjects.unwatchDirectory,
     onProjectDirectoryChanged: window.axon.agentProjects.onDirectoryChanged,
+    onProjectWatchClosed: window.axon.agentProjects.onWatchClosed,
     listProjectMemory: window.axon.agentMemory.list,
     readProjectMemory: window.axon.agentMemory.read,
     writeProjectMemory: window.axon.agentMemory.write,

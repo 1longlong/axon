@@ -176,6 +176,8 @@ export interface AgentHostShellEnvironment {
     handlers?: AgentSandboxCommandOutputHandlers,
   ): Promise<AgentSandboxCommandResult>
   dispose(): void
+  /** 释放后等待预热、命令与文件清理真实结束，不读取或删除会话历史。 */
+  drain(): Promise<void>
 }
 
 export interface AgentSandboxCommandResult {

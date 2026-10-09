@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { Keyboard, Pencil, Plus, Trash2 } from 'lucide-react'
 import type { AgentSessionMeta, ConversationMeta } from '@axon/shared'
-import type { QuickChatShortcutBinding } from '@/types/settings'
+import type { QuickChatShortcutBinding } from '@axon/shared'
 
 function targetKey(binding: Pick<QuickChatShortcutBinding, 'sessionType' | 'sessionId'>): string {
   return `${binding.sessionType}:${binding.sessionId}`
@@ -38,21 +38,27 @@ export function QuickChatShortcutSettings(): React.ReactElement {
   const [recording, setRecording] = React.useState(false)
   const [message, setMessage] = React.useState('')
   const [error, setError] = React.useState('')
+  const bindingsVersion = React.useRef(0)
 
   React.useEffect(() => {
     let canceled = false
+    const version = bindingsVersion.current
+    const unsubscribe = window.axon.settings.onChanged((settings) => {
+      if (canceled) return
+      bindingsVersion.current++; setBindings(settings.quickChatShortcuts)
+    })
     void Promise.all([
       window.axon.settings.get(),
       window.axon.chat.listConversations(),
       window.axon.agent.listSessions(),
     ]).then(([settings, conversations, sessions]) => {
       if (canceled) return
-      setBindings(settings.quickChatShortcuts)
+      if (version === bindingsVersion.current) setBindings(settings.quickChatShortcuts)
       setChats(conversations)
       setAgents(sessions.filter((session) => !session.parentSessionId))
     }).catch(() => { if (!canceled) setError('加载快捷键和会话失败') })
       .finally(() => { if (!canceled) setLoading(false) })
-    return () => { canceled = true }
+    return () => { canceled = true; unsubscribe() }
   }, [])
 
   const targets = React.useMemo(() => [
@@ -64,12 +70,13 @@ export function QuickChatShortcutSettings(): React.ReactElement {
 
   /** 只有主进程完成组合键注册和原子写盘后才更新界面列表。 */
   const persist = async (next: QuickChatShortcutBinding[], success: string): Promise<boolean> => {
+    const version = bindingsVersion.current
     setSaving(true)
     setError('')
     setMessage('')
     try {
       const saved = await window.axon.settings.update({ quickChatShortcuts: next })
-      setBindings(saved.quickChatShortcuts)
+      if (version === bindingsVersion.current) setBindings(saved.quickChatShortcuts)
       setMessage(success)
       return true
     } catch (cause) {

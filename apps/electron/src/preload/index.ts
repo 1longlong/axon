@@ -24,6 +24,9 @@ import {
 } from '@axon/shared'
 import type {
   AgentActiveRun,
+  AgentRunIdentityEvent,
+  BackendOwnedRun,
+  BackendRunControlInput,
   AgentAskUserResponse,
   AgentGenerationEvent,
   AgentEnvironmentCheckInput,
@@ -40,10 +43,14 @@ import type {
   AgentSessionMeta,
   AgentSessionUpdateInput,
   AgentDelegation,
-  AgentTaskEvent,
+  AgentTaskSubscription,
+  AgentTaskSubscriptionEvent,
   AgentProject,
   AgentProjectCreateInput,
   AgentProjectUpdateInput,
+  AgentProjectWatchSubscription,
+  AgentProjectWatchTarget,
+  AgentProjectWatchClosedEvent,
   AgentMemoryChangedEvent,
   AgentMemoryFile,
   AgentMemorySummary,
@@ -61,6 +68,8 @@ import type {
   ChannelNetworkInput,
   ChannelNetworkResult,
   ChatGenerationEvent,
+  ChatGenerationIdentityEvent,
+  BackendChatGeneration,
   ChatMessage,
   ChatSendInput,
   ChatSendResult,
@@ -69,14 +78,16 @@ import type {
   ConversationUpdateInput,
   SDKMessage,
   McpProjectConfig,
-  McpServerConfig,
+  McpConnectionTestInput,
   McpConnectionTestResult,
   BuiltinMcpPresetSummary,
   MaterializedMcpPreset,
 } from '@axon/shared'
-import { DESKTOP_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, USER_PROFILE_IPC_CHANNELS, WINDOW_IPC_CHANNELS } from '../types'
+import { DESKTOP_IPC_CHANNELS, WINDOW_IPC_CHANNELS } from '../types'
+import { SETTINGS_IPC_CHANNELS, USER_PROFILE_IPC_CHANNELS } from '@axon/shared'
 import type { QuickChatDragInput } from '../types'
-import type { AppSettings, DesktopAction, UserProfile } from '../types'
+import type { DesktopAction } from '../types'
+import type { AppSettings, UserProfile } from '@axon/shared'
 
 const desktopActionListeners = new Set<(action: DesktopAction) => void>()
 const pendingDesktopActions: DesktopAction[] = []
@@ -116,6 +127,11 @@ const api = {
     },
   },
   channels: {
+    onChanged: (callback: (channels: Channel[]) => void): (() => void) => {
+      const listener = (_event: IpcRendererEvent, channels: Channel[]): void => callback(channels)
+      ipcRenderer.on(CHANNEL_IPC_CHANNELS.CHANGED, listener)
+      return () => ipcRenderer.removeListener(CHANNEL_IPC_CHANNELS.CHANGED, listener)
+    },
     list: (): Promise<Channel[]> => ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.LIST),
     create: (input: ChannelCreateInput): Promise<Channel> => ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.CREATE, input),
     update: (id: string, input: ChannelUpdateInput): Promise<Channel> => ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.UPDATE, id, input),
@@ -138,8 +154,15 @@ const api = {
       ipcRenderer.invoke(CHAT_IPC_CHANNELS.GET_MESSAGES, id),
     send: (input: ChatSendInput): Promise<ChatSendResult> =>
       ipcRenderer.invoke(CHAT_IPC_CHANNELS.SEND, input),
-    stop: (conversationId: string): Promise<boolean> =>
-      ipcRenderer.invoke(CHAT_IPC_CHANNELS.STOP, conversationId),
+    getOwnedGeneration: (conversationId: string): Promise<BackendChatGeneration | null> =>
+      ipcRenderer.invoke(CHAT_IPC_CHANNELS.GET_OWNED_GENERATION, conversationId),
+    stop: (target: BackendChatGeneration): Promise<boolean> =>
+      ipcRenderer.invoke(CHAT_IPC_CHANNELS.STOP, target),
+    onGenerationChanged: (callback: (event: ChatGenerationIdentityEvent) => void): (() => void) => {
+      const listener = (_event: IpcRendererEvent, event: ChatGenerationIdentityEvent): void => callback(event)
+      ipcRenderer.on(CHAT_IPC_CHANNELS.GENERATION_EVENT, listener)
+      return () => ipcRenderer.removeListener(CHAT_IPC_CHANNELS.GENERATION_EVENT, listener)
+    },
     /** 订阅单次生成生命周期，返回取消订阅函数。 */
     onEvent: (callback: (event: ChatGenerationEvent) => void): (() => void) => {
       const listener = (_event: IpcRendererEvent, event: ChatGenerationEvent): void => callback(event)
@@ -156,6 +179,8 @@ const api = {
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_SESSIONS),
     listActiveRuns: (): Promise<AgentActiveRun[]> =>
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_ACTIVE_RUNS),
+    getOwnedRun: (sessionId: string): Promise<BackendOwnedRun | null> =>
+      ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_OWNED_RUN, sessionId),
     getSession: (id: string): Promise<AgentSessionMeta | null> =>
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SESSION, id),
     createSession: (input: AgentSessionCreateInput = {}): Promise<AgentSessionMeta> =>
@@ -168,8 +193,8 @@ const api = {
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_MESSAGES, id),
     send: (input: AgentSendInput): Promise<AgentSendResult> =>
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.SEND, input),
-    stop: (sessionId: string): Promise<boolean> =>
-      ipcRenderer.invoke(AGENT_IPC_CHANNELS.STOP, sessionId),
+    stop: (target: BackendRunControlInput): Promise<boolean> =>
+      ipcRenderer.invoke(AGENT_IPC_CHANNELS.STOP, target),
     isActive: (sessionId: string): Promise<boolean> =>
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.IS_ACTIVE, sessionId),
     listQueuedMessages: (sessionId: string): Promise<AgentQueuedMessage[]> =>
@@ -188,6 +213,12 @@ const api = {
       ipcRenderer.on(AGENT_IPC_CHANNELS.EVENT, listener)
       return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.EVENT, listener)
     },
+    /** 真实控制身份独立于展示事件；页面不得自行把父投影替换为子轮次。 */
+    onRunChanged: (callback: (event: AgentRunIdentityEvent) => void): (() => void) => {
+      const listener = (_event: IpcRendererEvent, event: AgentRunIdentityEvent): void => callback(event)
+      ipcRenderer.on(AGENT_IPC_CHANNELS.RUN_EVENT, listener)
+      return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.RUN_EVENT, listener)
+    },
     onQueueChanged: (callback: (snapshot: AgentQueueSnapshot) => void): (() => void) => {
       const listener = (_event: IpcRendererEvent, snapshot: AgentQueueSnapshot): void => callback(snapshot)
       ipcRenderer.on(AGENT_IPC_CHANNELS.QUEUE_EVENT, listener)
@@ -195,19 +226,26 @@ const api = {
     },
   },
   agentTasks: {
+    subscribe: (): Promise<AgentTaskSubscription> => ipcRenderer.invoke(AGENT_TASK_IPC_CHANNELS.SUBSCRIBE),
+    unsubscribe: (subscriptionId: string): Promise<boolean> => ipcRenderer.invoke(AGENT_TASK_IPC_CHANNELS.UNSUBSCRIBE, subscriptionId),
     list: (rootSessionId: string): Promise<AgentDelegation[]> =>
       ipcRenderer.invoke(AGENT_TASK_IPC_CHANNELS.LIST, rootSessionId),
     get: (rootSessionId: string, taskId: string): Promise<AgentDelegation | null> =>
       ipcRenderer.invoke(AGENT_TASK_IPC_CHANNELS.GET, rootSessionId, taskId),
     getMessages: (rootSessionId: string, taskId: string): Promise<SDKMessage[]> =>
       ipcRenderer.invoke(AGENT_TASK_IPC_CHANNELS.GET_MESSAGES, rootSessionId, taskId),
-    onEvent: (callback: (event: AgentTaskEvent) => void): (() => void) => {
-      const listener = (_event: IpcRendererEvent, event: AgentTaskEvent): void => callback(event)
+    onEvent: (callback: (event: AgentTaskSubscriptionEvent) => void): (() => void) => {
+      const listener = (_event: IpcRendererEvent, event: AgentTaskSubscriptionEvent): void => callback(event)
       ipcRenderer.on(AGENT_TASK_IPC_CHANNELS.EVENT, listener)
       return () => ipcRenderer.removeListener(AGENT_TASK_IPC_CHANNELS.EVENT, listener)
     },
   },
   agentProjects: {
+    onChanged: (callback: (projects: AgentProject[]) => void): (() => void) => {
+      const listener = (_event: IpcRendererEvent, projects: AgentProject[]): void => callback(projects)
+      ipcRenderer.on(AGENT_PROJECT_IPC_CHANNELS.CHANGED, listener)
+      return () => ipcRenderer.removeListener(AGENT_PROJECT_IPC_CHANNELS.CHANGED, listener)
+    },
     list: (): Promise<AgentProject[]> =>
       ipcRenderer.invoke(AGENT_PROJECT_IPC_CHANNELS.LIST),
     get: (id: string): Promise<AgentProject | null> =>
@@ -226,15 +264,20 @@ const api = {
       ipcRenderer.invoke(AGENT_PROJECT_IPC_CHANNELS.READ_FILE, projectId, relativePath),
     readDiff: (projectId: string, relativePath: string): Promise<AgentWorkspaceFileDiff> =>
       ipcRenderer.invoke(AGENT_PROJECT_IPC_CHANNELS.READ_DIFF, projectId, relativePath),
-    watchDirectory: (projectId: string): Promise<void> =>
+    watchDirectory: (projectId: string): Promise<AgentProjectWatchSubscription> =>
       ipcRenderer.invoke(AGENT_PROJECT_IPC_CHANNELS.WATCH_DIRECTORY, projectId),
-    unwatchDirectory: (projectId: string): Promise<void> =>
-      ipcRenderer.invoke(AGENT_PROJECT_IPC_CHANNELS.UNWATCH_DIRECTORY, projectId),
-    /** 变更事件只通知项目和时间，renderer 收到后重新读取权威目录树。 */
+    unwatchDirectory: (target: AgentProjectWatchTarget): Promise<boolean> =>
+      ipcRenderer.invoke(AGENT_PROJECT_IPC_CHANNELS.UNWATCH_DIRECTORY, target),
+    /** 变更携带服务端代次，面板只重读属于自己的项目监听。 */
     onDirectoryChanged: (callback: (event: AgentWorkspaceDirectoryChangedEvent) => void): (() => void) => {
       const listener = (_event: IpcRendererEvent, change: AgentWorkspaceDirectoryChangedEvent): void => callback(change)
       ipcRenderer.on(AGENT_PROJECT_IPC_CHANNELS.DIRECTORY_CHANGED, listener)
       return () => ipcRenderer.removeListener(AGENT_PROJECT_IPC_CHANNELS.DIRECTORY_CHANGED, listener)
+    },
+    onWatchClosed: (callback: (event: AgentProjectWatchClosedEvent) => void): (() => void) => {
+      const listener = (_event: IpcRendererEvent, change: AgentProjectWatchClosedEvent): void => callback(change)
+      ipcRenderer.on(AGENT_PROJECT_IPC_CHANNELS.WATCH_CLOSED, listener)
+      return () => ipcRenderer.removeListener(AGENT_PROJECT_IPC_CHANNELS.WATCH_CLOSED, listener)
     },
   },
   agentMemory: {
@@ -244,10 +287,10 @@ const api = {
       ipcRenderer.invoke(AGENT_MEMORY_IPC_CHANNELS.READ, projectId, relativePath),
     write: (projectId: string, relativePath: string, content: string): Promise<AgentMemoryFile> =>
       ipcRenderer.invoke(AGENT_MEMORY_IPC_CHANNELS.WRITE, projectId, relativePath, content),
-    watch: (projectId: string): Promise<void> =>
+    watch: (projectId: string): Promise<AgentProjectWatchSubscription> =>
       ipcRenderer.invoke(AGENT_MEMORY_IPC_CHANNELS.WATCH, projectId),
-    unwatch: (projectId: string): Promise<void> =>
-      ipcRenderer.invoke(AGENT_MEMORY_IPC_CHANNELS.UNWATCH, projectId),
+    unwatch: (target: AgentProjectWatchTarget): Promise<boolean> =>
+      ipcRenderer.invoke(AGENT_MEMORY_IPC_CHANNELS.UNWATCH, target),
     /** 变化事件是刷新信号，文件列表和内容仍通过受限读取接口取得。 */
     onChanged: (callback: (event: AgentMemoryChangedEvent) => void): (() => void) => {
       const listener = (_event: IpcRendererEvent, change: AgentMemoryChangedEvent): void => callback(change)
@@ -260,8 +303,10 @@ const api = {
       ipcRenderer.invoke(MCP_IPC_CHANNELS.GET_PROJECT_CONFIG, projectId),
     saveConfig: (projectId: string, config: McpProjectConfig): Promise<McpProjectConfig> =>
       ipcRenderer.invoke(MCP_IPC_CHANNELS.SAVE_PROJECT_CONFIG, projectId, config),
-    testConnection: (projectId: string, serverName: string, server: McpServerConfig): Promise<McpConnectionTestResult> =>
-      ipcRenderer.invoke(MCP_IPC_CHANNELS.TEST_SERVER_CONNECTION, projectId, serverName, server),
+    testConnection: (input: McpConnectionTestInput): Promise<McpConnectionTestResult> =>
+      ipcRenderer.invoke(MCP_IPC_CHANNELS.TEST_SERVER_CONNECTION, input),
+    cancelConnectionTest: (requestId: string): Promise<boolean> =>
+      ipcRenderer.invoke(MCP_IPC_CHANNELS.CANCEL_CONNECTION_TEST, requestId),
     listBuiltinPresets: (): Promise<BuiltinMcpPresetSummary[]> =>
       ipcRenderer.invoke(MCP_IPC_CHANNELS.LIST_BUILTIN_PRESETS),
     materializeBuiltinPreset: (projectId: string, presetId: string): Promise<MaterializedMcpPreset> =>
@@ -276,11 +321,21 @@ const api = {
     get: (): Promise<UserProfile> => ipcRenderer.invoke(USER_PROFILE_IPC_CHANNELS.GET),
     update: (updates: Partial<UserProfile>): Promise<UserProfile> =>
       ipcRenderer.invoke(USER_PROFILE_IPC_CHANNELS.UPDATE, updates),
+    onChanged: (callback: (profile: UserProfile) => void): (() => void) => {
+      const listener = (_event: IpcRendererEvent, profile: UserProfile): void => callback(profile)
+      ipcRenderer.on(USER_PROFILE_IPC_CHANNELS.CHANGED, listener)
+      return () => ipcRenderer.removeListener(USER_PROFILE_IPC_CHANNELS.CHANGED, listener)
+    },
   },
   settings: {
     get: (): Promise<AppSettings> => ipcRenderer.invoke(SETTINGS_IPC_CHANNELS.GET),
     update: (updates: Partial<AppSettings>): Promise<AppSettings> =>
       ipcRenderer.invoke(SETTINGS_IPC_CHANNELS.UPDATE, updates),
+    onChanged: (callback: (settings: AppSettings) => void): (() => void) => {
+      const listener = (_event: IpcRendererEvent, settings: AppSettings): void => callback(settings)
+      ipcRenderer.on(SETTINGS_IPC_CHANNELS.CHANGED, listener)
+      return () => ipcRenderer.removeListener(SETTINGS_IPC_CHANNELS.CHANGED, listener)
+    },
   },
   agentSkills: {
     getSettings: (): Promise<AgentSkillSettingsSnapshot> =>

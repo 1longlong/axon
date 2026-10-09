@@ -15,33 +15,48 @@ export function ChannelSettings(): React.ReactElement {
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const inFlight = React.useRef(false)
+  const loadVersion = React.useRef(0)
   const setEditing = useSetAtom(settingsEditingAtom)
 
+  /** 读取安全渠道快照；保存通知或新读取已发生时，丢弃旧响应。 */
   const loadChannels = React.useCallback(async (): Promise<void> => {
+    const version = ++loadVersion.current
     setLoading(true)
     setError(null)
-    try { setChannels(await window.axon.channels.list()) }
-    catch { setError('加载渠道失败，请重试。') }
-    finally { setLoading(false) }
+    try {
+      const snapshot = await window.axon.channels.list()
+      if (version === loadVersion.current) setChannels(snapshot)
+    } catch { if (version === loadVersion.current) setError('加载渠道失败，请重试。') }
+    finally { if (version === loadVersion.current) setLoading(false) }
   }, [])
 
-  React.useEffect(() => { void loadChannels() }, [loadChannels])
+  React.useEffect(() => {
+    // 先订阅已保存快照再读取；迟到列表/CRUD 响应不能覆盖跨入口的新状态。
+    const unsubscribe = window.axon.channels.onChanged((snapshot) => {
+      loadVersion.current += 1
+      setChannels(snapshot); setLoading(false); setError(null)
+    })
+    void loadChannels()
+    return () => { loadVersion.current += 1; unsubscribe() }
+  }, [loadChannels])
   React.useEffect(() => () => setEditing({ dirty: false, busy: false }), [setEditing])
 
+  /** 提交单项修改；服务端通知优先，未收到通知时沿用操作响应更新列表。 */
   const mutate = async (channel: Channel, action: 'delete' | 'toggle'): Promise<void> => {
     if (inFlight.current) return
     if (action === 'delete' && !window.confirm(`确定删除渠道「${channel.name}」？删除后将无法在列表中使用，请谨慎操作。`)) return
     inFlight.current = true
+    const version = ++loadVersion.current
     setBusy(true)
     setEditing({ dirty: false, busy: true })
     setError(null)
     try {
       if (action === 'delete') {
         await window.axon.channels.delete(channel.id)
-        setChannels((current) => current.filter((item) => item.id !== channel.id))
+        if (version === loadVersion.current) setChannels((current) => current.filter((item) => item.id !== channel.id))
       } else {
         const saved = await window.axon.channels.update(channel.id, { enabled: !channel.enabled })
-        setChannels((current) => current.map((item) => item.id === saved.id ? saved : item))
+        if (version === loadVersion.current) setChannels((current) => current.map((item) => item.id === saved.id ? saved : item))
       }
     } catch { setError(action === 'delete' ? '删除失败，请重试。' : '更新启用状态失败，请重试。') }
     finally {
@@ -52,10 +67,8 @@ export function ChannelSettings(): React.ReactElement {
   }
 
   if (viewMode !== 'list') return (
-    <ChannelForm channel={editingChannel} onCancel={() => setViewMode('list')} onSaved={(saved) => {
-      setChannels((current) => current.some((item) => item.id === saved.id)
-        ? current.map((item) => item.id === saved.id ? saved : item)
-        : [...current, saved])
+    <ChannelForm channel={editingChannel} onCancel={() => setViewMode('list')} onSaved={() => {
+      void loadChannels()
       setViewMode('list')
       setEditingChannel(null)
     }} />

@@ -224,8 +224,10 @@ export interface AgentProviderAdapter {
   interruptQuery?(sessionId: string): Promise<void>
   /** 会话删除后释放跨轮缓存；不删除消息历史或 runtime artifact。 */
   releaseSession?(sessionId: string): void
-  /** 释放资源。 */
+  /** 同步封住入口并取消自有工作；不代表查询/进程/回调已经结束。 */
   dispose(): void
+  /** dispose 后等待实际查询、初始化、传输与自有回调清理完成；失败必须脱敏报告。 */
+  drain(): Promise<void>
   /** 向活跃查询注入队列消息（可选，仅支持队列的 Provider 实现）。 */
   sendQueuedMessage?(sessionId: string, message: SDKUserMessageInput, options?: SendQueuedMessageOptions): Promise<void>
   /** 取消队列中的待发送消息（可选）。 */

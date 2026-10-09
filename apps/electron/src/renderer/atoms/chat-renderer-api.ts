@@ -2,6 +2,8 @@
 
 import type {
   ChatGenerationEvent,
+  ChatGenerationIdentityEvent,
+  BackendChatGeneration,
   ChatMessage,
   ChatSendInput,
   ChatSendResult,
@@ -13,13 +15,15 @@ import type {
 
 export interface ChatRendererApi {
   listChannels(): Promise<Channel[]>
+  onChannelsChanged(callback: (channels: Channel[]) => void): () => void
   listConversations(): Promise<ConversationMeta[]>
   createConversation(input?: ConversationCreateInput): Promise<ConversationMeta>
   updateConversation(id: string, input: ConversationUpdateInput): Promise<ConversationMeta>
   deleteConversation(id: string): Promise<ConversationMeta>
   getMessages(id: string): Promise<ChatMessage[]>
   send(input: ChatSendInput): Promise<ChatSendResult>
-  stop(conversationId: string): Promise<boolean>
+  getOwnedGeneration(conversationId: string): Promise<BackendChatGeneration | null>
+  stop(target: BackendChatGeneration): Promise<boolean>
+  onGenerationChanged(callback: (event: ChatGenerationIdentityEvent) => void): () => void
   onEvent(callback: (event: ChatGenerationEvent) => void): () => void
 }
-

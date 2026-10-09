@@ -33,7 +33,7 @@ function getCachedThemeMode(): ThemeMode {
 /**
  * 缓存主题模式到 localStorage
  */
-function cacheThemeMode(mode: ThemeMode): void {
+export function cacheThemeMode(mode: ThemeMode): void {
   try {
     localStorage.setItem(THEME_CACHE_KEY, mode)
   } catch {
@@ -77,34 +77,6 @@ export function applyThemeToDOM(themeMode: ThemeMode, systemIsDark: boolean = tr
   }
 
   html.classList.toggle('dark', targetIsDark)
-}
-
-/**
- * 初始化主题系统
- *
- * 从主进程加载持久化设置，监听系统主题变化。
- * 返回清理函数。
- */
-export async function initializeTheme(
-  setThemeMode: (mode: ThemeMode) => void,
-  setSystemIsDark: (isDark: boolean) => void,
-): Promise<() => void> {
-  // 从主进程加载持久化设置
-  const settings = await window.axon.settings.get()
-  setThemeMode(settings.themeMode)
-  cacheThemeMode(settings.themeMode)
-
-  // 获取并监听系统主题（matchMedia；多窗口同步事件随设置页阶段接入）
-  const media = window.matchMedia('(prefers-color-scheme: dark)')
-  setSystemIsDark(media.matches)
-  const onSystemThemeChange = (event: MediaQueryListEvent): void => {
-    setSystemIsDark(event.matches)
-  }
-  media.addEventListener('change', onSystemThemeChange)
-
-  return () => {
-    media.removeEventListener('change', onSystemThemeChange)
-  }
 }
 
 /**

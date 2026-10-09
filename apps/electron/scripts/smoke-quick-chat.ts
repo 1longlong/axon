@@ -1,24 +1,15 @@
-/** 快捷会话桌面冒烟：用确定性快捷键注册器触发真实 BrowserWindow，并验证同一 Chat 历史。 */
-import { app, BrowserWindow, ipcMain, screen } from 'electron'
+/** 独立后端快捷会话冒烟：确定性注册器触发真实浮窗，两个入口共用服务和应用历史。 */
+import { app, BrowserWindow, screen } from 'electron'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { AGENT_IPC_CHANNELS, AGENT_PROJECT_IPC_CHANNELS } from '@axon/shared'
-import { registerAttachmentIpcHandlers } from '../src/main/ipc/attachment-ipc-handlers'
-import { registerChannelIpcHandlers } from '../src/main/ipc/channel-ipc-handlers'
-import { registerChatIpcHandlers } from '../src/main/ipc/chat-ipc-handlers'
-import { registerWindowIpcHandlers } from '../src/main/ipc/window-ipc-handlers'
-import { ChatIpcController } from '../src/main/lib/chat/chat-ipc-handlers'
-import { ChatService } from '../src/main/lib/chat/chat-service'
-import { ConversationManager } from '../src/main/lib/chat/conversation-manager'
-import { AttachmentService } from '../src/main/lib/chat/attachment-service'
-import { ChannelManager } from '../src/main/lib/channel/channel-manager'
-import { createChannelCredentialCodec } from '../src/main/lib/channel/channel-credential-codec'
 import { QuickChatShortcutService, type ShortcutRegistrar } from '../src/main/lib/desktop/quick-chat-shortcut-service'
 import { QuickChatWindowManager } from '../src/main/lib/desktop/quick-chat-window-manager'
-import { SETTINGS_IPC_CHANNELS, USER_PROFILE_IPC_CHANNELS } from '../src/types'
-import type { AppSettings, QuickChatShortcutBinding } from '../src/types'
+import { isQuickChatWindowOwner } from '../src/main/lib/desktop/quick-chat-window-owner'
+import { startDesktopSmokeBackend } from '../test-support/desktop-smoke-backend'
+import type { DesktopSmokeBackend } from '../test-support/desktop-smoke-backend'
+import type { ChatMessage, ConversationMeta, QuickChatShortcutBinding } from '@axon/shared'
 
 class SmokeShortcutRegistrar implements ShortcutRegistrar {
   readonly callbacks = new Map<string, () => void>()
@@ -42,10 +33,38 @@ class SmokeShortcutRegistrar implements ShortcutRegistrar {
 
 const directory = mkdtempSync(join(tmpdir(), 'axon-quick-chat-smoke-'))
 app.setPath('userData', join(directory, 'electron'))
-const timeout = setTimeout(() => {
-  console.error('快捷会话冒烟验证超时')
-  app.exit(1)
-}, 60_000)
+app.on('window-all-closed', () => {})
+let bridge: DesktopSmokeBackend | undefined
+let mainWindow: BrowserWindow | undefined
+let windows: QuickChatWindowManager | undefined
+let shortcut: QuickChatShortcutService | undefined
+let server: ReturnType<typeof createServer> | undefined
+let finishing: Promise<void> | undefined
+const timeout = setTimeout(() => { void finish(1, '快捷会话冒烟验证超时') }, 60_000)
+
+/** 成功与失败先关闭全部自有窗口，再等待后端，避免默认退出或超时遗留独立进程。 */
+function finish(code: number, error?: unknown): Promise<void> {
+  return finishing ??= (async () => {
+    clearTimeout(timeout)
+    if (error) {
+      console.error(error)
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) console.error('快捷冒烟页面诊断', await win.webContents.executeJavaScript(`({
+          text: document.body.textContent.slice(0, 500),
+          buttons: [...document.querySelectorAll('button')].map(item => item.getAttribute('aria-label') || item.textContent.trim())
+        })`).catch(() => '页面不可读取'))
+      }
+    }
+    shortcut?.dispose()
+    windows?.dispose()
+    mainWindow?.destroy()
+    try { await bridge?.close() }
+    catch (cleanupError) { console.error('快捷冒烟后端清理失败', cleanupError); code = 1 }
+    server?.closeAllConnections()
+    server?.close()
+    app.exit(code)
+  })()
+}
 
 /** 为快捷浮窗提供稳定的本地 OpenAI Chat SSE，避免真实网络和用户渠道参与验收。 */
 function respondWithChatStream(response: import('node:http').ServerResponse): void {
@@ -64,62 +83,16 @@ function respondWithChatStream(response: import('node:http').ServerResponse): vo
 }
 
 void app.whenReady().then(async () => {
-  const server = createServer((request, response) => {
+  server = createServer((request, response) => {
     request.resume()
     request.on('end', () => respondWithChatStream(response))
   })
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
+  const localServer = server
+  await new Promise<void>((done) => localServer.listen(0, '127.0.0.1', done))
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('本地模型服务启动失败')
 
-  const channels = new ChannelManager({
-    configPath: join(directory, 'channels.json'),
-    credentialCodec: createChannelCredentialCodec(),
-  })
-  const channel = channels.create({
-    name: '快捷验收渠道',
-    provider: 'custom',
-    baseUrl: `http://127.0.0.1:${address.port}/v1`,
-    apiKey: 'quick-smoke-key',
-    models: [{ id: 'quick-smoke-model', name: '快捷验收模型', enabled: true, source: 'manual' }],
-  })
-  const conversations = new ConversationManager({
-    indexPath: join(directory, 'conversations.json'),
-    messagesDir: join(directory, 'conversations'),
-  })
-  const conversation = conversations.create({
-    title: '快捷验收会话',
-    channelId: channel.id,
-    modelId: 'quick-smoke-model',
-  })
-  const attachments = new AttachmentService({ attachmentsDir: join(directory, 'attachments') })
-  const chat = new ChatService({
-    channelManager: channels,
-    conversationManager: conversations,
-    userAgent: 'Axon/quick-chat-smoke',
-  })
-
-  registerChannelIpcHandlers(channels)
-  registerAttachmentIpcHandlers(attachments)
-  registerChatIpcHandlers(new ChatIpcController({ conversations, chat, attachments }))
-  registerWindowIpcHandlers()
-
-  const settings: AppSettings = {
-    themeMode: 'light',
-    gitAttributionEnabled: true,
-    agentSystemPromptTemplates: [],
-    agentSkillCatalogIds: [],
-    quickChatShortcuts: [],
-  }
-  ipcMain.handle(SETTINGS_IPC_CHANNELS.GET, () => settings)
-  ipcMain.handle(SETTINGS_IPC_CHANNELS.UPDATE, () => settings)
-  ipcMain.handle(USER_PROFILE_IPC_CHANNELS.GET, () => ({ userName: '快捷验收用户', avatar: 'A' }))
-  // QuickChatWindow 总是挂载 Agent provider；空快照足以验证 Chat，不初始化 runtime 和项目文件系统。
-  ipcMain.handle(AGENT_IPC_CHANNELS.LIST_SESSIONS, () => [])
-  ipcMain.handle(AGENT_IPC_CHANNELS.LIST_ACTIVE_RUNS, () => [])
-  ipcMain.handle(AGENT_PROJECT_IPC_CHANNELS.LIST, () => [])
-
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1200,
     height: 820,
     show: false,
@@ -130,13 +103,26 @@ void app.whenReady().then(async () => {
       backgroundThrottling: false,
     },
   })
-  const windows = new QuickChatWindowManager({ rendererFilePath: resolve('dist/renderer/index.html') })
+  const main = mainWindow
+  windows = new QuickChatWindowManager({ rendererFilePath: resolve('dist/renderer/index.html') })
   const registrar = new SmokeShortcutRegistrar()
-  const shortcut = new QuickChatShortcutService(
+  shortcut = new QuickChatShortcutService(
     registrar,
-    (item) => item.sessionType === 'chat' && item.sessionId === conversation.id,
-    (item) => windows.show(item, conversation.title),
+    () => true, // 会话存在性由后端设置预检和触发时查询共同保证。
+    (item) => { void bridge!.desktopSettings.getShortcutTitle(item).then((title) => {
+      if (title && shortcut!.isCurrent(item)) windows!.show(item, title)
+    }).catch((error: unknown) => { void finish(1, error) }) },
   )
+  bridge = await startDesktopSmokeBackend({ directory, mainWindow: main, shortcuts: shortcut,
+    quickWindowKind: (sender) => isQuickChatWindowOwner(sender.id) })
+  await main.loadFile(resolve('dist/renderer/index.html'))
+  // 创建、绑定都走真实主页面 preload；不在父端建立第二套渠道/会话/设置仓储。
+  const conversation = await main.webContents.executeJavaScript(`(async () => {
+    const channel = await window.axon.channels.create({ name: '快捷验收渠道', provider: 'custom',
+      baseUrl: ${JSON.stringify(`http://127.0.0.1:${address.port}/v1`)}, apiKey: 'quick-smoke-key',
+      models: [{ id: 'quick-smoke-model', name: '快捷验收模型', enabled: true, source: 'manual' }] });
+    return window.axon.chat.createConversation({ title: '快捷验收会话', channelId: channel.id, modelId: 'quick-smoke-model' });
+  })()`) as ConversationMeta
   const accelerator = 'CommandOrControl+Shift+9'
   const binding: QuickChatShortcutBinding = {
     id: 'quick-smoke-binding',
@@ -144,7 +130,10 @@ void app.whenReady().then(async () => {
     sessionType: 'chat',
     sessionId: conversation.id,
   }
-  shortcut.prepare([binding]).commit()
+  await main.webContents.executeJavaScript(`window.axon.settings.update({ quickChatShortcuts: ${JSON.stringify([binding])} })`)
+  if ((await bridge.desktopSettings.readSettings()).quickChatShortcuts?.[0]?.sessionId !== conversation.id) {
+    throw new Error('快捷绑定未由后端持久化')
+  }
 
   const wait = (milliseconds: number): Promise<void> => new Promise((done) => setTimeout(done, milliseconds))
   const waitFor = async (check: () => boolean | Promise<boolean>, label: string, waitMs = 8_000): Promise<void> => {
@@ -202,7 +191,9 @@ void app.whenReady().then(async () => {
   await assert(quick, "getComputedStyle(document.querySelector('[data-quick-window-drag]')).getPropertyValue('-webkit-app-region') === 'drag'")
   if (quick.getBounds().x !== draggedBounds.x) throw new Error('快捷浮窗展开后丢失横向拖拽位置')
   await waitFor(async () => Boolean(await run(quick, "document.body.textContent.includes('快捷回复已完成')")), '浮窗显示模型回复', 10_000)
-  const saved = conversations.getMessages(conversation.id)
+  await waitFor(async () => Boolean(await run(quick, `window.axon.chat.getMessages(${JSON.stringify(conversation.id)})
+    .then(items => items.length === 2 && items[1]?.status === 'complete')`)), '浮窗终态消息落盘')
+  const saved = await run(quick, `window.axon.chat.getMessages(${JSON.stringify(conversation.id)})`) as ChatMessage[]
   if (saved.length !== 2 || saved[0]?.inputOrigin !== 'quick' || saved[1]?.status !== 'complete') {
     throw new Error('快捷消息来源或生成结果未正确持久化')
   }
@@ -243,32 +234,24 @@ void app.whenReady().then(async () => {
 
   // 主窗口重新读取同一 JSONL，必须看见快捷入口消息及其来源图标。
   quick.hide()
-  await mainWindow.loadFile(resolve('dist/renderer/index.html'))
-  await waitFor(async () => Boolean(await run(mainWindow, "[...document.querySelectorAll('button')].some(item => item.textContent.trim() === '快捷验收会话')")), '主窗口会话列表')
-  await run(mainWindow, `(() => {
+  main.webContents.reload()
+  await waitFor(async () => Boolean(await run(main, "[...document.querySelectorAll('button')].some(item => item.textContent.trim() === 'Chat')")), '主窗口重新加载')
+  await run(main, "[...document.querySelectorAll('button')].find(item => item.textContent.trim() === 'Chat').click()")
+  await waitFor(async () => Boolean(await run(main, "[...document.querySelectorAll('button')].some(item => item.textContent.trim() === '快捷验收会话')")), '主窗口会话列表')
+  await run(main, `(() => {
     const button = [...document.querySelectorAll('button')].find(item => item.textContent.trim() === '快捷验收会话');
     if (!button) throw new Error('找不到快捷验收会话');
     button.click();
   })()`)
-  await waitFor(async () => Boolean(await run(mainWindow, `(() => {
+  await waitFor(async () => Boolean(await run(main, `(() => {
     const origin = document.querySelector('[aria-label="快捷输入"]');
     return document.body.textContent.includes('快捷回复已完成')
       && !document.body.textContent.includes('正在加载 Chat')
       && origin?.getClientRects().length > 0;
   })()`)), '主窗口恢复并绘制快捷消息')
   await wait(100)
-  writeFileSync(join(directory, 'quick-main-history.png'), (await mainWindow.webContents.capturePage()).toPNG())
+  writeFileSync(join(directory, 'quick-main-history.png'), (await main.webContents.capturePage()).toPNG())
 
-  console.log(`快捷会话冒烟验证通过：绑定触发、两种状态拖拽定位、发送展开、取消重置、来源标记与主窗口历史共享。截图目录：${directory}`)
-  clearTimeout(timeout)
-  shortcut.dispose()
-  windows.dispose()
-  mainWindow.destroy()
-  server.closeAllConnections()
-  server.close()
-  app.exit(0)
-}).catch((error: unknown) => {
-  console.error(error)
-  clearTimeout(timeout)
-  app.exit(1)
-})
+  console.log(`独立后端快捷冒烟验证通过：绑定保存与触发、两种状态拖拽定位、发送展开、取消重置、来源标记与主窗口历史共享。截图目录：${directory}`)
+  await finish(0)
+}).catch((error: unknown) => finish(1, error))

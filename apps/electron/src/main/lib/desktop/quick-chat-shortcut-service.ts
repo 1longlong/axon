@@ -1,4 +1,4 @@
-import type { QuickChatShortcutBinding } from '../../../types'
+import type { QuickChatShortcutBinding } from '@axon/shared'
 
 export interface ShortcutRegistrar {
   register(accelerator: string, callback: () => void): boolean
@@ -78,6 +78,12 @@ export class QuickChatShortcutService {
         console.warn(`[快捷键] ${binding.accelerator} 恢复失败:`, error)
       }
     }
+  }
+
+  /** 异步会话查询返回后复核当前绑定；改绑、注销或退出不能唤起旧会话。 */
+  isCurrent(binding: QuickChatShortcutBinding): boolean {
+    const current = this.active.get(shortcutKey(binding.accelerator))
+    return !!current && current.id === binding.id && current.sessionType === binding.sessionType && current.sessionId === binding.sessionId
   }
 
   dispose(): void {

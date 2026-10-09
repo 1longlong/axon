@@ -1,6 +1,6 @@
 import { atom } from 'jotai'
-import { DEFAULT_USER_AVATAR, DEFAULT_USER_NAME } from '@/types/user-profile'
-import type { UserProfile } from '@/types/user-profile'
+import { DEFAULT_USER_AVATAR, DEFAULT_USER_NAME } from '@axon/shared'
+import type { UserProfile } from '@axon/shared'
 
 export const userProfileAtom = atom<UserProfile>({
   userName: DEFAULT_USER_NAME,

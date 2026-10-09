@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import { AlertCircle, Bot, CheckCircle2, ChevronRight, Circle, Clock3, Loader2, X } from 'lucide-react'
-import type { AgentDelegation, AgentDelegationStatus, SDKMessage, SDKToolUseBlock } from '@axon/shared'
+import type { AgentDelegation, AgentDelegationStatus, SDKToolUseBlock } from '@axon/shared'
 import { agentTaskStateAtom } from '@/atoms/agent-task-state'
 import { cn } from '@/lib/utils'
 import { indexAgentToolMessages } from '@/lib/agent-tool-messages'
@@ -22,28 +22,6 @@ function TaskStatusIcon({ status }: { status: AgentDelegationStatus }): React.Re
   if (status === 'failed') return <AlertCircle size={14} className="text-destructive" />
   if (status === 'blocked') return <Clock3 size={14} className="text-amber-500" />
   return <Circle size={14} className="text-muted-foreground" />
-}
-
-function messageId(message: SDKMessage, index: number): string {
-  const uuid = (message as { uuid?: unknown }).uuid
-  return typeof uuid === 'string' ? uuid : `${message.type}-${index}`
-}
-
-/** 已落盘消息为底，当前流中同 uuid 的完整/草稿消息覆盖它。 */
-function mergeMessages(persisted: readonly SDKMessage[], live: readonly SDKMessage[]): SDKMessage[] {
-  const merged = [...persisted]
-  const positions = new Map(merged.map((message, index) => [messageId(message, index), index]))
-  for (const message of live) {
-    const key = messageId(message, merged.length)
-    const position = positions.get(key)
-    if (position === undefined) {
-      positions.set(key, merged.length)
-      merged.push(message)
-    } else {
-      merged[position] = message
-    }
-  }
-  return merged
 }
 
 function durationText(task: AgentDelegation): string | null {
@@ -86,9 +64,7 @@ export function TaskProgressCard({ rootSessionId, toolUse }: { rootSessionId: st
 function TaskProgressOverlay({ rootSessionId, task, onClose }: { rootSessionId: string; task: AgentDelegation; onClose(): void }): React.ReactElement {
   const state = useAtomValue(agentTaskStateAtom)
   const controller = useAgentTaskController()
-  const persisted = state.messagesByTask[task.id] ?? []
-  const live = state.liveMessagesByTask[task.id] ?? []
-  const messages = React.useMemo(() => mergeMessages(persisted, live), [persisted, live])
+  const messages = state.messagesByTask[task.id] ?? []
   const toolMessageIndex = React.useMemo(() => indexAgentToolMessages(messages), [messages])
   const displayGroups = React.useMemo(() => groupAgentTurns(messages), [messages])
   const activeToolUseIds = React.useMemo(() => new Set(state.activeToolUseIdsByTask[task.id] ?? []), [state.activeToolUseIdsByTask, task.id])

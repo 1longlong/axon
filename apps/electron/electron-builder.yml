@@ -2,6 +2,9 @@ appId: com.axon.desktop
 productName: Axon
 
 asar: true
+asarUnpack:
+  - dist/app-server.mjs
+  - node_modules/**/*
 electronDist: node_modules/electron/dist
 
 directories:
@@ -10,6 +13,7 @@ directories:
 
 files:
   - dist/main.cjs
+  - dist/app-server.mjs
   - dist/preload.cjs
   - dist/renderer/**/*
   - package.json

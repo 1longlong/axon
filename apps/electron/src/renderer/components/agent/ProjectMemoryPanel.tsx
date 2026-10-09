@@ -3,6 +3,7 @@ import { Brain, FilePlus2, FileText, Loader2, RefreshCw, Save } from 'lucide-rea
 import { AGENT_MEMORY_INDEX_FILE } from '@axon/shared'
 import type { AgentMemorySummary } from '@axon/shared'
 import { useAgentController } from './AgentStateProvider'
+import { observeProjectWatch } from '@/lib/project-watch'
 
 /** 项目记忆编辑器：只消费 Agent 专用 IPC，文件选择和刷新都防止迟到响应覆盖当前草稿。 */
 export function ProjectMemoryPanel({ projectId, workspaceUpdatedAt }: {
@@ -23,6 +24,7 @@ export function ProjectMemoryPanel({ projectId, workspaceUpdatedAt }: {
   const [fileReloadVersion, setFileReloadVersion] = React.useState(0)
   const listVersion = React.useRef(0)
   const fileVersion = React.useRef(0)
+  const workspaceVersion = React.useRef(0)
   const dirtyRef = React.useRef(false)
   const savingRef = React.useRef(false)
   const ownWriteRef = React.useRef<{ relativePath: string; until: number } | null>(null)
@@ -67,49 +69,64 @@ export function ProjectMemoryPanel({ projectId, workspaceUpdatedAt }: {
   }, [controller, projectId])
 
   React.useEffect(() => {
+    workspaceVersion.current++
+    ownWriteRef.current = null
     setSelectedPath(null)
     setContent('')
     setSavedContent('')
     setChangeNotice(null)
     setWatchFailed(false)
-    void loadSummary({ confirmDiscard: false })
+    setLoading(true)
+    setSaving(false)
+    setFileLoading(false)
     return () => {
       listVersion.current += 1
       fileVersion.current += 1
+      workspaceVersion.current++
     }
   }, [loadSummary, projectId, workspaceUpdatedAt])
 
   /** 监听只驱动 UI 刷新；未保存草稿存在时改为提示，由用户决定何时丢弃。 */
   React.useEffect(() => {
-    let disposed = false
-    const unsubscribe = controller.onProjectMemoryChanged((event) => {
-      if (event.projectId !== projectId) return
-      const ownWrite = ownWriteRef.current
-      if (savingRef.current) return
-      const recentOwnWrite = ownWrite && Date.now() <= ownWrite.until
-      if (dirtyRef.current) {
-        setChangeNotice('conflict')
-        return
-      }
-      if (recentOwnWrite && (!event.relativePath || event.relativePath === ownWrite.relativePath)) {
-        // 自身原子写与外部变化可能同名或合批：省略提示但仍重读，不能漏掉后到内容。
-        ownWriteRef.current = null
+    return observeProjectWatch({
+      projectId, kind: 'memory',
+      watch: (id) => controller.watchProjectMemory(id),
+      unwatch: (target) => controller.unwatchProjectMemory(target),
+      onChanged: (callback) => controller.onProjectMemoryChanged(callback),
+      onClosed: (callback) => controller.onProjectWatchClosed(callback),
+      ready: () => { setWatchFailed(false); void loadSummary({ confirmDiscard: false }) },
+      changed: (event) => {
+        const ownWrite = ownWriteRef.current
+        if (savingRef.current) return
+        const recentOwnWrite = ownWrite && Date.now() <= ownWrite.until
+        if (dirtyRef.current) {
+          setChangeNotice('conflict')
+          return
+        }
+        if (recentOwnWrite && (!event.relativePath || event.relativePath === ownWrite.relativePath)) {
+          // 自身原子写与外部变化可能同名或合批：省略提示但仍重读，不能漏掉后到内容。
+          ownWriteRef.current = null
+          void loadSummary({ confirmDiscard: false, reloadSelected: true })
+          return
+        }
+        setChangeNotice('refreshed')
         void loadSummary({ confirmDiscard: false, reloadSelected: true })
-        return
-      }
-      setChangeNotice('refreshed')
-      void loadSummary({ confirmDiscard: false, reloadSelected: true })
+      },
+      closed: (event) => {
+        listVersion.current++; fileVersion.current++; workspaceVersion.current++
+        setFileLoading(false); setSaving(false)
+        setWatchFailed(event.reason !== 'project_changed')
+        if (event.reason === 'project_changed') {
+          ownWriteRef.current = null
+          setSummary(null); setSelectedPath(null); setContent(''); setSavedContent(''); setChangeNotice(null)
+          setLoading(true)
+        } else {
+          setLoading(false)
+          setError(event.reason === 'memory_disabled' ? '该项目已关闭记忆' : 'Agent 项目已删除')
+        }
+      },
+      failed: () => { setWatchFailed(true); void loadSummary({ confirmDiscard: false }) },
     })
-    void controller.watchProjectMemory(projectId).then(() => {
-      if (!disposed) setWatchFailed(false)
-    }).catch(() => {
-      if (!disposed) setWatchFailed(true)
-    })
-    return () => {
-      disposed = true
-      unsubscribe()
-      void controller.unwatchProjectMemory(projectId)
-    }
   }, [controller, loadSummary, projectId, workspaceUpdatedAt])
 
   React.useEffect(() => {
@@ -136,10 +153,12 @@ export function ProjectMemoryPanel({ projectId, workspaceUpdatedAt }: {
 
   const save = async (): Promise<void> => {
     if (!selectedPath || saving || !dirty) return
+    const version = workspaceVersion.current
     setSaving(true)
     setError(null)
     try {
       const file = await controller.writeProjectMemory(projectId, selectedPath, content)
+      if (workspaceVersion.current !== version) return
       ownWriteRef.current = { relativePath: file.relativePath, until: Date.now() + 1_000 }
       setContent(file.content)
       setSavedContent(file.content)
@@ -153,25 +172,28 @@ export function ProjectMemoryPanel({ projectId, workspaceUpdatedAt }: {
           : item),
       } : current)
     } catch {
-      setError('保存记忆文件失败')
+      if (workspaceVersion.current === version) setError('保存记忆文件失败')
     } finally {
-      setSaving(false)
+      if (workspaceVersion.current === version) setSaving(false)
     }
   }
 
   const createIndex = async (): Promise<void> => {
     if (saving) return
+    const version = workspaceVersion.current
     setSaving(true)
     setError(null)
     try {
       await controller.writeProjectMemory(projectId, AGENT_MEMORY_INDEX_FILE, '# MEMORY\n\n项目长期记忆索引。\n')
+      if (workspaceVersion.current !== version) return
       ownWriteRef.current = { relativePath: AGENT_MEMORY_INDEX_FILE, until: Date.now() + 1_000 }
       setSelectedPath(AGENT_MEMORY_INDEX_FILE)
-      setSummary(await controller.listProjectMemory(projectId))
+      const next = await controller.listProjectMemory(projectId)
+      if (workspaceVersion.current === version) setSummary(next)
     } catch {
-      setError('创建 MEMORY.md 失败')
+      if (workspaceVersion.current === version) setError('创建 MEMORY.md 失败')
     } finally {
-      setSaving(false)
+      if (workspaceVersion.current === version) setSaving(false)
     }
   }
 

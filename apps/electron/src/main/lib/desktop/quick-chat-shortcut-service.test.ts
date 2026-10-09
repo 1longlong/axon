@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { QuickChatShortcutBinding } from '../../../types'
+import type { QuickChatShortcutBinding } from '@axon/shared'
 import { QuickChatShortcutService, type ShortcutRegistrar } from './quick-chat-shortcut-service'
 
 class FakeRegistrar implements ShortcutRegistrar {
@@ -22,6 +22,20 @@ function binding(id: string, accelerator: string, sessionId = id): QuickChatShor
 }
 
 describe('全局快捷会话注册事务', () => {
+  test('异步查询后复核改绑和注销，规范化组合键不误判仍生效的绑定', () => {
+    const service = new QuickChatShortcutService(new FakeRegistrar(), () => true, () => {})
+    const original = binding('original', 'CommandOrControl+Shift+1')
+    service.prepare([original]).commit()
+    expect(service.isCurrent({ ...original, accelerator: ' commandorcontrol+shift+1 ' })).toBe(true)
+    const next = binding('next', original.accelerator)
+    service.prepare([next]).commit()
+    expect(service.isCurrent(original)).toBe(false)
+    expect(service.isCurrent({ ...next, sessionType: 'agent' })).toBe(false)
+    expect(service.isCurrent(next)).toBe(true)
+    service.dispose()
+    expect(service.isCurrent(next)).toBe(false)
+  })
+
   test('提交后触发当前绑定，改绑同一组合键无需重复注册', () => {
     const registrar = new FakeRegistrar()
     const triggered: string[] = []

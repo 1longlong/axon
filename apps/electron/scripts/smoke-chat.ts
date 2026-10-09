@@ -1,24 +1,12 @@
-/** 独立 Chat 冒烟入口：用本地 SSE 服务验证真实 Electron 全链路，数据只写临时目录。 */
-import { app, BrowserWindow, ipcMain } from 'electron'
-import { mkdtempSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
+/** 独立后端 Chat 冒烟：真实 SSE/摘要/附件/停止与后端重启，业务数据只由子进程修改。 */
+import { app, BrowserWindow } from 'electron'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { registerAttachmentIpcHandlers } from '../src/main/ipc/attachment-ipc-handlers'
-import { registerChannelIpcHandlers } from '../src/main/ipc/channel-ipc-handlers'
-import { registerChatIpcHandlers } from '../src/main/ipc/chat-ipc-handlers'
-import { AttachmentService } from '../src/main/lib/chat/attachment-service'
-import { ChannelManager } from '../src/main/lib/channel/channel-manager'
-import { createChannelCredentialCodec } from '../src/main/lib/channel/channel-credential-codec'
-import { ChatIpcController } from '../src/main/lib/chat/chat-ipc-handlers'
-import { ChatService } from '../src/main/lib/chat/chat-service'
-import { ConversationManager } from '../src/main/lib/chat/conversation-manager'
-import {
-  SETTINGS_IPC_CHANNELS,
-  USER_PROFILE_IPC_CHANNELS,
-  WINDOW_IPC_CHANNELS,
-} from '../src/types'
-import type { AppSettings } from '../src/types'
+import { startDesktopSmokeBackend } from '../test-support/desktop-smoke-backend'
+import type { DesktopSmokeBackend } from '../test-support/desktop-smoke-backend'
+import type { Channel, ChatMessage, ConversationMeta } from '@axon/shared'
 
 interface CapturedProviderRequest {
   url: string
@@ -29,10 +17,47 @@ interface CapturedProviderRequest {
 
 const directory = mkdtempSync(join(tmpdir(), 'axon-chat-smoke-'))
 app.setPath('userData', join(directory, 'electron'))
-const timeout = setTimeout(() => {
-  console.error('Chat 冒烟验证超时')
-  app.exit(1)
-}, 60000)
+app.on('window-all-closed', () => {})
+let bridge: DesktopSmokeBackend | undefined
+let win: BrowserWindow | undefined
+let server: ReturnType<typeof createServer> | undefined
+let finishing: Promise<void> | undefined
+const timeout = setTimeout(() => { void finish(1, 'Chat 冒烟验证超时') }, 90_000)
+
+/** 所有结果共用清理；页面先销毁，等待自有后端退出后才结束 Electron。 */
+function finish(code: number, error?: unknown): Promise<void> {
+  return finishing ??= (async () => {
+    clearTimeout(timeout)
+    if (error) {
+      console.error(error)
+      if (win && !win.isDestroyed()) console.error('Chat 冒烟页面诊断', await win.webContents.executeJavaScript(`({
+        text: document.body.textContent.slice(-1200),
+        buttons: [...document.querySelectorAll('button')].map(item => item.getAttribute('aria-label') || item.textContent.trim())
+      })`).catch(() => '页面不可读取'))
+    }
+    win?.destroy()
+    try { await bridge?.close() }
+    catch (cleanupError) { console.error('Chat 冒烟后端清理失败', cleanupError); code = 1 }
+    server?.closeAllConnections()
+    server?.close()
+    app.exit(code)
+  })()
+}
+
+/** 仅在启动 child 前生成中立历史夹具；不持有父端仓储，也不与后端同时写目录。 */
+function seedSummaryHistory(): ConversationMeta {
+  const conversation: ConversationMeta = { id: 'summary-smoke', title: '预置摘要会话', createdAt: 1, updatedAt: 12 }
+  const messages: ChatMessage[] = Array.from({ length: 12 }, (_, position) => {
+    const index = position + 1
+    return { id: `seed-${index}`, role: index % 2 === 1 ? 'user' : 'assistant',
+      content: [{ type: 'text', text: index <= 4 ? `旧对话第${index}条：${'甲'.repeat(20_000)}` : `普通消息${index}` }],
+      createdAt: index, status: 'complete' }
+  })
+  mkdirSync(join(directory, 'backend', 'conversations'), { recursive: true, mode: 0o700 })
+  writeFileSync(join(directory, 'backend', 'conversations.json'), JSON.stringify({ version: 1, conversations: [conversation] }), { mode: 0o600 })
+  writeFileSync(join(directory, 'backend', 'conversations', `${conversation.id}.jsonl`), messages.map((message) => JSON.stringify(message)).join('\n') + '\n', { mode: 0o600 })
+  return conversation
+}
 
 /** 给 UI 自动化保留可观察的分片间隔，同时保持供应商 SSE 帧格式真实。 */
 function sendCompletedStream(response: import('node:http').ServerResponse): void {
@@ -107,7 +132,7 @@ void app.whenReady().then(async () => {
     const first = messages[0] as { role?: string; content?: unknown } | undefined
     return first?.role === 'system' && typeof first.content === 'string' && first.content.startsWith('请把以下对话压缩')
   }
-  const server = createServer((request, response) => {
+  server = createServer((request, response) => {
     const bodyChunks: Buffer[] = []
     request.on('data', (chunk: Buffer) => bodyChunks.push(chunk))
     request.on('end', () => {
@@ -139,79 +164,14 @@ void app.whenReady().then(async () => {
       })}\n\n`)
     })
   })
-  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
+  const localServer = server
+  await new Promise<void>((done) => localServer.listen(0, '127.0.0.1', done))
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('本地 Chat 服务启动失败')
 
-  const channelManager = new ChannelManager({
-    configPath: join(directory, 'channels.json'),
-    credentialCodec: createChannelCredentialCodec(),
-  })
   const baseUrl = `http://127.0.0.1:${address.port}/v1`
-  const channel = channelManager.create({
-    name: '本地冒烟渠道',
-    provider: 'custom',
-    baseUrl,
-    apiKey: 'synthetic-chat-key',
-    models: [{ id: 'smoke-model', name: '冒烟模型', enabled: true, source: 'manual' }],
-  })
-  const conversationManager = new ConversationManager({
-    indexPath: join(directory, 'conversations.json'),
-    messagesDir: join(directory, 'messages'),
-  })
-  // 预置一个达到自动摘要阈值的大型会话：前 4 条各 2 万字符，供摘要请求压缩。
-  const conversation = conversationManager.create({
-    channelId: channel.id,
-    modelId: 'smoke-model',
-    title: '预置摘要会话',
-  })
-  for (let index = 1; index <= 12; index += 1) {
-    conversationManager.appendMessage(conversation.id, {
-      id: `seed-${index}`,
-      role: index % 2 === 1 ? 'user' : 'assistant',
-      content: [{ type: 'text', text: index <= 4 ? `旧对话第${index}条：${'甲'.repeat(20_000)}` : `普通消息${index}` }],
-      createdAt: index,
-      status: 'complete',
-    })
-  }
-  const chatService = new ChatService({
-    channelManager,
-    conversationManager,
-    userAgent: 'Axon/0.1.0-smoke',
-    readAttachmentData: (localPath) => {
-      try {
-        return attachmentService.readAsBase64(localPath)
-      } catch {
-        return undefined
-      }
-    },
-    // 冒烟用等价的文本直读替代完整解析器（PDF/DOCX 为 external 依赖，不在冒烟 bundle 内）。
-    extractDocumentText: async (attachment) => {
-      try {
-        const data = attachmentService.readAsBase64(attachment.localPath)
-        return Buffer.from(data, 'base64').toString('utf8')
-      } catch {
-        return undefined
-      }
-    },
-  })
-  const attachmentService = new AttachmentService({ attachmentsDir: join(directory, 'attachments') })
-  registerChannelIpcHandlers(channelManager)
-  registerAttachmentIpcHandlers(attachmentService)
-  registerChatIpcHandlers(new ChatIpcController({ conversations: conversationManager, chat: chatService, attachments: attachmentService }))
-
-  let settings: AppSettings = { themeMode: 'light' }
-  ipcMain.handle(SETTINGS_IPC_CHANNELS.GET, () => settings)
-  ipcMain.handle(SETTINGS_IPC_CHANNELS.UPDATE, (_event, updates: unknown) => {
-    if (updates && typeof updates === 'object' && !Array.isArray(updates)) {
-      settings = { ...settings, ...(updates as Partial<AppSettings>) }
-    }
-    return settings
-  })
-  ipcMain.handle(USER_PROFILE_IPC_CHANNELS.GET, () => ({ userName: '测试用户', avatar: '🧪' }))
-  ipcMain.handle(WINDOW_IPC_CHANNELS.IS_MAXIMIZED, () => false)
-
-  const win = new BrowserWindow({
+  const conversation = seedSummaryHistory()
+  win = new BrowserWindow({
     width: 1200,
     height: 820,
     show: false,
@@ -222,9 +182,19 @@ void app.whenReady().then(async () => {
       backgroundThrottling: false,
     },
   })
+  const window = win
+  bridge = await startDesktopSmokeBackend({ directory, mainWindow: window })
+  await window.loadFile(resolve('dist/renderer/index.html'))
+  const channel = await window.webContents.executeJavaScript(`window.axon.channels.create({
+    name: '本地冒烟渠道', provider: 'custom', baseUrl: ${JSON.stringify(baseUrl)}, apiKey: 'synthetic-chat-key',
+    models: [{ id: 'smoke-model', name: '冒烟模型', enabled: true, source: 'manual' }]
+  })`) as Channel
+  await window.webContents.executeJavaScript(`window.axon.chat.updateConversation(${JSON.stringify(conversation.id)}, {
+    channelId: ${JSON.stringify(channel.id)}, modelId: 'smoke-model'
+  })`)
   const run = async (script: string): Promise<unknown> => {
     try {
-      return await win.webContents.executeJavaScript(script)
+      return await window.webContents.executeJavaScript(script)
     } catch (error) {
       const detail = error instanceof Error ? error.message : '未知错误'
       throw new Error(`页面脚本执行失败：${script.slice(0, 120)}；${detail}`)
@@ -261,8 +231,10 @@ void app.whenReady().then(async () => {
     if (!document.execCommand('insertText', false, ${JSON.stringify(value)})) throw new Error('输入失败');
   })()`)
 
-  // 真实页面打开预置的大型会话并修改元数据，再从 TipTap 发起第一轮生成。
-  await win.loadFile(resolve('dist/renderer/index.html'))
+  // 重新挂载页面读取已保存选择；夹具不修改 React atom 或伪造渠道通知。
+  await window.loadFile(resolve('dist/renderer/index.html'))
+  await waitFor("[...document.querySelectorAll('button')].some(item => item.textContent.trim() === 'Chat')")
+  await clickText('Chat')
   await waitFor("[...document.querySelectorAll('button')].some(item => item.textContent.trim() === '新建对话' && !item.disabled)")
   await assert("!document.querySelector('[role=\"tablist\"]')")
   await waitFor("[...document.querySelectorAll('button')].some(item => item.textContent.trim() === '预置摘要会话')")
@@ -368,18 +340,24 @@ void app.whenReady().then(async () => {
   // 用户消息的复制文本应列出附件名与大小；种子会话中它在助手回复之前（倒数第二个）。
   await run("[...document.querySelectorAll('button[aria-label=\"复制消息\"]')].at(-2).click()")
   await waitFor("window.__axonCopiedText.includes('第一轮请求') && window.__axonCopiedText.includes('附件：冒烟图片.png') && window.__axonCopiedText.includes('附件：冒烟说明.txt')")
-  writeFileSync(join(directory, 'chat-complete.png'), (await win.webContents.capturePage()).toPNG())
+  writeFileSync(join(directory, 'chat-complete.png'), (await window.webContents.capturePage()).toPNG())
 
-  const savedConversation = conversationManager.list()[0]
+  const savedConversation = await run(`window.axon.chat.getConversation(${JSON.stringify(conversation.id)})`) as ConversationMeta
   if (!savedConversation || savedConversation.channelId !== channel.id || savedConversation.title !== '冒烟对话') {
     throw new Error('会话元数据未正确落盘')
   }
   if (savedConversation.contextSummary?.coveredMessageIds.join(',') !== 'seed-1,seed-2,seed-3,seed-4') {
     throw new Error('摘要元数据未正确落盘')
   }
-  const completedMessages = conversationManager.getMessages(savedConversation.id)
+  const completedMessages = await run(`window.axon.chat.getMessages(${JSON.stringify(savedConversation.id)})`) as ChatMessage[]
   if (completedMessages.length !== 14 || completedMessages[13]?.status !== 'complete') {
     throw new Error('第一轮完整消息未正确落盘')
+  }
+  for (let index = 0; index < 4; index += 1) {
+    const block = completedMessages[index]?.content[0]
+    if (block?.type !== 'text' || block.text !== `旧对话第${index + 1}条：${'甲'.repeat(20_000)}`) {
+      throw new Error('摘要改写或删除了应用层旧消息原文')
+    }
   }
   if (completedMessages[13]?.usage?.totalTokens !== 24) throw new Error('Provider 用量未正确落盘')
   // 附件元数据随用户消息落盘，二进制进入会话附件目录，UI 展示附件芯片。
@@ -388,7 +366,7 @@ void app.whenReady().then(async () => {
   if (!userAttachments || userAttachments.length !== 2 || userAttachments[0]?.filename !== '冒烟图片.png' || userAttachments[1]?.filename !== '冒烟说明.txt') {
     throw new Error('附件元数据未随用户消息落盘')
   }
-  const conversationAttachmentDir = join(directory, 'attachments', conversation.id)
+  const conversationAttachmentDir = join(directory, 'backend', 'attachments', conversation.id)
   const attachmentFiles = existsSync(conversationAttachmentDir) ? readdirSync(conversationAttachmentDir) : []
   if (attachmentFiles.length !== 2) {
     throw new Error('附件二进制未按会话目录落盘')
@@ -399,9 +377,15 @@ void app.whenReady().then(async () => {
     throw new Error('摘要文本污染了消息历史')
   }
 
-  // 重载 renderer 后只依赖 settings + JSONL 恢复，再发第二轮并主动停止。
-  await new Promise((done) => setTimeout(done, 260))
-  win.webContents.reload()
+  // 等待真实标签补丁，再重启后端；摘要与原文都只能从磁盘恢复，不复用旧内存。
+  await waitFor(`window.axon.settings.get().then(settings => settings.tabState?.activeTabId === ${JSON.stringify(conversation.id)})`)
+  const previousPid = bridge.backend.pid
+  // 旧页面仍有防抖请求；先卸载它，再撤代理，不能制造不存在于正式退出链的 IPC 空窗。
+  await window.loadURL('about:blank')
+  await bridge.close()
+  bridge = await startDesktopSmokeBackend({ directory, mainWindow: window })
+  if (bridge.backend.pid === previousPid) throw new Error('Chat 恢复未更换实际后端进程')
+  await window.loadFile(resolve('dist/renderer/index.html'))
   await waitFor("document.body.textContent.includes('流式回答') && !!document.querySelector('.ProseMirror[contenteditable=true]')", 10000)
   await typeEditor('第二轮停止请求')
   await clickAria('发送消息')
@@ -410,7 +394,7 @@ void app.whenReady().then(async () => {
   await waitFor("document.body.textContent.includes('生成已停止') && !document.body.textContent.includes('生成中') && ![...document.querySelectorAll('button')].some(item => item.textContent.trim() === '停止') && !!document.querySelector('.ProseMirror[contenteditable=true]')", 10000)
   await assert("document.querySelector('.ProseMirror').textContent === ''")
   await new Promise((done) => setTimeout(done, 100))
-  writeFileSync(join(directory, 'chat-stopped.png'), (await win.webContents.capturePage()).toPNG())
+  writeFileSync(join(directory, 'chat-stopped.png'), (await window.webContents.capturePage()).toPNG())
 
   const second = generationRequests()[1]
   const secondMessages = second?.body.messages
@@ -425,19 +409,11 @@ void app.whenReady().then(async () => {
   if (roles !== 'user,assistant,user,assistant,user,assistant,user,assistant,user,assistant,user') {
     throw new Error(`第二轮角色顺序不正确：${roles}`)
   }
-  const persisted = conversationManager.getMessages(savedConversation.id)
+  const persisted = await run(`window.axon.chat.getMessages(${JSON.stringify(savedConversation.id)})`) as ChatMessage[]
   if (persisted.length !== 16 || persisted[15]?.status !== 'stopped') {
     throw new Error('停止后的助手终态未正确写入 JSONL')
   }
 
-  console.log(`Chat 冒烟验证通过：纯文本输入、真实 IPC/Provider SSE、自动摘要压缩、多轮历史、GFM/Shiki、复制、停止与重载恢复。截图目录：${directory}`)
-  clearTimeout(timeout)
-  win.destroy()
-  server.closeAllConnections()
-  server.close()
-  app.exit(0)
-}).catch((error: unknown) => {
-  console.error(error)
-  clearTimeout(timeout)
-  app.exit(1)
-})
+  console.log(`独立后端 Chat 冒烟验证通过：真实 IPC/SSE、自动摘要与原文保留、附件解析、多轮历史、GFM/Shiki、复制、停止与后端重启恢复。截图目录：${directory}`)
+  await finish(0)
+}).catch((error: unknown) => finish(1, error))

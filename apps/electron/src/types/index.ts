@@ -4,7 +4,5 @@
  * 仅在 Electron 进程间使用的类型定义（主进程 / preload / 渲染进程）。
  */
 
-export * from './settings'
 export * from './window'
-export * from './user-profile'
 export * from './desktop'

@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { useAtom } from 'jotai'
 import { Check, Loader2 } from 'lucide-react'
-import { MAX_USER_AVATAR_LENGTH, MAX_USER_NAME_LENGTH } from '@/types/user-profile'
+import { MAX_USER_AVATAR_LENGTH, MAX_USER_NAME_LENGTH } from '@axon/shared'
 import { userProfileAtom } from '@/atoms/user-profile'
 import { cn } from '@/lib/utils'
 
@@ -14,10 +14,14 @@ export function UserProfileSettings(): React.ReactElement {
   const [avatar, setAvatar] = React.useState(profile.avatar)
   const [isSaving, setIsSaving] = React.useState(false)
   const [message, setMessage] = React.useState<string | null>(null)
+  const previousProfile = React.useRef(profile)
 
   React.useEffect(() => {
-    setUserName(profile.userName)
-    setAvatar(profile.avatar)
+    // 共享资料变化只更新尚未编辑的字段，不能抹掉本窗口输入草稿。
+    const previous = previousProfile.current
+    setUserName((draft) => draft === previous.userName ? profile.userName : draft)
+    setAvatar((draft) => draft === previous.avatar ? profile.avatar : draft)
+    previousProfile.current = profile
   }, [profile])
 
   const isDirty = userName.trim() !== profile.userName || avatar.trim() !== profile.avatar
@@ -29,7 +33,7 @@ export function UserProfileSettings(): React.ReactElement {
     setMessage(null)
     try {
       const updated = await window.axon.userProfile.update({ userName, avatar })
-      setProfile(updated)
+      setProfile((current) => current === profile ? updated : current)
       setMessage('用户资料已保存')
     } catch (error: unknown) {
       setMessage(`保存失败：${error instanceof Error ? error.message : String(error)}`)

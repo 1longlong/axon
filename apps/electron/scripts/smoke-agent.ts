@@ -1,266 +1,59 @@
-/** Agent Electron 冒烟入口：验证真实 UI 正常发送、流式展示与 JSONL 恢复。 */
-import { app, BrowserWindow, ipcMain } from 'electron'
+/** Agent 独立后端桌面冒烟：真实固定桥/工厂/存储，模型事件只在测试子进程模拟。 */
+import { app, BrowserWindow } from 'electron'
 import { execFileSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
-import { registerAgentIpcHandlers } from '../src/main/ipc/agent-ipc-handlers'
-import { registerAgentMemoryIpcHandlers } from '../src/main/ipc/agent-memory-ipc-handlers'
-import { registerAgentProjectIpcHandlers } from '../src/main/ipc/agent-project-ipc-handlers'
-import { registerAgentTaskIpcHandlers } from '../src/main/ipc/agent-task-ipc-handlers'
-import { registerChannelIpcHandlers } from '../src/main/ipc/channel-ipc-handlers'
-import { registerMcpProjectIpcHandlers } from '../src/main/ipc/mcp-project-ipc-handlers'
-import { AgentEventBus } from '../src/main/lib/agent/agent-event-bus'
-import { AgentIpcController } from '../src/main/lib/agent/agent-ipc-handlers'
-import { AgentPermissionService } from '../src/main/lib/agent/agent-permission-service'
-import { AgentService } from '../src/main/lib/agent/agent-service'
-import { AgentSessionManager } from '../src/main/lib/agent/agent-session-manager'
-import { AgentDelegationManager } from '../src/main/lib/collaboration/agent-delegation-manager'
-import { AgentCollaborationService } from '../src/main/lib/collaboration/agent-collaboration-service'
-import {
-  buildAgentCollaborationSystemPrompt,
-  buildSubagentSystemPrompt,
-  createAgentCollaborationTools,
-} from '../src/main/lib/collaboration/agent-collaboration-tools'
-import { AgentTaskIpcController } from '../src/main/lib/collaboration/agent-task-ipc-handlers'
-import { AgentProjectManager } from '../src/main/lib/project/agent-project-manager'
-import { AgentProjectIpcController } from '../src/main/lib/project/agent-project-ipc-handlers'
-import { WorkspaceWatcher } from '../src/main/lib/project/workspace-watcher'
-import { AgentMemoryWatcher } from '../src/main/lib/memory/agent-memory-watcher'
-import { AgentMemoryService } from '../src/main/lib/memory/agent-memory-service'
-import { AgentMemoryIpcController } from '../src/main/lib/memory/agent-memory-ipc-handlers'
-import { createAgentMemoryTools, resolveAgentMemoryContext } from '../src/main/lib/memory/agent-memory-tools'
-import { ChannelManager } from '../src/main/lib/channel/channel-manager'
-import { createChannelCredentialCodec } from '../src/main/lib/channel/channel-credential-codec'
-import { resolveProjectInstructions } from '../src/main/lib/project/project-instruction-resolver'
-import { discoverAgentSkills } from '../src/main/lib/project/project-skill-discovery'
-import { McpProjectConfigManager } from '../src/main/lib/mcp/mcp-project-config-manager'
-import { McpProjectIpcController } from '../src/main/lib/mcp/mcp-project-ipc-handlers'
-import { CHAT_IPC_CHANNELS } from '@axon/shared'
-import type { AgentProviderAdapter, AgentQueryInput, AgentStreamPayload } from '@axon/shared'
-import { SETTINGS_IPC_CHANNELS, USER_PROFILE_IPC_CHANNELS, WINDOW_IPC_CHANNELS } from '../src/types'
-import type { AppSettings } from '../src/types'
+import type { AgentSessionMeta, AgentProject, Channel, SDKMessage, AgentDelegation, McpProjectConfig } from '@axon/shared'
+import type { JsonRpcPeer } from '@axon/app-server'
+import { startDesktopSmokeBackend } from '../test-support/desktop-smoke-backend'
+import type { DesktopSmokeBackend } from '../test-support/desktop-smoke-backend'
 import { setMainWindow } from '../src/main/lib/desktop/main-window-store'
-import { assertZimaConnection, ZimaAgentAdapter } from '../src/main/lib/adapters/zima-agent-adapter'
 
+interface QueryReport {
+  model: string | null
+  thinkingLevel: string | null
+  cwd: string
+  credentialMatched: boolean
+  toolNames: string[]
+  projectInstructionIncluded: boolean
+  memoryIncluded: boolean
+}
 const directory = mkdtempSync(join(tmpdir(), 'axon-agent-smoke-'))
 app.setPath('userData', join(directory, 'electron'))
-const timeout = setTimeout(() => {
-  console.error('Agent 冒烟验证超时')
-  app.exit(1)
-}, process.env.AXON_ZIMA_PYTHON ? 60_000 : 30_000)
+app.on('window-all-closed', () => {})
+let bridge: DesktopSmokeBackend | undefined, win: BrowserWindow | undefined
+let modelServer: ReturnType<typeof createServer> | undefined
+let testPeer: JsonRpcPeer | undefined
+let finishing: Promise<void> | undefined
+const timeout = setTimeout(() => { void finish(1, 'Agent 冒烟验证超时') }, 120_000)
 
-let capturedQuery: AgentQueryInput | undefined
-let resumeReadingCheck: (() => void) | undefined
-
-/** 分段暂停输出，供真实 renderer 验证查看历史与恢复底部跟随的边界。 */
-function waitForReadingCheck(): Promise<void> {
-  return new Promise((resolve) => { resumeReadingCheck = resolve })
-}
-
-/** 用中立事件模拟 runtime；分片间隔让 renderer 的运行中状态可被真实观察。 */
-const adapter: AgentProviderAdapter = {
-  async *query(input: AgentQueryInput): AsyncIterable<AgentStreamPayload> {
-    if (input.prompt === '验证消息阅读体验') {
-      const history = Array.from({ length: 60 }, (_, index) => `阅读验证段落 ${index + 1}：保留用户正在查看的位置。`).join('\n\n')
-      const firstUpdate = '\n\n阅读验证新增输出一'
-      const secondUpdate = '\n\n阅读验证新增输出二'
-      yield { kind: 'sdk_delta', delta: { uuid: 'reading-check', deltas: [{ type: 'text_delta', contentIndex: 0, delta: history }] } }
-      await waitForReadingCheck()
-      yield { kind: 'sdk_delta', delta: { uuid: 'reading-check', deltas: [{ type: 'text_delta', contentIndex: 0, delta: firstUpdate }] } }
-      await waitForReadingCheck()
-      yield { kind: 'sdk_delta', delta: { uuid: 'reading-check', deltas: [{ type: 'text_delta', contentIndex: 0, delta: secondUpdate }] } }
-      yield {
-        kind: 'sdk_message',
-        message: { type: 'assistant', uuid: 'reading-check', parent_tool_use_id: null, message: { content: [
-          { type: 'text', text: history + firstUpdate + secondUpdate },
-          { type: 'tool_use', id: 'reading-long-tool', name: 'Read', input: { path: 'reading-check.txt' } },
-        ] } },
-      }
-      yield {
-        kind: 'sdk_message',
-        message: { type: 'user', uuid: 'reading-tool-result', parent_tool_use_id: null, message: { content: [
-          { type: 'tool_result', tool_use_id: 'reading-long-tool', content: history },
-        ] } },
-      }
-      yield { kind: 'sdk_message', message: { type: 'result', subtype: 'success', terminal_reason: 'completed' } }
-      return
-    }
-    if (input.systemPrompt?.includes('## 子 Agent 角色')) {
-      yield {
-        kind: 'sdk_message',
-        message: { type: 'system', subtype: 'init', model: input.model, context_window_tokens: 200_000 },
-      }
-      yield {
-        kind: 'sdk_delta',
-        delta: { uuid: 'child-assistant-smoke', deltas: [{ type: 'text_delta', contentIndex: 0, delta: '子 Agent 正在检查' }] },
-      }
-      await new Promise((done) => setTimeout(done, 120))
-      yield {
-        kind: 'sdk_message',
-        message: {
-          type: 'assistant',
-          message: { content: [{ type: 'text', text: '子 Agent 已完成检查' }] },
-          parent_tool_use_id: null,
-          uuid: 'child-assistant-smoke',
-        },
-      }
-      yield {
-        kind: 'sdk_message',
-        message: {
-          type: 'result', subtype: 'success', usage: { input_tokens: 2, output_tokens: 2 },
-          terminal_reason: 'completed',
-        },
-      }
-      return
-    }
-
-    capturedQuery = input
-    input.onRuntimeSession?.('runtime-smoke', join(directory, 'runtime-sessions', 'runtime-smoke.jsonl'))
-    yield {
-      kind: 'sdk_message',
-      message: { type: 'system', subtype: 'init', model: input.model, context_window_tokens: 200_000 },
-    }
-    yield {
-      kind: 'sdk_delta',
-      delta: { uuid: 'assistant-smoke', deltas: [{ type: 'text_delta', contentIndex: 0, delta: '正在处理' }] },
-    }
-    await new Promise((done) => setTimeout(done, 120))
-    const sandboxPermission = await input.canUseTool?.(
-      'Bash',
-      { command: 'curl https://example.com' },
-      {
-        toolUseId: 'sandbox-network-smoke',
-        toolExecution: { kind: 'sandbox', mode: input.executionPolicy.sandboxMode },
-        executionPolicy: input.executionPolicy,
-        sandboxEscalation: {
-          reason: 'networkAccess', permission: { type: 'network' },
-          message: '命令的网络访问被基础沙箱拒绝；命令可能已产生部分本地副作用',
-        },
-      },
-    )
-    if (sandboxPermission?.behavior !== 'allow'
-      || sandboxPermission.sandboxGrants?.[0]?.permission.type !== 'network') {
-      throw new Error('沙箱网络升级未返回精确 Grant')
-    }
-    const agentTool = input.customTools?.find((tool) => tool.name === 'Agent')
-    if (!agentTool) throw new Error('Agent 协作工具未注入主会话')
-    yield {
-      kind: 'sdk_message',
-      message: {
-        type: 'assistant',
-        message: {
-          content: [{
-            type: 'tool_use', id: 'agent-task-smoke', name: 'Agent',
-            input: {
-              description: '检查子流程',
-              prompt: '检查当前项目并返回简洁结论。',
-              subagent_type: 'explore',
-              run_in_background: false,
-            },
-          }],
-        },
-        parent_tool_use_id: null,
-        uuid: 'agent-tool-call-smoke',
-      },
-    }
-    const agentToolResult = await agentTool.execute(
-      {
-        description: '检查子流程',
-        prompt: '检查当前项目并返回简洁结论。',
-        subagent_type: 'explore',
-        run_in_background: false,
-      },
-      { toolUseId: 'agent-task-smoke', signal: input.abortSignal },
-    )
-    yield {
-      kind: 'sdk_message',
-      message: {
-        type: 'user',
-        message: {
-          content: [{
-            type: 'tool_result',
-            tool_use_id: 'agent-task-smoke',
-            content: typeof agentToolResult.content === 'string'
-              ? agentToolResult.content
-              : JSON.stringify(agentToolResult.content),
-            ...(agentToolResult.isError ? { is_error: true } : {}),
-          }],
-        },
-        parent_tool_use_id: null,
-        uuid: 'agent-tool-result-smoke',
-      },
-    }
-    yield {
-      kind: 'sdk_message',
-      message: {
-        type: 'assistant',
-        message: {
-          content: [
-            { type: 'thinking', thinking: '检查工具调用展示。' },
-            { type: 'text', text: 'Agent 正常回答' },
-            { type: 'tool_use', id: 'bash-smoke', name: 'Bash', input: { command: 'bun test' } },
-            { type: 'tool_use', id: 'write-smoke', name: 'write', input: { file_path: 'agent-generated.txt' } },
-          ],
-          usage: {
-            input_tokens: 4_000,
-            output_tokens: 500,
-            cache_read_input_tokens: 300,
-            cache_creation_input_tokens: 200,
-          },
-        },
-        parent_tool_use_id: null,
-        session_id: 'runtime-smoke',
-        uuid: 'assistant-smoke',
-      },
-    }
-    for (let index = 0; index < 3; index += 1) {
-      yield {
-        kind: 'sdk_message',
-        message: {
-          type: 'tool_progress', tool_use_id: 'bash-smoke', tool_name: 'Bash',
-          parent_tool_use_id: null,
-        },
+/** 页面先销毁，后撤固定入口并等待自有后端退出；不影响正式实例或测试目录外的数据。 */
+function finish(code: number, error?: unknown): Promise<void> {
+  return finishing ??= (async () => {
+    clearTimeout(timeout)
+    if (error) {
+      console.error(error)
+      if (win && !win.isDestroyed()) {
+        console.error('Agent 冒烟页面诊断', await win.webContents.executeJavaScript('document.body.textContent.slice(-1400)').catch(() => '页面不可读'))
+        console.error('Agent 冒烟对话框诊断', await win.webContents.executeJavaScript("[...document.querySelectorAll('[role=dialog]')].map(item => ({label: item.getAttribute('aria-label'), text: item.textContent}))").catch(() => '对话框不可读'))
+        try { writeFileSync(join(directory, 'agent-failed.png'), (await win.webContents.capturePage()).toPNG()) }
+        catch { console.error('Agent 冒烟失败截图不可用，继续清理') }
       }
     }
-    await new Promise((done) => setTimeout(done, 350))
-    writeFileSync(join(input.cwd, 'agent-generated.txt'), 'Agent generated file\n')
-    yield {
-      kind: 'sdk_message',
-      message: {
-        type: 'user',
-        message: { content: [
-          { type: 'tool_result', tool_use_id: 'bash-smoke', content: '测试通过' },
-          { type: 'tool_result', tool_use_id: 'write-smoke', content: '写入成功' },
-        ] },
-        parent_tool_use_id: null,
-        session_id: 'runtime-smoke',
-        uuid: 'tool-result-smoke',
-      },
-    }
-    yield {
-      kind: 'sdk_message',
-      message: {
-        type: 'result', subtype: 'success', usage: { input_tokens: 4, output_tokens: 4 },
-        terminal_reason: 'completed', session_id: 'runtime-smoke',
-        skill_activations: [{
-          name: 'review-code',
-          directoryKind: 'axon',
-          relativeInstructionPath: '.axon/skills/review-code/SKILL.md',
-          sources: ['skill_read'],
-        }],
-      },
-    }
-  },
-  abort(): void {},
-  dispose(): void {},
+    win?.destroy()
+    try { await bridge?.close() } catch (cleanupError) { console.error('Agent 冒烟清理失败', cleanupError); code = 1 }
+    modelServer?.closeAllConnections()
+    modelServer?.close()
+    app.exit(code)
+  })()
 }
 
 void app.whenReady().then(async () => {
   // Zima 冒烟只连接本机临时模型端点，不使用开发配置中的真实渠道或密钥。
   const zimaPython = process.env.AXON_ZIMA_PYTHON
-  const modelServer = zimaPython ? createServer((request, response) => {
+  modelServer = zimaPython ? createServer((request, response) => {
     const chunks: Buffer[] = []
     request.on('data', (chunk: Buffer) => chunks.push(chunk))
     request.on('end', () => {
@@ -277,11 +70,11 @@ void app.whenReady().then(async () => {
       response.end(`${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('')}data: [DONE]\n\n`)
     })
   }) : undefined
-  if (modelServer) await new Promise<void>((resolveListen) => modelServer.listen(0, '127.0.0.1', resolveListen))
+  const server = modelServer
+  if (server) await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', resolveListen))
   const modelAddress = modelServer?.address()
   const modelBaseUrl = modelAddress && typeof modelAddress !== 'string'
     ? `http://127.0.0.1:${modelAddress.port}/v1` : 'http://127.0.0.1:1/v1'
-  const zimaAdapter = zimaPython ? new ZimaAgentAdapter(zimaPython, app.getVersion()) : undefined
   writeFileSync(join(directory, 'workspace-tree-marker.txt'), 'workspace tree smoke')
   writeFileSync(join(directory, 'AGENTS.md'), '# 项目指令\n\n回答前先检查工作区。\n')
   mkdirSync(join(directory, '.axon', 'skills', 'review-code'), { recursive: true })
@@ -294,120 +87,7 @@ void app.whenReady().then(async () => {
     '# Review Code',
   ].join('\n'))
   execFileSync('git', ['init', '--quiet'], { cwd: directory })
-  const sessions = new AgentSessionManager({
-    indexPath: join(directory, 'agent-sessions.json'),
-    sessionsDir: join(directory, 'sessions'),
-  })
-  const channels = new ChannelManager({
-    configPath: join(directory, 'channels.json'),
-    credentialCodec: createChannelCredentialCodec(),
-  })
-  const projects = new AgentProjectManager({
-    indexPath: join(directory, 'agent-projects.json'),
-    projectsDir: join(directory, 'agent-projects'),
-  })
-  const smokeProject = projects.create({ name: 'Agent 冒烟项目', workspace: { kind: 'managed' } })
-  const mcpConfigs = new McpProjectConfigManager({
-    credentialCodec: createChannelCredentialCodec(),
-    resolveProjectDataDir: (projectId) => projects.resolveProjectDataDir(projectId),
-  })
-  const memory = new AgentMemoryService({ projects })
-  const channel = channels.create({
-    name: 'Agent 本地测试渠道',
-    provider: 'custom',
-    baseUrl: modelBaseUrl,
-    apiKey: 'synthetic-agent-key',
-    models: [{ id: 'gpt-5.6-smoke', name: 'Agent 冒烟模型', enabled: true, source: 'manual' }],
-  })
-  const events = new AgentEventBus()
-  const permissions = new AgentPermissionService()
-  const delegations = new AgentDelegationManager({ sessionsDir: join(directory, 'sessions') })
-  let collaboration: AgentCollaborationService
-  const agent = new AgentService({
-    adapter,
-    ...(zimaAdapter ? {
-      resolveAdapter: (runtimeId: string) => runtimeId === 'zima' ? zimaAdapter : adapter,
-      validateRuntimeSession: (session: { runtimeId: string; channelId?: string }) => {
-        if (session.runtimeId === 'zima' && session.channelId) assertZimaConnection(channels.resolve(session.channelId))
-      },
-    } : {}),
-    channelManager: channels,
-    sessionManager: sessions,
-    eventBus: events,
-    runtimeConfigDir: join(directory, 'runtime-config'),
-    runtimeSessionDir: join(directory, 'runtime-sessions'),
-    resolveProjectCwd: (projectId) => projects.resolveProjectCwd(projectId),
-    resolveProjectInstructions: (projectRoot) => resolveProjectInstructions({ projectRoot }),
-    discoverAgentSkills: (projectRoot) => discoverAgentSkills({ projectRoot }),
-    getProjectMemoryContext: (projectId, previous) => {
-      if (!projects.get(projectId)?.memoryEnabled) return undefined
-      return resolveAgentMemoryContext(projectId, memory, previous)
-    },
-    getSystemPrompt: (session) => session.subagentType
-      ? buildSubagentSystemPrompt('', session.subagentType)
-      : buildAgentCollaborationSystemPrompt(''),
-    getCustomTools: async ({ sessionId, projectId, runSignal }) => [
-      ...(sessions.get(sessionId)?.parentSessionId
-        ? []
-        : createAgentCollaborationTools({ sessionId, runSignal, collaboration })),
-      ...(projects.get(projectId)?.memoryEnabled
-        ? createAgentMemoryTools({ projectId, memory })
-        : []),
-    ],
-    createCanUseTool: (sessionId, runStartedAt, runSignal) => (
-      permissions.createCanUseTool(sessionId, runStartedAt, runSignal)
-    ),
-  })
-  collaboration = new AgentCollaborationService({
-    sessions,
-    delegations,
-    agent,
-    resolveProjectCwd: (projectId) => projects.resolveProjectCwd(projectId),
-  })
-  registerAgentIpcHandlers(
-    new AgentIpcController({ sessions, agent, events, permissions, ...(zimaAdapter ? {
-      validateCreate: (input) => {
-        if (input.runtimeId === 'zima' && input.channelId) assertZimaConnection(channels.resolve(input.channelId))
-      },
-    } : {}) }),
-    { resolveProjectCwd: (projectId) => projects.resolveProjectCwd(projectId), channelManager: channels },
-  )
-  registerAgentTaskIpcHandlers(new AgentTaskIpcController({ sessions, tasks: delegations, events }))
-  registerAgentProjectIpcHandlers(
-    new AgentProjectIpcController({ projects, sessions, watcher: new WorkspaceWatcher() }),
-    {
-      pickLocalWorkspace: async () => ({
-        canceled: false,
-        path: directory,
-        suggestedName: 'Agent 本地项目',
-      }),
-    },
-  )
-  registerMcpProjectIpcHandlers(new McpProjectIpcController({
-    configs: mcpConfigs,
-    tools: { disposeProject: () => undefined },
-    projects,
-  }))
-  registerAgentMemoryIpcHandlers(new AgentMemoryIpcController({
-    memory,
-    projects,
-    watcher: new AgentMemoryWatcher(),
-  }))
-  registerChannelIpcHandlers(channels)
-  // 完整 renderer 会初始化共享状态；为本冒烟补齐最小非 Agent handler，避免噪音干扰诊断。
-  ipcMain.handle(CHAT_IPC_CHANNELS.LIST_CONVERSATIONS, () => [])
-  let settings: AppSettings = { themeMode: 'light' }
-  ipcMain.handle(SETTINGS_IPC_CHANNELS.GET, () => settings)
-  ipcMain.handle(SETTINGS_IPC_CHANNELS.UPDATE, (_event, value: unknown) => {
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      settings = { ...settings, ...(value as Partial<AppSettings>) }
-    }
-    return settings
-  })
-  ipcMain.handle(USER_PROFILE_IPC_CHANNELS.GET, () => ({ userName: '测试用户', avatar: '🧪' }))
-  ipcMain.handle(WINDOW_IPC_CHANNELS.IS_MAXIMIZED, () => false)
-
-  const win = new BrowserWindow({
+  win = new BrowserWindow({
     width: 1280,
     height: 800,
     show: false,
@@ -419,7 +99,17 @@ void app.whenReady().then(async () => {
     },
   })
   setMainWindow(win)
-  const run = (script: string): Promise<unknown> => win.webContents.executeJavaScript(script)
+  const page = win
+  const startBridge = () => startDesktopSmokeBackend({
+    directory, mainWindow: page, entry: resolve('dist/agent-smoke-backend.mjs'), zimaPython,
+    configurePeer: (peer) => { testPeer = peer },
+    pickLocalWorkspace: async () => ({ canceled: false, path: directory, suggestedName: 'Agent 本地项目' }),
+  })
+  bridge = await startBridge()
+  const run = async (script: string): Promise<unknown> => {
+    try { return await page.webContents.executeJavaScript(script) }
+    catch { throw new Error(`页面执行失败：${script.slice(0, 300)}`) }
+  }
   const waitFor = async (expression: string): Promise<void> => {
     const started = Date.now()
     while (!(await run(expression))) {
@@ -427,14 +117,21 @@ void app.whenReady().then(async () => {
       await new Promise((done) => setTimeout(done, 30))
     }
   }
-  const clickText = (text: string): Promise<unknown> => run(`(() => {
+  const clickText = async (text: string): Promise<unknown> => {
+    // 跨进程加载完成才允许点击；不能把异步禁用态误当产品故障。
+    await waitFor(`[...document.querySelectorAll('button')].some(item => item.offsetParent && !item.disabled && item.textContent.trim() === ${JSON.stringify(text)})`)
+    return run(`(() => {
     const button = [...document.querySelectorAll('button')].find(item => item.offsetParent && item.textContent.trim() === ${JSON.stringify(text)});
     if (!button || button.disabled) throw new Error('按钮不可用：${text}'); button.click();
   })()`)
-  const clickAria = (label: string): Promise<unknown> => run(`(() => {
+  }
+  const clickAria = async (label: string): Promise<unknown> => {
+    await waitFor(`[...document.querySelectorAll('[aria-label=${JSON.stringify(label)}]')].some(item => item.offsetParent && !item.disabled)`)
+    return run(`(() => {
     const target = [...document.querySelectorAll('[aria-label=${JSON.stringify(label)}]')].find(item => item.offsetParent);
     if (!target || target.disabled) throw new Error('控件不可用：${label}'); target.click();
   })()`)
+  }
   const typeEditor = (value: string): Promise<unknown> => run(`(() => {
     const editor = [...document.querySelectorAll('.ProseMirror[contenteditable=true]')].find(item => item.offsetParent);
     if (!editor) throw new Error('Agent 输入框不可用');
@@ -448,20 +145,31 @@ void app.whenReady().then(async () => {
     setter.call(input, ${JSON.stringify(value)});
     input.dispatchEvent(new Event('input', { bubbles: true }));
   })()`)
-  const fillTextarea = (label: string, value: string): Promise<unknown> => run(`(() => {
+  const fillTextarea = async (label: string, value: string): Promise<unknown> => {
+    await waitFor(`!!document.querySelector('textarea[aria-label=${JSON.stringify(label)}]')`)
+    return run(`(() => {
     const input = document.querySelector('textarea[aria-label=${JSON.stringify(label)}]');
     if (!input) throw new Error('文本框不可用：${label}');
     const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
     setter.call(input, ${JSON.stringify(value)});
     input.dispatchEvent(new Event('input', { bubbles: true }));
   })()`)
+  }
   const assert = async (expression: string): Promise<void> => {
     if (!(await run(expression))) throw new Error(`Agent 冒烟断言失败：${expression}`)
   }
 
-  await win.loadFile(resolve('dist/renderer/index.html'))
+  await page.loadFile(resolve('dist/renderer/index.html'))
+  // 所有业务创建通过真实 preload；父端只负责测试工作区文件和原生交互。
+  const channel = await run(`window.axon.channels.create(${JSON.stringify({
+    name: 'Agent 本地测试渠道', provider: 'custom', baseUrl: modelBaseUrl, apiKey: 'synthetic-agent-key',
+    models: [{ id: 'gpt-5.6-smoke', name: 'Agent 冒烟模型', enabled: true, source: 'manual' }],
+  })})`) as Channel
+  const smokeProject = await run("window.axon.agentProjects.create({ name: 'Agent 冒烟项目', workspace: { kind: 'managed' } })") as AgentProject
+  page.webContents.reload()
   await waitFor("[...document.querySelectorAll('button')].some(item => item.textContent.trim() === 'Agent')")
   await clickText('Agent')
+  await waitFor("!!document.querySelector('[aria-label=\"项目 Agent 冒烟项目\"]')")
   await assert("!document.querySelector('[role=\"tablist\"]')")
   const leftWidth = await run("document.querySelector('[aria-label=\"左侧会话栏\"]').getBoundingClientRect().width") as number
   await run("document.querySelector('[aria-label=\"调整左侧栏宽度\"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))")
@@ -474,7 +182,7 @@ void app.whenReady().then(async () => {
   await assert("(() => { const sidebar = document.querySelector('[aria-label=\"左侧会话栏\"]'); const button = document.querySelector('[aria-label=\"收起侧栏\"]'); return Math.abs(sidebar.getBoundingClientRect().bottom - button.getBoundingClientRect().bottom) <= 16 })()")
   await clickAria('在 Agent 冒烟项目 中新建会话')
   await assert("(() => { const menu = document.querySelector('[role=menu][aria-label*=Runtime]'); const rect = menu?.getBoundingClientRect(); return !!rect && rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight })()")
-  writeFileSync(join(directory, 'runtime-menu.png'), (await win.webContents.capturePage()).toPNG())
+  writeFileSync(join(directory, 'runtime-menu.png'), (await page.webContents.capturePage()).toPNG())
   await run("document.querySelector('main').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))")
   await waitFor("!document.querySelector('[role=menu][aria-label*=Runtime]')")
   await clickAria('在 Agent 冒烟项目 中新建会话')
@@ -517,10 +225,10 @@ void app.whenReady().then(async () => {
   await clickText('创建')
   await waitFor("!!document.querySelector('[aria-label=\"项目 Agent 本地项目\"]')")
   const projectHoverPoint = await run("(() => { const rect = document.querySelector('[aria-label=\"项目 Agent 本地项目\"] > div').getBoundingClientRect(); return { x: Math.round(rect.left + 90), y: Math.round(rect.top + rect.height / 2) } })()") as { x: number; y: number }
-  win.webContents.sendInputEvent({ type: 'mouseMove', ...projectHoverPoint })
+  page.webContents.sendInputEvent({ type: 'mouseMove', ...projectHoverPoint })
   await waitFor("document.querySelector('[role=tooltip][aria-label=\"项目 Agent 本地项目 信息\"]')?.textContent.includes('工作区 · 本地目录')")
   await assert("(() => { const rect = document.querySelector('[role=tooltip][aria-label=\"项目 Agent 本地项目 信息\"]').getBoundingClientRect(); return rect.left >= 0 && rect.right <= innerWidth })()")
-  writeFileSync(join(directory, 'project-hover.png'), (await win.webContents.capturePage()).toPNG())
+  writeFileSync(join(directory, 'project-hover.png'), (await page.webContents.capturePage()).toPNG())
   await clickAria('管理项目 Agent 本地项目')
   await clickText('启用项目记忆')
   await waitFor("document.querySelector('[aria-label=\"管理项目 Agent 本地项目\"]')?.closest('details')?.textContent.includes('关闭项目记忆') === true")
@@ -610,7 +318,7 @@ void app.whenReady().then(async () => {
   await assert("!document.querySelector('button[aria-label=\"粗体\"]') && !document.querySelector('button[aria-label=\"无序列表\"]')")
   await typeEditor('执行本地 Agent 冒烟任务')
   await clickAria('发送消息')
-  await waitFor("document.body.textContent.includes('正在处理') && document.body.textContent.includes('Agent 运行中')")
+  await waitFor("document.body.textContent.includes('正在处理') && [...document.querySelectorAll('button')].some(item => item.offsetParent && item.textContent.trim() === '停止')")
   await waitFor("document.body.textContent.includes('Agent 请求扩展沙箱权限：Bash') && document.body.textContent.includes('网络访问')")
   await assert("document.body.textContent.includes('命令可能已产生部分本地副作用') && document.body.textContent.includes('批准后只携带本项权限重试当前工具一次')")
   await assert("[...document.querySelectorAll('button')].some(item => item.offsetParent && item.textContent.trim() === '当前会话允许')")
@@ -624,6 +332,7 @@ void app.whenReady().then(async () => {
   await run("document.querySelector('summary[aria-label=\"工具调用 Bash\"]').click()")
   await waitFor("document.body.textContent.includes('测试通过')")
   await assert("document.querySelector('summary[aria-label=\"工具调用 Bash\"]').nextElementSibling.getBoundingClientRect().height < 224")
+  await waitFor("window.axon.agent.listActiveRuns().then(runs => runs.length === 0)")
   await waitFor("!!document.querySelector('[aria-label=\"查看子任务 检查子流程\"]') && document.body.textContent.includes('已完成')")
   await clickAria('查看子任务 检查子流程')
   await waitFor("document.querySelector('[role=\"dialog\"][aria-label=\"子任务：检查子流程\"]')?.textContent.includes('子 Agent 已完成检查')")
@@ -635,53 +344,51 @@ void app.whenReady().then(async () => {
   await clickAria('查看 agent-generated.txt Diff')
   await waitFor("document.body.textContent.includes('+Agent generated file')")
   await clickAria('关闭 Diff')
-  writeFileSync(join(directory, 'agent-complete.png'), (await win.webContents.capturePage()).toPNG())
-  // AppShell 以防抖方式保存标签状态；等待其落入测试 settings 后再重载。
-  await new Promise((done) => setTimeout(done, 260))
-
-  const session = sessions.list()[0]
-  const selectedProject = session?.projectId ? projects.get(session.projectId) : undefined
+  writeFileSync(join(directory, 'agent-complete.png'), (await page.webContents.capturePage()).toPNG())
+  const session = (await run("window.axon.agent.listSessions()") as AgentSessionMeta[]).find((item) => !item.parentSessionId && item.runtimeSessionFile)
+  const capturedQuery = await testPeer!.request('axon/test/query/report') as unknown as QueryReport
+  const selectedProject = session?.projectId ? await run(`window.axon.agentProjects.get(${JSON.stringify(session.projectId)})`) as AgentProject : undefined
   const expectedProjectRoot = realpathSync(directory)
-  const savedMcp = mcpConfigs.get(smokeProject.id).servers.filesystem
-  const expectedMcpRoot = projects.resolveProjectCwd(smokeProject.id)
+  const savedMcp = (await run(`window.axon.mcpProjects.getConfig(${JSON.stringify(smokeProject.id)})`) as McpProjectConfig).servers.filesystem
+  const expectedMcpRoot = smokeProject.workspace.kind === 'local' ? smokeProject.workspace.path : join(directory, 'backend', 'agent-projects', smokeProject.slug, 'workspace-files')
   if (savedMcp?.type !== 'stdio' || savedMcp.args?.at(-1) !== expectedMcpRoot) {
-    throw new Error('MCP UI 未把可信项目工作区物化并持久化')
+    throw new Error(`MCP UI 工作区物化不一致：实际 ${savedMcp?.type === 'stdio' ? JSON.stringify(savedMcp.args) : '非 stdio'}，预期 ${expectedMcpRoot}`)
   }
   if (!session || session.channelId !== channel.id || session.modelId !== 'gpt-5.6-smoke' || session.thinkingLevel !== 'high' || selectedProject?.workspace.kind !== 'local' || selectedProject.workspace.path !== expectedProjectRoot) {
     throw new Error('Agent UI 未把项目归属、渠道、模型和思考等级写入会话')
   }
-  if (capturedQuery?.model !== 'gpt-5.6-smoke' || capturedQuery.thinkingLevel !== 'high' || capturedQuery.connection?.apiKey !== 'synthetic-agent-key') {
+  if (capturedQuery?.model !== 'gpt-5.6-smoke' || capturedQuery.thinkingLevel !== 'high' || !capturedQuery.credentialMatched) {
     throw new Error('AgentService 未把安全解析后的模型、思考等级与连接交给 adapter')
   }
   if (capturedQuery.cwd !== expectedProjectRoot) {
     throw new Error('AgentService 未把工作区解析为可信 cwd')
   }
-  if (!capturedQuery.systemPrompt?.includes('回答前先检查工作区。')) {
+  if (!capturedQuery.projectInstructionIncluded) {
     throw new Error('AgentService 未把项目根 AGENTS.md 注入系统提示词')
   }
-  if (!capturedQuery.customTools?.some((tool) => tool.name === 'SkillRead')) {
+  if (!capturedQuery.toolNames.includes('SkillRead')) {
     throw new Error('AgentService 未注入统一 SkillRead 工具')
   }
-  if (!capturedQuery.systemPrompt?.includes('external.md：外部记忆')) {
+  if (!capturedQuery.memoryIncluded) {
     throw new Error('AgentService 未把最新 MEMORY.md 追加到系统提示词末尾')
   }
-  if (!capturedQuery.customTools?.some((tool) => tool.name === 'MemoryRead')
-    || !capturedQuery.customTools.some((tool) => tool.name === 'MemoryWrite')) {
+  if (!capturedQuery.toolNames.includes('MemoryRead')
+    || !capturedQuery.toolNames.includes('MemoryWrite')) {
     throw new Error('AgentService 未给已启用项目注入记忆工具')
   }
-  const messages = sessions.getMessages(session.id)
+  const messages = await run(`window.axon.agent.getMessages(${JSON.stringify(session.id)})`) as SDKMessage[]
   const messageKinds = messages.map((message) => `${message.type}:${'subtype' in message ? String(message.subtype) : ''}`).join(',')
   if (messageKinds !== 'user:,system:init,assistant:,user:,assistant:,user:,result:success') {
     throw new Error(`Agent JSONL 终态不完整：${messageKinds}`)
   }
-  const childTask = delegations.list(session.id)[0]
+  const childTask = (await run(`window.axon.agentTasks.list(${JSON.stringify(session.id)})`) as AgentDelegation[])[0]
   if (!childTask || childTask.status !== 'completed' || childTask.resultSummary !== '子 Agent 已完成检查') {
     throw new Error('子任务终态未正确聚合到 state.json')
   }
-  if (sessions.get(childTask.childSessionId)?.thinkingLevel !== 'high') {
+  if ((await run(`window.axon.agent.getSession(${JSON.stringify(childTask.childSessionId)})`) as AgentSessionMeta)?.thinkingLevel !== 'high') {
     throw new Error('子 Agent 未继承父会话思考等级')
   }
-  const childKinds = sessions.getMessages(childTask.childSessionId)
+  const childKinds = (await run(`window.axon.agentTasks.getMessages(${JSON.stringify(session.id)}, ${JSON.stringify(childTask.id)})`) as SDKMessage[])
     .map((message) => `${message.type}:${'subtype' in message ? String(message.subtype) : ''}`)
     .join(',')
   if (childKinds !== 'user:,system:init,assistant:,result:success') {
@@ -691,8 +398,14 @@ void app.whenReady().then(async () => {
     throw new Error('Agent runtime resume 凭据未回写')
   }
 
-  // renderer 重载后只从会话索引和 JSONL 恢复，不依赖上一轮内存状态。
-  win.webContents.reload()
+  // 等实际标签补丁落盘，卸载页面后停止唯一写入者，再用新 PID 验证磁盘恢复。
+  await waitFor(`window.axon.settings.get().then(settings => settings.tabState?.tabs.some(tab => tab.sessionId === ${JSON.stringify(session.id)} && tab.id === settings.tabState.activeTabId))`)
+  const previousPid = bridge.backend.pid
+  await page.loadURL('about:blank')
+  await bridge.close()
+  bridge = await startBridge()
+  if (bridge.backend.pid === previousPid) throw new Error('Agent 恢复未使用新的后端进程')
+  await page.loadFile(resolve('dist/renderer/index.html'))
   await waitFor("document.body.textContent.includes('Agent 正常回答') && !!document.querySelector('.ProseMirror[contenteditable=true]')")
   await assert("document.body.textContent.includes('执行本地 Agent 冒烟任务')")
   await waitFor("!!document.querySelector('[aria-label=\"查看子任务 检查子流程\"]')")
@@ -719,23 +432,47 @@ void app.whenReady().then(async () => {
     element.dispatchEvent(new Event('scroll'));
     return element.scrollTop;
   })()`)
-  if (typeof readingPosition !== 'number' || readingPosition <= 0 || !resumeReadingCheck) throw new Error('消息阅读验证未进入暂停输出状态')
+  if (typeof readingPosition !== 'number' || readingPosition <= 0) throw new Error('消息阅读验证未进入暂停输出状态')
   await waitFor("[...document.querySelectorAll('button')].some(item => item.offsetParent && item.textContent.trim() === '回到最新')")
-  resumeReadingCheck()
+  await testPeer!.request('axon/test/reading/resume')
   await waitFor("document.body.textContent.includes('阅读验证新增输出一')")
   await assert(`Math.abs((${readingScroller}).scrollTop - ${readingPosition}) < 2`)
-  writeFileSync(join(directory, 'agent-reading-history.png'), (await win.webContents.capturePage()).toPNG())
+  writeFileSync(join(directory, 'agent-reading-history.png'), (await page.webContents.capturePage()).toPNG())
   await clickText('回到最新')
   await assert(`(() => { const element = ${readingScroller}; return element.scrollHeight - element.scrollTop - element.clientHeight < 2 })()`)
   await waitFor("![...document.querySelectorAll('button')].some(item => item.offsetParent && item.textContent.trim() === '回到最新')")
-  resumeReadingCheck()
+  await testPeer!.request('axon/test/reading/resume')
   await waitFor("document.body.textContent.includes('阅读验证新增输出二') && !document.body.textContent.includes('Agent 运行中')")
   await assert(`(() => { const element = ${readingScroller}; return element.scrollHeight - element.scrollTop - element.clientHeight < 2 })()`)
   await run("document.querySelector('summary[aria-label=\"工具调用 Read\"]').click()")
   await assert("(() => { const detail = document.querySelector('summary[aria-label=\"工具调用 Read\"]').nextElementSibling; return detail.clientHeight <= 224 && detail.scrollHeight > detail.clientHeight })()")
-  writeFileSync(join(directory, 'agent-reading-long-output.png'), (await win.webContents.capturePage()).toPNG())
+  writeFileSync(join(directory, 'agent-reading-long-output.png'), (await page.webContents.capturePage()).toPNG())
 
-  if (zimaAdapter) {
+  // 同一轮工具追问经子进程反向请求回到原窗口，答复不生成新用户轮次。
+  await waitFor("window.axon.agent.listActiveRuns().then(runs => runs.length === 0)")
+  const beforeQuestion = await run(`window.axon.agent.getMessages(${JSON.stringify(session.id)})`) as SDKMessage[]
+  await typeEditor('验证追问链路')
+  await clickAria('发送消息')
+  await waitFor("document.body.textContent.includes('Agent 需要你的回答') && document.body.textContent.includes('请选择测试方案')")
+  await clickText('方案一')
+  await clickText('提交回答')
+  await waitFor("document.body.textContent.includes('已收到方案一，继续本轮任务。') && !document.body.textContent.includes('Agent 需要你的回答')")
+  await waitFor("window.axon.agent.listActiveRuns().then(runs => runs.length === 0)")
+  const questionMessages = (await run(`window.axon.agent.getMessages(${JSON.stringify(session.id)})`) as SDKMessage[]).slice(beforeQuestion.length)
+  if (questionMessages.map((message) => message.type).join(',') !== 'user,assistant,user,assistant,result') throw new Error('追问未在原轮中交付，或历史重复')
+
+  // 精确停止只控制当前真实 runId；迟到的夹具不允许追加成功终态。
+  await typeEditor('验证停止链路')
+  await clickAria('发送消息')
+  await waitFor("document.body.textContent.includes('停止验证正在等待')")
+  await clickText('停止')
+  await waitFor("window.axon.agent.listActiveRuns().then(runs => runs.length === 0)")
+  const stoppedMessages = (await run(`window.axon.agent.getMessages(${JSON.stringify(session.id)})`) as SDKMessage[]).slice(beforeQuestion.length + questionMessages.length)
+  const stoppedResults = stoppedMessages.filter((message) => message.type === 'result')
+  if (stoppedResults.length !== 1 || stoppedResults[0]?.type !== 'result' || stoppedResults[0].terminal_reason !== 'stopped' || !stoppedResults[0].stopped_by_user) throw new Error('停止轮次缺失唯一取消终态')
+  await waitFor("!!document.querySelector('button[aria-label=\"发送消息\"]')")
+
+  if (zimaPython) {
     await clickAria('在 Agent 本地项目 中新建会话')
     await clickText('Zima')
     await waitFor("!!document.querySelector('.ProseMirror[contenteditable=true]') && document.body.textContent.includes('Runtime: Zima')")
@@ -744,28 +481,20 @@ void app.whenReady().then(async () => {
     await clickAria('发送消息')
     await waitFor("document.body.textContent.includes('Zima 回复：Zima 桌面冒烟') && !document.body.textContent.includes('Agent 运行中')")
     await assert("document.querySelector('[role=img][aria-label*=\"上下文窗口 128K\"]') !== null")
-    writeFileSync(join(directory, 'zima-complete.png'), (await win.webContents.capturePage()).toPNG())
-    const zimaSession = sessions.list().find((item) => item.runtimeId === 'zima')
+    writeFileSync(join(directory, 'zima-complete.png'), (await page.webContents.capturePage()).toPNG())
+    const zimaSession = (await run('window.axon.agent.listSessions()') as AgentSessionMeta[]).find((item) => item.runtimeId === 'zima')
     if (!zimaSession || !zimaSession.runtimeSessionFile || !zimaSession.runtimeSessionFile.endsWith('state.json')) {
       throw new Error('Zima 桌面会话未保存 runtime 恢复凭据')
     }
-    const zimaKinds = sessions.getMessages(zimaSession.id).map((message) => message.type)
+    const zimaKinds = (await run(`window.axon.agent.getMessages(${JSON.stringify(zimaSession.id)})`) as SDKMessage[]).map((message) => message.type)
     if (zimaKinds.join(',') !== 'user,system,assistant,result') {
       throw new Error(`Zima 桌面会话 JSONL 消息异常：${zimaKinds.join(',')}`)
     }
-    win.webContents.reload()
+    page.webContents.reload()
     await waitFor("document.body.textContent.includes('Zima 回复：Zima 桌面冒烟') && !!document.querySelector('.ProseMirror[contenteditable=true]')")
-    if (!sessions.list().some((item) => item.runtimeId === 'pi')) throw new Error('Pi 会话在 Zima 创建后丢失')
-    zimaAdapter.dispose()
-    modelServer?.close()
+    if (!(await run('window.axon.agent.listSessions()') as AgentSessionMeta[]).some((item) => item.runtimeId === 'pi')) throw new Error('Pi 会话在 Zima 创建后丢失')
   }
 
-  console.log(`Agent 冒烟验证通过：项目工作区、思考等级、项目指令、Skills、MCP 配置、项目记忆与变化刷新、沙箱升级权限卡与精确 Grant、协作子 Agent 任务卡与详情、双侧栏、文件树、用量圆环、变更汇总、Diff、流式消息、聚合 state/JSONL 与重载恢复、阅读历史不抢滚动、回到最新后恢复跟随及工具详情自适应高度${zimaAdapter ? '、Zima 创建/发送/恢复及 Pi 并存' : ''}。截图目录：${directory}`)
-  clearTimeout(timeout)
-  win.destroy()
-  app.exit(0)
-}).catch((error: unknown) => {
-  console.error(error)
-  clearTimeout(timeout)
-  app.exit(1)
-})
+  console.log(`Agent 独立后端冒烟通过：项目工作区、思考等级、项目指令、Skills、MCP 配置、记忆刷新与草稿保护、精确 Grant 交付、子任务卡与详情、双侧栏/文件监听、用量、变更/Diff、完整 JSONL/新 PID 恢复、阅读与工具长结果、同轮追问和唯一停止终态${zimaPython ? '、Zima 创建/发送/恢复及 Pi 并存' : ''}。模型/工具事件为中立夹具，不代表真实 Pi SDK 或 Seatbelt 执行验收。截图目录：${directory}`)
+  await finish(0)
+}).catch((error: unknown) => { void finish(1, error) })

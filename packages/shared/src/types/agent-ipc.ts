@@ -3,6 +3,8 @@
 export const AGENT_IPC_CHANNELS = {
   LIST_SESSIONS: 'axon:agent:sessions:list',
   LIST_ACTIVE_RUNS: 'axon:agent:runs:list-active',
+  GET_OWNED_RUN: 'axon:agent:runs:get-owned',
+  RUN_EVENT: 'axon:agent:runs:event',
   GET_SESSION: 'axon:agent:sessions:get',
   GET_REASONING_CAPABILITY: 'axon:agent:reasoning-capability:get',
   CREATE_SESSION: 'axon:agent:sessions:create',

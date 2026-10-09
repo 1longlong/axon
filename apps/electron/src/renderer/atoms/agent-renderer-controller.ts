@@ -3,6 +3,7 @@
 import type { Store } from 'jotai/vanilla/store'
 import type {
   AgentAskUserResponse,
+  BackendOwnedRun,
   AgentEnvironmentCheckInput,
   AgentEnvironmentCheckResult,
   AgentMemoryChangedEvent,
@@ -13,6 +14,9 @@ import type {
   AgentProject,
   AgentProjectCreateInput,
   AgentProjectUpdateInput,
+  AgentProjectWatchSubscription,
+  AgentProjectWatchTarget,
+  AgentProjectWatchClosedEvent,
   AgentQueuedMessageControlInput,
   AgentSendInput,
   AgentSendResult,
@@ -27,6 +31,8 @@ import type {
 } from '@axon/shared'
 import type { AgentRendererApi } from './agent-renderer-api'
 import { reduceAgentGenerationEvent } from './agent-event-reducer'
+import { mergeAgentHistory, recordAgentHistoryChange } from './agent-history-merge'
+import type { AgentHistoryChanges } from './agent-history-merge'
 import {
   agentStateAtom,
   sortAgentProjects,
@@ -40,8 +46,13 @@ export class AgentRendererController {
   private unsubscribe: (() => void) | null = null
   private sessionsLoadVersion = 0
   private projectsLoadVersion = 0
+  private projectNotificationVersion = 0
   private readonly messageLoadVersions = new Map<string, number>()
+  private readonly historyReads = new Map<string, AgentHistoryChanges>()
   private readonly observedRunTokens = new Map<string, number>()
+  private readonly ownedRuns = new Map<string, BackendOwnedRun>()
+  private readonly runIdentityVersions = new Map<string, number>()
+  private lifecycleVersion = 0
 
   constructor(
     private readonly api: AgentRendererApi,
@@ -51,7 +62,23 @@ export class AgentRendererController {
   /** 先订阅事件再加载索引，避免启动期间漏掉 run_started。 */
   start(): () => void {
     if (this.unsubscribe) return this.unsubscribe
+    const lifecycle = ++this.lifecycleVersion
+    const unsubscribeProjects = this.api.onProjectsChanged((projects) => {
+      if (lifecycle !== this.lifecycleVersion) return
+      this.projectNotificationVersion++; this.projectsLoadVersion++
+      this.store.set(agentStateAtom, (state) => ({ ...state, projects: sortAgentProjects(projects), projectsStatus: 'ready',
+        lastError: state.lastError?.scope === 'projects' ? null : state.lastError }))
+    })
+    const unsubscribeRuns = this.api.onRunChanged(({ phase, run }) => {
+      if (lifecycle !== this.lifecycleVersion) return
+      this.runIdentityVersions.set(run.sessionId, (this.runIdentityVersions.get(run.sessionId) ?? 0) + 1)
+      const current = this.ownedRuns.get(run.sessionId)
+      if (phase === 'started') {
+        if (!current || run.runStartedAt >= current.runStartedAt) this.ownedRuns.set(run.sessionId, { ...run })
+      } else if (current?.runId === run.runId) this.ownedRuns.delete(run.sessionId)
+    })
     const unsubscribeEvents = this.api.onEvent((event) => {
+      if (lifecycle !== this.lifecycleVersion) return
       if (event.type === 'session_title') {
         this.store.set(agentStateAtom, (state) => reduceAgentGenerationEvent(state, event))
         return
@@ -60,15 +87,19 @@ export class AgentRendererController {
         event.sessionId,
         Math.max(this.observedRunTokens.get(event.sessionId) ?? 0, event.runStartedAt),
       )
-      // 任意流事件都让旧磁盘读取失效；run_finished 再拉取权威 JSONL 终态。
-      this.messageLoadVersions.set(
-        event.sessionId,
-        (this.messageLoadVersions.get(event.sessionId) ?? 0) + 1,
-      )
-      this.store.set(agentStateAtom, (state) => reduceAgentGenerationEvent(state, event))
+      // 正文流不废弃完整历史读取；只记录本次读取期间真正被 reducer 接纳的消息变化。
+      this.store.set(agentStateAtom, (state) => {
+        const next = reduceAgentGenerationEvent(state, event)
+        const changes = this.historyReads.get(event.sessionId)
+        if (changes && next.messagesBySession[event.sessionId] !== state.messagesBySession[event.sessionId]) {
+          recordAgentHistoryChange(changes, event)
+        }
+        return next
+      })
       if (event.type === 'run_finished') void this.loadMessages(event.sessionId)
     })
     const unsubscribeQueue = this.api.onQueueChanged((snapshot) => {
+      if (lifecycle !== this.lifecycleVersion) return
       this.store.set(agentStateAtom, (state) => ({
         ...state,
         queuedMessagesBySession: {
@@ -80,8 +111,13 @@ export class AgentRendererController {
     const cleanup = (): void => {
       unsubscribeEvents()
       unsubscribeQueue()
+      unsubscribeRuns()
+      unsubscribeProjects()
       if (this.unsubscribe === cleanup) {
         this.unsubscribe = null
+        this.lifecycleVersion += 1
+        this.ownedRuns.clear()
+        this.historyReads.clear()
         this.sessionsLoadVersion += 1
         this.projectsLoadVersion += 1
         for (const [sessionId, version] of this.messageLoadVersions) {
@@ -92,26 +128,46 @@ export class AgentRendererController {
     this.unsubscribe = cleanup
     void this.refreshSessions()
     void this.refreshProjects()
-    void this.restoreActiveRuns()
+    void this.restoreActiveRuns(lifecycle)
     return cleanup
   }
 
   /** 用主进程快照补齐订阅前已启动的任务；订阅后观测到的更新始终优先。 */
-  private async restoreActiveRuns(): Promise<void> {
+  private async restoreActiveRuns(lifecycle: number): Promise<void> {
     try {
       const runs = await this.api.listActiveRuns()
+      if (lifecycle !== this.lifecycleVersion) return
       for (const run of runs) {
-        if ((this.observedRunTokens.get(run.sessionId) ?? 0) >= run.runStartedAt) continue
+        if ((this.observedRunTokens.get(run.sessionId) ?? 0) >= run.runStartedAt) {
+          // 同一控制器重启时展示状态可复用，但真实控制缓存已释放，仍需查询原入口身份。
+          if (!this.ownedRuns.has(run.sessionId) && this.store.get(agentStateAtom).activeRunsBySession[run.sessionId] === run.runStartedAt) {
+            void this.restoreOwnedRun(run.sessionId, run.runStartedAt, lifecycle)
+          }
+          continue
+        }
         this.store.set(agentStateAtom, (state) => reduceAgentGenerationEvent(state, {
           type: 'run_started',
           sessionId: run.sessionId,
           runStartedAt: run.runStartedAt,
           source: run.source,
         }))
+        void this.restoreOwnedRun(run.sessionId, run.runStartedAt, lifecycle)
       }
     } catch {
       // 运行快照只是 UI 恢复辅助，失败不能阻断会话和项目索引加载。
     }
+  }
+
+  /** 只补订阅前遗漏的所属身份；新事件、结束或页面释放后，迟到查询不能覆盖控制目标。 */
+  private async restoreOwnedRun(sessionId: string, runStartedAt: number, lifecycle: number): Promise<void> {
+    const version = this.runIdentityVersions.get(sessionId) ?? 0
+    try {
+      const run = await this.api.getOwnedRun(sessionId)
+      if (lifecycle !== this.lifecycleVersion || version !== (this.runIdentityVersions.get(sessionId) ?? 0)
+        || !run || run.sessionId !== sessionId || run.runStartedAt !== runStartedAt
+        || this.store.get(agentStateAtom).activeRunsBySession[sessionId] !== runStartedAt) return
+      this.ownedRuns.set(sessionId, { ...run })
+    } catch { /* 观察入口或已结束运行没有控制目标，不在点击停止时重新查询。 */ }
   }
 
   /** 读取项目即时状态；版本令牌防止慢列表覆盖刚完成的 CRUD。 */
@@ -163,10 +219,12 @@ export class AgentRendererController {
     }
   }
 
-  /** 每个会话独立防乱序，并以主进程 JSONL 返回值替换本地快照。 */
+  /** 每个会话独立防乱序；完整 JSONL 作基线，按 UUID 合并读取期间接纳的新消息。 */
   async loadMessages(sessionId: string): Promise<void> {
     const version = (this.messageLoadVersions.get(sessionId) ?? 0) + 1
     this.messageLoadVersions.set(sessionId, version)
+    const changes: AgentHistoryChanges = { byUuid: new Map(), unkeyed: [] }
+    this.historyReads.set(sessionId, changes)
     this.store.set(agentStateAtom, (state) => ({
       ...state,
       messageStatusBySession: {
@@ -179,7 +237,7 @@ export class AgentRendererController {
       if (this.messageLoadVersions.get(sessionId) !== version) return
       this.store.set(agentStateAtom, (state) => ({
         ...state,
-        messagesBySession: { ...state.messagesBySession, [sessionId]: messages },
+        messagesBySession: { ...state.messagesBySession, [sessionId]: mergeAgentHistory(messages, state.messagesBySession[sessionId] ?? [], changes) },
         messageStatusBySession: { ...state.messageStatusBySession, [sessionId]: 'ready' },
         lastError: state.lastError?.scope === 'messages'
           && state.lastError.sessionId === sessionId ? null : state.lastError,
@@ -191,6 +249,8 @@ export class AgentRendererController {
         messageStatusBySession: { ...state.messageStatusBySession, [sessionId]: 'error' },
         lastError: { scope: 'messages', sessionId, message: '加载 Agent 消息失败' },
       }))
+    } finally {
+      if (this.historyReads.get(sessionId) === changes) this.historyReads.delete(sessionId)
     }
   }
 
@@ -231,6 +291,8 @@ export class AgentRendererController {
 
   async deleteSession(sessionId: string): Promise<AgentSessionMeta> {
     const session = await this.api.deleteSession(sessionId)
+    this.ownedRuns.delete(sessionId)
+    this.historyReads.delete(sessionId)
     this.sessionsLoadVersion += 1
     this.messageLoadVersions.set(sessionId, (this.messageLoadVersions.get(sessionId) ?? 0) + 1)
     this.store.set(agentStateAtom, (state) => {
@@ -276,8 +338,11 @@ export class AgentRendererController {
     return session
   }
 
+  /** 创建结果只补未收到通知的本地列表；权威快照和新页面优先于旧响应。 */
   async createProject(input: AgentProjectCreateInput): Promise<AgentProject> {
+    const lifecycle = this.lifecycleVersion, notification = this.projectNotificationVersion
     const project = await this.api.createProject(input)
+    if (lifecycle !== this.lifecycleVersion || notification !== this.projectNotificationVersion) return project
     this.projectsLoadVersion += 1
     this.store.set(agentStateAtom, (state) => ({
       ...state,
@@ -287,8 +352,11 @@ export class AgentRendererController {
     return project
   }
 
+  /** 项目更新仍由后端保存；收到更近快照后不再合并迟到的单项目响应。 */
   async updateProject(id: string, input: AgentProjectUpdateInput): Promise<AgentProject> {
+    const lifecycle = this.lifecycleVersion, notification = this.projectNotificationVersion
     const project = await this.api.updateProject(id, input)
+    if (lifecycle !== this.lifecycleVersion || notification !== this.projectNotificationVersion) return project
     this.projectsLoadVersion += 1
     this.store.set(agentStateAtom, (state) => ({
       ...state,
@@ -297,8 +365,11 @@ export class AgentRendererController {
     return project
   }
 
+  /** 删除只清理本页未更新列表；释放后旧响应不能重新修改项目投影。 */
   async deleteProject(id: string): Promise<AgentProject> {
+    const lifecycle = this.lifecycleVersion, notification = this.projectNotificationVersion
     const project = await this.api.deleteProject(id)
+    if (lifecycle !== this.lifecycleVersion || notification !== this.projectNotificationVersion) return project
     this.projectsLoadVersion += 1
     this.store.set(agentStateAtom, (state) => ({
       ...state,
@@ -319,12 +390,12 @@ export class AgentRendererController {
     return this.api.writeProjectMemory(projectId, relativePath, content)
   }
 
-  watchProjectMemory(projectId: string): Promise<void> {
+  watchProjectMemory(projectId: string): Promise<AgentProjectWatchSubscription> {
     return this.api.watchProjectMemory(projectId)
   }
 
-  unwatchProjectMemory(projectId: string): Promise<void> {
-    return this.api.unwatchProjectMemory(projectId)
+  unwatchProjectMemory(target: AgentProjectWatchTarget): Promise<boolean> {
+    return this.api.unwatchProjectMemory(target)
   }
 
   onProjectMemoryChanged(callback: (event: AgentMemoryChangedEvent) => void): () => void {
@@ -333,9 +404,12 @@ export class AgentRendererController {
 
   /** 打开主进程原生目录选择器；取消是正常结果，传输失败才写入错误状态。 */
   async pickLocalWorkspace(): Promise<AgentWorkspaceDirectorySelection | null> {
+    const lifecycle = this.lifecycleVersion
     try {
-      return await this.api.pickLocalWorkspace()
+      const selected = await this.api.pickLocalWorkspace()
+      return lifecycle === this.lifecycleVersion ? selected : null
     } catch {
+      if (lifecycle !== this.lifecycleVersion) return null
       this.store.set(agentStateAtom, (state) => ({
         ...state,
         lastError: { scope: 'projects', message: '打开本地项目目录失败' },
@@ -358,12 +432,16 @@ export class AgentRendererController {
     return this.api.readProjectDiff(projectId, relativePath)
   }
 
-  async watchProjectDirectory(projectId: string): Promise<void> {
+  async watchProjectDirectory(projectId: string): Promise<AgentProjectWatchSubscription> {
     return this.api.watchProjectDirectory(projectId)
   }
 
-  async unwatchProjectDirectory(projectId: string): Promise<void> {
-    return this.api.unwatchProjectDirectory(projectId)
+  async unwatchProjectDirectory(target: AgentProjectWatchTarget): Promise<boolean> {
+    return this.api.unwatchProjectDirectory(target)
+  }
+
+  onProjectWatchClosed(callback: (event: AgentProjectWatchClosedEvent) => void): () => void {
+    return this.api.onProjectWatchClosed(callback)
   }
 
   onProjectDirectoryChanged(callback: (event: AgentWorkspaceDirectoryChangedEvent) => void): () => void {
@@ -412,8 +490,11 @@ export class AgentRendererController {
     } catch { return false }
   }
 
+  /** 点击时同步捕获 UI 已观察的真实轮次；传输迟到也只能尝试停止这一个目标。 */
   async stop(sessionId: string): Promise<boolean> {
-    try { return await this.api.stop(sessionId) } catch {
+    const target = this.ownedRuns.get(sessionId)
+    if (!target || this.store.get(agentStateAtom).activeRunsBySession[sessionId] !== target.runStartedAt) return false
+    try { return await this.api.stop({ sessionId: target.sessionId, runId: target.runId }) } catch {
       this.store.set(agentStateAtom, (state) => ({
         ...state,
         lastError: { scope: 'run', sessionId, message: '停止 Agent 运行失败' },
