@@ -54,7 +54,9 @@ export class QuickChatWindowManager {
       },
     })
     this.windows.set(key, window)
-    registerQuickChatWindowOwner(window.webContents.id, binding)
+    // closed 时原生对象可能已销毁，注销使用创建时保存的真实身份。
+    const webContentsId = window.webContents.id
+    registerQuickChatWindowOwner(webContentsId, binding)
     window.setMenuBarVisibility(false)
     if (process.platform === 'darwin') window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
 
@@ -73,7 +75,7 @@ export class QuickChatWindowManager {
       cancelAndHide()
     })
     window.on('closed', () => {
-      unregisterQuickChatWindowOwner(window.webContents.id)
+      unregisterQuickChatWindowOwner(webContentsId)
       if (this.windows.get(key) === window) this.windows.delete(key)
     })
     window.once('ready-to-show', () => {

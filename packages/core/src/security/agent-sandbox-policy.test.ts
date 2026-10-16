@@ -20,7 +20,7 @@ describe('AgentSandboxPolicy', () => {
     expect(policy).toEqual({
       platform: 'macos',
       mode: 'workspaceWrite',
-      workingDirectory: canonicalDirectory,
+      sandboxCwd: canonicalDirectory,
       readAccess: { type: 'fullAccess' },
       writableRoots: [canonicalDirectory],
       protectedReadOnlyRoots: [

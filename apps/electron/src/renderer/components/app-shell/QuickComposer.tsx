@@ -8,6 +8,7 @@ import { useAgentController } from '@/components/agent/AgentStateProvider'
 import { buildChatModelOptions, decodeChatModelOption, encodeChatModelOption } from '@/lib/chat-model-options'
 import { ContextUsageIndicator } from '@/components/agent/ContextUsageIndicator'
 import { getAgentContextWindowUsage } from '@/lib/agent-session-usage'
+import { AgentRunControl } from '@/components/agent/AgentRunControl'
 
 function AxonMark(): React.ReactElement {
   return <svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true" className="shrink-0 rounded-full shadow-[0_0_14px_rgba(55,126,245,0.32)]">
@@ -25,7 +26,7 @@ function Stop(): React.ReactElement {
   return <svg width="17" height="17" viewBox="0 0 17 17" fill="none" aria-hidden="true"><rect x="4" y="4" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.8" /></svg>
 }
 
-/** 快捷输入是独立的单行 UI；发送、停止和模型变更仍复用原会话控制器。 */
+/** 快捷输入是独立单行 UI；Agent 暂停/继续与主窗口共用控制器，不改变 Chat 停止语义。 */
 export function QuickComposer({ sessionType, sessionId, expanded, onSent }: {
   sessionType: 'chat' | 'agent'
   sessionId: string
@@ -43,7 +44,9 @@ export function QuickComposer({ sessionType, sessionId, expanded, onSent }: {
   const session = agent.sessions.find((item) => item.id === sessionId)
   const chatSending = chat.sendingByConversation[sessionId] === true
   const agentRunning = agent.activeRunsBySession[sessionId] !== undefined
+  const pausing = sessionType === 'agent' && (agent.pausesBySession[sessionId]?.state === 'pausing' || Boolean(agent.pauseOperationsBySession[sessionId]))
   const externalRunning = agent.activeRunSourcesBySession[sessionId] === 'external'
+  const observedOnly = sessionType === 'agent' && agentRunning && !agent.ownedRunsBySession[sessionId]
   const options = React.useMemo(() => buildChatModelOptions(sessionType === 'agent' && session?.runtimeId === 'zima'
     ? chat.channels.filter((channel) => channel.hasApiKey && ['openai', 'custom', 'anthropic', 'anthropic-compatible', 'google'].includes(channel.provider))
     : chat.channels), [chat.channels, session?.runtimeId, sessionType])
@@ -52,7 +55,7 @@ export function QuickComposer({ sessionType, sessionId, expanded, onSent }: {
   const hasModel = options.some((item) => encodeChatModelOption(item.channelId, item.modelId) === currentModel)
   const missingSetup = sessionType === 'chat' ? !hasModel : !session?.projectId || !hasModel
   const maxLength = sessionType === 'chat' ? MAX_CHAT_INPUT_LENGTH : 100_000
-  const disabled = missingSetup || externalRunning || savingModel || (sessionType === 'chat' && chatSending)
+  const disabled = observedOnly || pausing || missingSetup || externalRunning || savingModel || (sessionType === 'chat' && chatSending)
   const canSend = value.trim().length > 0 && value.length <= maxLength && !disabled
 
   /** 模型切换写回绑定会话；保存期间不允许发送，避免旧模型与新标签错位。 */
@@ -85,8 +88,7 @@ export function QuickComposer({ sessionType, sessionId, expanded, onSent }: {
   }
 
   const stop = (): void => {
-    if (sessionType === 'chat') void chatController.stop(sessionId)
-    else void agentController.stop(sessionId)
+    void chatController.stop(sessionId)
   }
 
   const status = modelError ? '模型切换失败' : missingSetup ? '请先配置会话' : externalRunning ? '外部任务运行中' : value.length > maxLength ? '输入过长' : ''
@@ -112,12 +114,13 @@ export function QuickComposer({ sessionType, sessionId, expanded, onSent }: {
       />
     {status && <span className="max-w-28 shrink-0 truncate text-[11px] text-[#A15A4E]" title={status}>{status}</span>}
     {sessionType === 'agent' && <span title={contextTitle}><ContextUsageIndicator messages={agentMessages} draft={value} /></span>}
-    {(chatSending || agentRunning) && !externalRunning && <button type="button" aria-label="停止生成" title="停止生成" onClick={stop} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[#555555] transition-colors hover:bg-[#F3F5F7]"><Stop /></button>}
+    {sessionType === 'chat' && chatSending && <button type="button" aria-label="停止生成" title="停止生成" onClick={stop} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[#555555] transition-colors hover:bg-[#F3F5F7]"><Stop /></button>}
+    {sessionType === 'agent' && !externalRunning && <AgentRunControl sessionId={sessionId} compact disabled={missingSetup || savingModel} onContinue={onSent} />}
     <label className="relative flex max-w-44 shrink-0 items-center rounded-full px-2 py-1 text-[#666666] transition-colors hover:bg-[#F3F5F7]" title="选择模型">
         <select
           aria-label="选择快捷会话模型"
           value={hasModel ? currentModel : ''}
-          disabled={chatSending || agentRunning || savingModel || options.length === 0}
+          disabled={pausing || chatSending || agentRunning || savingModel || options.length === 0}
           onChange={(event) => void selectModel(event.target.value)}
           className="max-w-36 cursor-pointer appearance-none truncate border-0 bg-transparent pr-4 text-xs outline-none disabled:cursor-not-allowed disabled:opacity-50"
         >

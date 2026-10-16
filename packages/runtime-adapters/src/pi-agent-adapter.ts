@@ -23,6 +23,7 @@ import type {
 import type {
   AgentAssistantDelta,
   AgentCanUseTool,
+  AgentContinueQueryInput,
   AgentCustomToolDefinition,
   AgentCustomToolResult,
   AgentDeferredToolCapabilityInput,
@@ -46,8 +47,8 @@ import type {
   SDKMessageUsage,
   SDKSystemMessage,
 } from '@axon/shared'
-import { AgentSandboxEscalationError } from '@axon/shared'
-import { AsyncWorkTracker, createUserStoppedResult } from '@axon/core'
+import { AgentRuntimeCleanupError, AgentSandboxEscalationError } from '@axon/shared'
+import { AsyncWorkTracker, createUserStoppedResult, resolveAgentShellWorkdir } from '@axon/core'
 import { PiProjectInstructionScope } from './pi-project-instruction-scope'
 
 type PiSdk = typeof import('@earendil-works/pi-coding-agent')
@@ -268,6 +269,7 @@ interface ActivePiSession {
   abortWork?: Promise<void>
   closeStream?: () => void
   abortRequested: boolean
+  cleanupFailed?: boolean
   executionPolicy: AgentExecutionPolicy
 }
 
@@ -1054,7 +1056,13 @@ function wrapToolWithPermission(
   return {
     ...definition,
     async execute(toolUseId, rawInput, signal, onUpdate, context) {
-      const original = rawInput as Record<string, unknown>
+      // 只有真实内置 Bash 才解释 workdir；同名宿主工具保持自己的参数契约。
+      const normalizeInput = (value: Record<string, unknown>): Record<string, unknown> => (
+        definition.name === 'bash' && toolExecution.kind === 'sandbox'
+          ? { ...value, workdir: resolveAgentShellWorkdir(input.cwd!, value.workdir) }
+          : value
+      )
+      const original = normalizeInput(rawInput as Record<string, unknown>)
       const denied = (message: string) => {
         emit({
           kind: 'sdk_message',
@@ -1085,7 +1093,7 @@ function wrapToolWithPermission(
         updatedInput = permission.updatedInput
         initialGrants = permission.sandboxGrants ?? []
       }
-      const restored = restorePiInput(definition.name, original, updatedInput)
+      const restored = normalizeInput(restorePiInput(definition.name, original, updatedInput))
       projectInstructionScope?.observeRead(definition.name, restored)
       const execute = (toolInput: Record<string, unknown>, grants: AgentSandboxGrant[]) => (
         sandboxGrantStorage
@@ -1110,7 +1118,7 @@ function wrapToolWithPermission(
         if (escalationPermission.behavior === 'deny') {
           return denied(escalationPermission.message ?? '用户拒绝了沙箱权限升级')
         }
-        const retryInput = restorePiInput(definition.name, restored, escalationPermission.updatedInput)
+        const retryInput = normalizeInput(restorePiInput(definition.name, restored, escalationPermission.updatedInput))
         return await execute(retryInput, escalationPermission.sandboxGrants ?? [])
       }
     },
@@ -1127,6 +1135,35 @@ function convertCustomTool(tool: AgentCustomToolDefinition): ToolDefinition {
     parameters: tool.inputSchema,
     execute,
   } as unknown as ToolDefinition
+}
+
+/** 扩展 Pi 官方 Bash 的单次目录参数，复用其输出、超时和取消逻辑；不修改 SDK 或命令正文。 */
+export function createPiBashToolWithWorkdir(
+  createBashTool: PiSdk['createBashTool'],
+  projectRoot: string,
+  options: PiToolsOptions['bash'],
+): ToolDefinition {
+  const base = createBashTool(projectRoot, options) as unknown as ToolDefinition
+  const schema = base.parameters as unknown as { properties: Record<string, unknown> }
+  return {
+    ...base,
+    description: `${base.description} 每次调用都必须显式设置 workdir 为本次命令实际运行的目录，子目录不要固定填项目根目录。例如 {"command":"ls main renderer","workdir":"apps/electron/src"}。除非确有必要，否则不要使用 cd；执行目录通过 workdir 设置，不能通过换目录改变沙箱权限。`,
+    parameters: {
+      ...base.parameters,
+      properties: {
+        ...schema.properties,
+        workdir: { type: 'string', description: '每次调用都显式填写的实际执行目录；相对路径从项目工作区解析，绝对路径可指向项目外目录。省略时默认项目工作区；不改变沙箱规则基准或可写范围。' },
+      },
+    } as ToolDefinition['parameters'],
+    async execute(id, rawInput, signal, onUpdate, context) {
+      const args = { ...rawInput as Record<string, unknown> }
+      const cwd = resolveAgentShellWorkdir(projectRoot, args.workdir)
+      delete args.workdir
+      // 每次创建的工具只绑定本次 cwd，不修改会话目录，也不继承上次命令的 cd。
+      const tool = createBashTool(cwd, options) as unknown as ToolDefinition
+      return tool.execute(id, args, signal, onUpdate, context)
+    },
+  }
 }
 
 /**
@@ -1342,7 +1379,16 @@ export class PiAgentAdapter implements AgentProviderAdapter {
 
   /** 首次消费才启动查询；退出主动关闭已开始的迭代器，不能依赖消费者继续拉取。 */
   query(baseInput: AgentQueryInput): AsyncIterableIterator<AgentStreamPayload> {
-    const iterator = this.executeQuery(baseInput)
+    return this.trackQuery(this.executeQuery(baseInput))
+  }
+
+  /** 使用 SDK 公开的宿主上下文入口续做；不发送用户 prompt，不触碰 SDK 私有成员。 */
+  continueQuery(input: AgentContinueQueryInput): AsyncIterableIterator<AgentStreamPayload> {
+    return this.trackQuery(this.executeQuery({ ...input, prompt: '' }, input))
+  }
+
+  /** 两种执行入口共享惰性启动和真实清理等待，避免继续遗漏退出登记。 */
+  private trackQuery(iterator: AsyncGenerator<AgentStreamPayload, void, unknown>): AsyncIterableIterator<AgentStreamPayload> {
     let started = false
     return {
       [Symbol.asyncIterator]() { return this },
@@ -1366,8 +1412,12 @@ export class PiAgentAdapter implements AgentProviderAdapter {
   }
 
   /** 初始化、事件投影与 SDK 查询都留在 adapter；finally 等真实运行再释放对象。 */
-  private async *executeQuery(baseInput: AgentQueryInput): AsyncGenerator<AgentStreamPayload, void, unknown> {
+  private async *executeQuery(baseInput: AgentQueryInput, continuation?: AgentContinueQueryInput): AsyncGenerator<AgentStreamPayload, void, unknown> {
     this.ensureOpen()
+    if (continuation && (!continuation.interruptionId.trim() || !continuation.interruptionContext.trim()
+      || (!continuation.runtimeSessionFile && !continuation.resumeSessionId && !continuation.recoveryPrompt?.trim()))) {
+      throw new Error('继续执行需要中断背景及已有会话或恢复上下文')
+    }
     const input = resolvePiQueryInput(baseInput)
     if (this.activeSessions.has(input.sessionId)) throw new Error('该 Agent 会话已有任务正在执行')
 
@@ -1388,6 +1438,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     let promptStarted = false
     let promptSettled = false
     let pendingPrompt: Promise<void> | undefined
+    let pendingResult: AgentStreamPayload | undefined
+    let preparingContinuation = false
 
     try {
       // 缺少保护或策略时，在加载 SDK/启动 Shell 前失败；不得回退原生工具。
@@ -1402,7 +1454,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       const shellEnvironment = this.hostTools && input.sandboxPolicy && !input.abortSignal?.aborted
         ? this.getShellEnvironment(input.sessionId, cwd)
         : undefined
-      // 初始化顺序不能调换：先固定 artifact 与模型，再订阅事件，最后发送 prompt，
+      // 初始化顺序不能调换：先固定 artifact 与模型，再订阅事件，最后启动模型循环，
       // 否则会丢失 init 或首个流式事件。
       mkdirSync(input.runtimeAgentDir, { recursive: true })
       mkdirSync(input.runtimeSessionDir, { recursive: true })
@@ -1413,7 +1465,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       this.ensureOpen()
       const sessionFile = resolveSessionFile(input)
       const resumeRequested = Boolean(input.resumeSessionId || input.runtimeSessionFile)
-      let recoveredRuntimeSession = false
+      // 中立历史存在而恢复引用丢失时，同样明确创建新 artifact 做语义恢复，不静默丢上下文。
+      let recoveredRuntimeSession = !resumeRequested && Boolean(input.recoveryPrompt)
       let sessionManager: ReturnType<typeof sdk.SessionManager.create>
       if (sessionFile) {
         try {
@@ -1479,7 +1532,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       }
       const builtinTools = [
         sdk.createReadTool(cwd, sandboxedToolOptions.read),
-        sdk.createBashTool(cwd, sandboxedToolOptions.bash),
+        createPiBashToolWithWorkdir(sdk.createBashTool, cwd, sandboxedToolOptions.bash),
         sdk.createEditTool(cwd, sandboxedToolOptions.edit),
         sdk.createWriteTool(cwd, sandboxedToolOptions.write),
         createPiSandboxedGrepTool(cwd, this.hostTools, input.sandboxPolicy),
@@ -1600,8 +1653,9 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       unsubscribe = session.subscribe((event: AgentSessionEvent) => {
         // 每个回调都校验 active 引用，隔离停止后迟到或已被新一轮替换的事件。
         if (this.activeSessions.get(input.sessionId) !== active) return
-        // 停止后只保留用量汇总和 settled 收束；其它迟到事件不得再进入 Axon 事件流。
-        if (active.abortRequested && event.type !== 'agent_end' && event.type !== 'agent_settled') return
+        // 工具的真实回传仍可收束既有调用；core 按本轮 ID 复核，不放行迟到正文或新调用。
+        const isToolResult = event.type === 'message_end' && event.message.role === 'toolResult'
+        if (active.abortRequested && !isToolResult && event.type !== 'agent_end' && event.type !== 'agent_settled') return
         if (event.type === 'message_update' && isAssistantPiMessage(event.message)) {
           const delta = serializePiAssistantDelta(event.assistantMessageEvent)
           if (delta) emit({
@@ -1666,7 +1720,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           return
         }
         if (event.type === 'compaction_start') {
-          emit({ kind: 'compaction_status', status: { phase: 'started', reason: event.reason } })
+          emit({ kind: 'compaction_status', status: { phase: 'started', reason: preparingContinuation ? 'threshold' : event.reason } })
           if (event.reason === 'overflow') {
             if (pendingFailedAssistant && 'uuid' in pendingFailedAssistant && typeof pendingFailedAssistant.uuid === 'string') {
               emit({ kind: 'discard_assistant', uuid: pendingFailedAssistant.uuid })
@@ -1678,12 +1732,13 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         }
         if (event.type === 'compaction_end') {
           // 必须先广播边界再允许 overflow 续跑，使 UI/JSONL 在下一条 assistant 前切换基线。
-          emit({ kind: 'sdk_message', message: convertPiCompactionEnd(event, session.sessionId) })
+          const compactEvent = preparingContinuation ? { ...event, reason: 'threshold' as const } : event
+          emit({ kind: 'sdk_message', message: convertPiCompactionEnd(compactEvent, session.sessionId) })
           emit({
             kind: 'compaction_status',
             status: {
               phase: 'finished',
-              reason: event.reason,
+              reason: compactEvent.reason,
               result: event.aborted ? 'noop' : event.result ? 'success' : 'failed',
             },
           })
@@ -1697,6 +1752,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           return
         }
         if (event.type === 'agent_settled') {
+          // 继续前的公开 compact 会先等待旧 agent 空闲，这不是本次执行的终态。
+          if (preparingContinuation) return
           // agent_end 可因自动重试/压缩续跑多次；只在 settled 产生本轮唯一 result。
           if (pendingFailedAssistant?.type === 'assistant') {
             // 失败前已生成的正文保留供用户查看；空失败消息不制造空白气泡。
@@ -1722,16 +1779,42 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         abortListener = () => input.abortSignal?.removeEventListener('abort', onAbort)
       }
       if (active.abortRequested || input.abortSignal?.aborted) {
-        // 初始化期间已停止：不允许随后的 prompt 真正发起模型请求。
+        // 初始化期间已停止：普通发送和继续都不能再发起模型请求。
         await this.abortRuntime(active)
         emit({ kind: 'sdk_message', message: convertStoppedResult([], session.sessionId) })
         queue.close()
       } else {
         promptStarted = true
-        const prompt = recoveredRuntimeSession && input.recoveryPrompt
-          ? `${input.recoveryPrompt}\n\n[当前用户消息]\n${input.prompt}`
-          : input.prompt
-        pendingPrompt = this.work.run(() => session.prompt(prompt))
+        pendingPrompt = this.work.run(async () => {
+          if (continuation) {
+            // 自定义上下文入口保留 SDK 的会话级重试/后置压缩；首请求前补公开阈值检查。
+            const usage = session.getContextUsage()
+            const settings = session.settingsManager.getCompactionSettings()
+            if (usage?.tokens !== undefined && usage.tokens !== null
+              && sdk.shouldCompact(usage.tokens, usage.contextWindow, settings)) {
+              preparingContinuation = true
+              try { await session.compact() } finally { preparingContinuation = false }
+            }
+            if (active.abortRequested || input.abortSignal?.aborted) {
+              emit({ kind: 'sdk_message', message: convertStoppedResult([], session.sessionId) })
+              return
+            }
+            await session.sendCustomMessage({
+              customType: 'axon_interruption',
+              content: [
+                recoveredRuntimeSession ? input.recoveryPrompt : undefined,
+                continuation.interruptionContext,
+              ].filter(Boolean).join('\n\n'),
+              display: false,
+              details: { interruptionId: continuation.interruptionId },
+            }, { triggerTurn: true })
+          } else {
+            const prompt = recoveredRuntimeSession && input.recoveryPrompt
+              ? `${input.recoveryPrompt}\n\n[当前用户消息]\n${input.prompt}`
+              : input.prompt
+            await session.prompt(prompt)
+          }
+        })
           .then(() => {
             promptSettled = true
             queue.close()
@@ -1742,24 +1825,32 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           })
       }
 
-      for await (const payload of queue) yield payload
+      // result 暂存到实际发送/继续及取消清理完成；清理故障不能在已保存停止结果后才暴露。
+      for await (const payload of queue) {
+        if (pendingResult) continue
+        if (payload.kind === 'sdk_message' && payload.message.type === 'result') pendingResult = payload
+        else yield payload
+      }
     } finally {
       try {
-        try { abortListener?.() } catch { this.recordCleanupFailure('Pi 取消监听清理失败') }
+        try { abortListener?.() } catch { this.recordCleanupFailure('Pi 取消监听清理失败', active) }
         // 提前关闭流先取消 SDK，再等真实 prompt/abort；不能让工具在 UI 结束后继续运行。
         if (promptStarted && !promptSettled && active.session) {
           active.abortRequested = true
           await this.abortRuntime(active)
         }
+        // 查询错误走事件队列，取消故障记入本轮标志；仍等实际 Promise 后再释放对象。
         await Promise.all([pendingPrompt, active.abortWork])
         // 解绑出错也继续释放 SDK；只记录固定诊断，不回显 SDK 原因。
-        try { unsubscribe?.() } catch { this.recordCleanupFailure('Pi 事件订阅清理失败') }
-        try { active.session?.dispose() } catch { this.recordCleanupFailure('Pi 会话资源清理失败') }
+        try { unsubscribe?.() } catch { this.recordCleanupFailure('Pi 事件订阅清理失败', active) }
+        try { active.session?.dispose() } catch { this.recordCleanupFailure('Pi 会话资源清理失败', active) }
       } finally {
         if (this.activeSessions.get(input.sessionId) === active) this.activeSessions.delete(input.sessionId)
         finish()
       }
+      if (active.cleanupFailed) throw new AgentRuntimeCleanupError()
     }
+    if (pendingResult) yield pendingResult
   }
 
   /** 硬停止当前会话；初始化未完成时先记标志，创建完成后立即中止。 */
@@ -1773,8 +1864,13 @@ export class PiAgentAdapter implements AgentProviderAdapter {
   /** 同一个活跃对象共享取消 Promise；同步抛错也被登记，最终等待不会遗漏取消清理。 */
   private abortRuntime(active: ActivePiSession): Promise<void> {
     if (!active.session) return Promise.resolve()
-    return active.abortWork ??= this.work.run(() => active.session!.abort()).catch(() => {
-      this.recordCleanupFailure('Pi 查询取消清理失败')
+    return active.abortWork ??= this.work.run(async () => {
+      // 压缩持有独立 controller；先取消它，普通 abort 才能等待 Runtime 真正空闲。
+      try { active.session!.abortCompaction() }
+      catch { this.recordCleanupFailure('Pi 压缩取消失败', active) }
+      await active.session!.abort()
+    }).catch(() => {
+      this.recordCleanupFailure('Pi 查询取消清理失败', active)
     })
   }
 
@@ -1782,7 +1878,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     if (this.disposed) throw new DOMException('Pi adapter 已释放', 'AbortError')
   }
 
-  private recordCleanupFailure(message: string): void {
+  private recordCleanupFailure(message: string, active?: ActivePiSession): void {
+    if (active) active.cleanupFailed = true
     this.cleanupFailures.push(new Error(message))
     console.warn(`[pi-adapter] ${message}`)
   }
@@ -1822,8 +1919,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     }
     // return 与正在进行的 next 串行；先关事件等待，再驱动暂停在 yield 的查询进入 finally。
     for (const stream of this.streams) {
-      void this.work.run(() => stream.return()).catch(() => {
-        this.recordCleanupFailure('Pi 查询流关闭失败')
+      void this.work.run(() => stream.return()).catch((error: unknown) => {
+        if (!(error instanceof AgentRuntimeCleanupError)) this.recordCleanupFailure('Pi 查询流关闭失败')
       }).finally(() => this.streams.delete(stream))
     }
     for (const { environment } of this.shellEnvironments.values()) this.releaseEnvironment(environment)

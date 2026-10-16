@@ -3,6 +3,9 @@
 import type {
   AgentActiveRun,
   AgentRunIdentityEvent,
+  AgentPauseSnapshot,
+  AgentPauseChangedEvent,
+  AgentContinueInput,
   BackendOwnedRun,
   BackendRunControlInput,
   AgentAskUserResponse,
@@ -47,6 +50,10 @@ export interface AgentRendererApi {
   getMessages(id: string): Promise<SDKMessage[]>
   send(input: AgentSendInput): Promise<AgentSendResult>
   stop(target: BackendRunControlInput): Promise<boolean>
+  pause(target: BackendRunControlInput): Promise<AgentPauseSnapshot>
+  getPause(sessionId: string): Promise<AgentPauseSnapshot | null>
+  continue(input: AgentContinueInput): Promise<AgentSendResult>
+  onPauseChanged(callback: (event: AgentPauseChangedEvent) => void): () => void
   respondPermission?(response: AgentPermissionResponse): Promise<boolean>
   respondAskUser(response: AgentAskUserResponse): Promise<boolean>
   listQueuedMessages(sessionId: string): Promise<AgentQueuedMessage[]>

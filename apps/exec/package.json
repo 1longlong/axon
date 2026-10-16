@@ -1,0 +1,13 @@
+{
+  "name": "@axon/exec",
+  "version": "0.1.5",
+  "description": "Axon 通用非交互 Agent 命令行入口",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --no-env-file --config=resources/bun-runtime.toml src/main.ts",
+    "build": "bun run scripts/build.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "@axon/shared": "workspace:*", "@axon/app-server": "workspace:*", "ajv": "^8.20.0", "ajv-formats": "^3.0.1" }
+}

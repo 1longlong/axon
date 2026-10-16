@@ -67,7 +67,7 @@ app-server（独立子进程）
 
 `createBackend` 接收显式目录、版本、异步凭据端口、Runtime 路由及自有资源，组合实际业务服务。core 可由非 Electron 宿主进程内复用；它提供的是内部服务集合，不是可绕过 owner/审批的公开网络 API。模型运行通过客户端登记和 Agent/Chat 运行协调，不能直接调用 adapter.query 代替完整应用链。具体示例见 [README 的独立复用说明](../README.md#不启动桌面单独复用后端)。
 
-桌面固定使用独立子进程：父端用应用自带 Electron Node 执行器启动 `dist/app-server.mjs`，不从 PATH 找用户 Node/Bun；独立开发入口可由 Bun 启动。后端只接受可信入口提供的绝对 `--data-dir`、`--home-dir`、`--application-version` 和可选 `--zima-python`，握手请求不能更改目录或执行权限。执行器标记 ELECTRON_RUN_AS_NODE 在导入业务前清除，避免进入工具环境。
+桌面固定使用独立子进程：父端用应用自带 Electron Node 执行器启动 `dist/app-server.mjs`，不从 PATH 找用户 Node/Bun；独立开发入口可由 Bun 启动。后端只接受可信入口提供的绝对 `--data-dir`、`--home-dir`、`--application-version` 和可选 `--zima-python` / `--entry exec`，握手请求不能更改目录或入口类型。执行器标记 ELECTRON_RUN_AS_NODE 在导入业务前清除，避免进入工具环境。
 
 ### 应用协议、身份与私有桥
 
@@ -91,13 +91,15 @@ stdout 专用于协议，JavaScript 日志/直接 write 转成 stderr 脱敏诊�
 
 每客户端最多 4 个、全后端最多 32 个历史快照，空闲 2 分钟释放，EOF/注销/退出关闭句柄。`AppServerHistoryClient.read` 完整汇聚到末页才返回，取消或页中失败不交付半份，finally 有界关闭快照。桌面先订阅事件再读历史，按消息 ID 合并读取期间新增完整消息；delta 不持久化，不承诺重连逐 token 重放。
 
+Agent 主窗/快捷浮窗聚焦重读时，renderer 先将当前活跃轮的流式 UUID 标记为草稿覆盖层，即使读取期间没有新 delta 也保留已显示的正文/思考/参数投影，不把全部旧缓存追加回历史。读取中撤回/重试/完整消息更新此标记；同 UUID 磁盘完整值优先于草稿，活跃轮或流式 UUID 已改变时不带入旧草稿。页面释放、旧读取版本和读取失败仍沿用原校验；不逐 token 写盘或恢复半截工具执行。
+
 ### 退出与故障边界
 
 主窗口关闭留托盘不停止后端；真正退出先禁用新入口/快捷键并 flush 窗口补丁，再撤销页面/IPC/身份、释放父端交互并等待唯一 child。子端先 dispose 封口/取消，再 drain 等实际 Promise/finally、TCP/stdio/受管进程 close，最后 flush 输出；迟到初始化、已淘汰但仍有租约的连接和已释放引用的预热仍须等待。逐项失败不跳过其他资源，只汇总脱敏错误。
 
 EOF、信号、协议/输出故障及未捕获异常共用 8 秒总期限，失败/超时非零退出。父端 10 秒 TERM、20 秒 KILL 只兜底本次自有 child；实际 close 不代表业务清理成功。异常退出失效旧交互/订阅，并向 UI 标记中断；新进程只恢复持久化状态，不自动重发或续跑。任意自行脱离受管组的后代不在清理保证内。
 
-一个服务持有一个数据目录，不能多个独立宿主共写正式目录；独立复用不等于接管已有桌面后端。首版没有 HTTP/WebSocket、TUI/exec 产品入口、daemon 或远程入口。Runtime 专属文件格式与 SDK 仍只由对应 adapter 理解，模型/工具恢复语义不因模块抽取改变。
+一个服务持有一个数据目录，不能多个独立宿主共写正式目录；独立复用不等于接管已有桌面后端。macOS 正式 app-server 在业务装配前取得该目录 `.axon-backend.lock` 的内核独占锁，保持到实际退出；取锁失败不读改写业务数据，父端收到稳定 `-32006` 与 `busy/unavailable` 原因，不自动重建或重投。其他平台桌面尚未提供该锁，进程内直接复用 core 的宿主仍须自行保证唯一写入者。没有 HTTP/WebSocket、TUI、daemon 或远程入口；exec 源码新任务按迭代 25 接入独立 child。Runtime 专属文件格式与 SDK 仍只由对应 adapter 理解，模型/工具恢复语义不因模块抽取改变。
 
 ## 3. 本地持久化
 
@@ -148,6 +150,7 @@ Chat 不读取用户配置的 Agent 系统提示词；正常请求使用应用�
 ```ts
 interface AgentProviderAdapter {
   query(input: AgentQueryInput): AsyncIterable<AgentStreamPayload>
+  continueQuery?(input: AgentContinueQueryInput): AsyncIterable<AgentStreamPayload>
   abort(sessionId: string): void
   releaseSession?(sessionId: string): void
   dispose(): void
@@ -167,6 +170,8 @@ interface AgentProviderAdapter {
 
 Runtime 专属字段只能在 adapter 内解释；编排、渲染和持久化层不得 import Runtime SDK。
 
+`AgentContinueQueryInput` 复用查询上下文但不包含 `prompt`，增加可信 `interruptionId` 和 `interruptionContext`。可选 `continueQuery` 只供宿主核验暂停后续做，不是普通发送的空字符串变体。core 已连接 Pi/Zima 的此入口；缺少 adapter 能力时在落盘前拒绝，不回退为隐藏用户输入。Zima 还须在握手中明确声明 continue 能力，不支持时报告更新 Runtime，而非猜测或重投。Pi SDK 保持外部依赖原样，不改其源码、安装目录或私有方法。
+
 `releaseSession` 是可选的跨轮资源释放能力。会话删除落盘后，生产装配按 runtime 归属通知已经创建的 adapter；删除根会话同时通知子会话。不支持缓存的 adapter 无需实现，也不会为了删除启动新的 runtime。
 
 ### 6.2 中立消息协议
@@ -174,7 +179,7 @@ Runtime 专属字段只能在 adapter 内解释；编排、渲染和持久化层
 `AgentStreamPayload` 分为：
 
 - `sdk_message`：完整消息，可展示并按规则持久化。
-- `sdk_delta`：流式增量，只用于实时渲染。
+- `sdk_delta`：流式增量，只用于实时渲染；停止前已接纳的正文/思考可在收束时冻结为明确标记的部分 assistant 检查点，不逐片段落盘。
 - 重试状态、草稿撤销等瞬时投影，不写入消息 JSONL。
 
 主要 `SDKMessage` 类型：
@@ -215,6 +220,7 @@ Axon 负责：
 4. 可用 Skills 的轻量目录。
 5. 当前沙箱与审批约束。
 6. 项目记忆索引和陈旧提醒。
+7. 最近真实轮明确停止时的中断提醒，从应用历史识别并置于动态尾部，不重投原任务或工具。
 
 Runtime 在同一轮工具循环中复用这份基础上下文，并追加工具结果和后续消息。Pi 可在 Read 进入子目录后，于下一次模型请求前动态加入更深作用域的 `AGENTS.md`；其他 Runtime 若不具备等价钩子，必须显式声明降级行为。
 
@@ -269,13 +275,21 @@ Pi 的 Bash、Read、Write、Edit、Glob、Grep 等内置工具必须统一委�
 
 Pi Bash 通过中立 Shell 请求向宿主提交原始命令、cwd、环境覆盖、超时和停止信号。宿主从系统账户解析默认 Shell，并依次检查同类型的账户路径、PATH 与系统路径；macOS 默认回退顺序为 zsh、bash、sh。内部直接执行程序的 argv 请求保持独立，不自动加入 Shell 包装。
 
+Pi 与 Zima 的内置 Bash 提供可选 `workdir`，例如 `{"command":"go test ./...","workdir":"packages/server"}`。省略或空字符串默认项目工作区，相对路径从项目根解析；允许绝对路径、`..` 或符号链接选择项目外真实目录，拒绝不存在、非目录、非法类型和空字符。模型命令不自动拼接或删除 `cd`，执行目录通过子进程 cwd 设置；每次 Bash 独立执行，不保留上次 `cd/export`，也不改变会话工作区。
+
+Agent 系统指引要求模型每次调用 Bash 显式填写本次目标目录，而不是机械填写项目根目录：根目录可填当前项目工作目录或 `.`，子目录填对应路径，项目外可填绝对目录；提供子目录命令与目录分开的示例。除非确有必要，否则不要使用 `cd`，不限定必要情况的具体种类。Pi Bash 工具及参数描述采用同样的生成要求；Zima 接收统一系统指引，工具 schema 仍由其 Runtime 提供。这里约束模型生成方式，不把 `workdir` 改为 Schema 必填，不拒绝或改写既有命令。
+
+执行与权限分离：`workdir → cwd` 仅确定本次进程位置；`AgentSandboxPolicy.sandboxCwd` 则由项目管理器解析出的可信根固定，基础 `writableRoots`、保护目录和网络策略始终从该根及会话模式生成，不从模型参数或批准后的 `workdir` 重建。宿主允许项目外 cwd，但编译 profile 只消费可信 policy 和精确 Grant，不把 cwd 自动加入可写根；进入 `.git` 等目录也不会解除保护。本轮临时目录仍只开放宿主分配的根。源码直接使用新策略字段，不保留旧字段读取。
+
+Pi adapter 扩展官方工具 schema 并按单次目录创建工具，复用 SDK 的超时、取消、输出及宿主委托；Zima 的 schema 与同步/异步 cwd 由其 Runtime 提供。审批前规范化实际目录，批准的更新参数在执行前重新校验；审批 UI 展示工作目录，普通始终允许白名单包含 workdir，不跨目录复用。Pi 项目外写入被基础沙箱拒绝后，明确绝对路径的 errno 可申请精确写 Grant；相对路径等无法可靠归因的拒绝仍返回工具错误，不猜目标或扩大为整个 cwd 的写权限。Zima 的目录参数校验不是 OS 沙箱，Bash 副作用仍使用普通人工审批与最小环境，文件工具的工作区限制不变。JSON-RPC 不增加工具字段，workdir 随原始工具消息保存。
+
 宿主选择 Shell 后继续通过现有 Seatbelt 执行器启动命令，输出和错误返回 adapter。命令规则、审批和授权仍以原始工具输入为依据，Shell 选择不增加权限。
 
 Pi 首次查询初始化应用会话的宿主环境，在加载 runtime 之前启动异步预热；同一 cwd 的后续轮次复用该环境，cwd 改变或 adapter 释放时清理引用。预热捕获函数、别名、选项和原生导出声明，经独立加载验证后原子发布到 `~/.axon/shell_snapshots/`（开发模式为 `~/.axon-dev/shell_snapshots/`）。目录权限 `0700`、文件权限 `0600`；捕获与验证不套工具沙箱，各自有 10 秒上限并清理进程组。初始化输出不进入日志或对话，失败只记录原因码，不阻断模型查询。
 
 快照采用 `<sessionId>-<uuid>.sh` 命名，发布前使用同名 `.tmp`，属于可删除的执行缓存；导出声明可能含凭据，权限限制不等于内容脱敏。宿主初始化默认继承 Axon 进程环境，当前没有独立的环境变量过滤设置；工具初始环境再叠加 SDK 环境和显式覆盖。普通导出声明不做二次过滤，也不代表终端中的 alias/函数能跨 `exec` 保留。运行时读取快照采用 best-effort，不保证被外部改坏的脚本一定能继续执行；缓存不应由用户编辑。
 
-工具只读取已经就绪的快照；初始化 cwd、解释器路径和 `-lc` 必须匹配，文件缺失或条件不符时保留原始 argv，不等待预热或临时重建。符合条件时改用非登录包装 Shell，在同一 Seatbelt 内静音加载快照、恢复显式环境覆盖及宿主临时目录，然后 `exec shell -c` 执行原始命令。SDK 的完整初始环境与显式覆盖分开传递，普通继承 PATH 不覆盖快照；Pi 工具目录在恢复后重新前置，本轮 runtime 状态即使缺失也重放删除。覆盖值从进程环境暂存，不写入包装 argv，内部恢复输出保持静音。原始 request 始终用于审批、授权与越界归因，直接程序 argv 入口不自动加载快照；执行中的 `export` 和 `cd` 不写回快照。
+工具只读取已经就绪的快照；捕获时固定真实 cwd，执行 cwd 按真实目录匹配，目录别名可复用、真实子目录及改指向的别名不复用；解释器路径和 `-lc` 也必须匹配。文件缺失或条件不符时保留原始 argv，不等待预热或临时重建。符合条件时改用非登录包装 Shell，在同一 Seatbelt 内静音加载快照、恢复显式环境覆盖及宿主临时目录，然后 `exec shell -c` 执行原始命令。SDK 的完整初始环境与显式覆盖分开传递，普通继承 PATH 不覆盖快照；Pi 工具目录在恢复后重新前置，本轮 runtime 状态即使缺失也重放删除。覆盖值从进程环境暂存，不写入包装 argv，内部恢复输出保持静音。原始 request 始终用于审批、授权与越界归因，直接程序 argv 入口不自动加载快照；执行中的 `export` 和 `cd` 不写回快照。
 
 会话删除后通过 `releaseSession` 取消其预热并删除自有快照；根会话删除包含子会话，应用退出通过 adapter `dispose` 释放全部引用。初始化时异步合并遗留清理：只扫描缓存目录内可识别的 `<sessionId>-<uuid>.sh` / `.sh.tmp` 普通文件，读取应用主/子会话的 `updatedAt` 元数据，不读消息或快照正文。无会话归属的文件立即清理，归属会话超过三天不活跃的文件清理，正在预热或跨轮持有引用的会话始终排除。删除前再次检查引用，不跟随文件符号链接，不递归删除目录；清理异常只记录脱敏诊断，不阻断模型请求。
 
@@ -320,6 +334,7 @@ MCP 是项目级配置，支持 stdio 和 Streamable HTTP。core 的 MCP 服务�
 - 左侧项目/会话树和右侧多面板均可折叠与调整宽度。
 - 中间区域预留最小 480px，承载 Chat 或 Agent 消息流；右侧栏默认 240px、最小 220px、最大 600px，实际扩展受窗口可用宽度约束。
 - 工具调用、thinking、正文按真实事件顺序聚合在同一轮 Agent 回复中。
+- 轮内相邻思考与工具调用归入连续活动组：进行中默认逐项展开，非空正文或真实终态关闭后默认收起为计数摘要；正文不移动。失败、待交互/仍运行的工具、追问与独立子任务入口保持可见，完整参数/结果按需展开。分组仅属于 renderer 投影，不改应用历史或 Runtime 上下文。
 - 权限和追问靠近输入区显示。
 - 快捷键可绑定已有会话，唤起轻量输入/回复浮窗，并与主窗口共享历史。
 - 托盘、单实例、关闭/退出语义和 macOS Dock 状态由主进程统一管理。
@@ -333,7 +348,7 @@ MCP 是项目级配置，支持 stdio 和 Streamable HTTP。core 的 MCP 服务�
 - 普通工具异常转换为 `tool_result(is_error)`，不自动重放；沙箱升级批准后的同次精确授权重跑不属于模型 API 重试。
 - Runtime/adapter 异常由 AgentService 转换成唯一失败 `result` 并落盘。
 - 持久化失败优先保护数据一致性，不把未落盘终态伪装为成功。
-- 停止后丢弃迟到 delta、工具进度和重试事件，只允许规范化后的唯一终态继续下游。
+- 停止后丢弃迟到 delta、新 assistant、工具进度和重试事件；仅核验本轮已登记调用的实际工具回传及唯一终态。收束时保存已接纳的部分正文/思考，缺失工具结果标明未知，不推断是否执行或回滚副作用。
 - 同一会话同时只允许一个活跃运行所有者；后台通知等待父会话空闲后再启动新一轮。
 
 ## 14. 验证原则
@@ -370,6 +385,8 @@ MCP 是项目级配置，支持 stdio 和 Streamable HTTP。core 的 MCP 服务�
 | 22 | macOS Seatbelt 工具沙箱与细粒度审批 | 已完成 |
 | 23 | Agent Shell 文件快照执行 | 已完成 |
 | 24 | 后端模块化与独立 app-server | 已完成（源码范围；打包后 GUI/Keychain 不验收） |
+| 25 | 通用非交互 Agent 入口 `axon exec` | 已完成；macOS/Pi 源码与独立 CLI、工作流/恢复/输出/集中验收 |
+| 26 | Agent 暂停与继续 | 已完成；中断背景、后端精确控制、实际取消收束、部分历史及两桌面入口通过源码集中验收 |
 
 ### 迭代 1：应用骨架与本地底座
 
@@ -394,6 +411,8 @@ MCP 是项目级配置，支持 stdio 和 Streamable HTTP。core 的 MCP 服务�
 ### 迭代 7：Agent 交互与恢复
 
 完成消息排队、必要追问、停止、模型错误分类、会话恢复、外部运行标识和 Git 归因。
+
+同一可信入口在普通根轮进行中提交新消息时默认排队，不另设排队按钮。等待消息只在后端内存队列中，主输入及展开的快捷浮窗上方投影为单行可取消胶囊；正常轮次收束后协调器按顺序出队，以新的 runId 作为下一轮用户消息交给 AgentService 并落盘，不依赖 UI 再次提交。观察入口不能插入原入口的队列，停止/暂停沿用清空等待队列语义。
 
 ### 迭代 8：Skills 与项目指令
 
@@ -438,11 +457,11 @@ MCP 是项目级配置，支持 stdio 和 Streamable HTTP。core 的 MCP 服务�
 #### 阶段 1：中立策略与执行契约
 
 - 在 shared 中定义 Runtime 无关的沙箱策略、命令/文件/网络权限请求、审批作用域和执行结果。
-- 按实际分层拆成三项独立状态：沙箱模式 `readOnly | workspaceWrite` 决定操作系统能力边界；审批策略首版固定为 `onRequest`，决定何时产生审批；审批者字段保留 `user | autoReview`，当前只有人工审批可用，自动审查尚未实现。
+- 按实际分层拆成三项独立状态：沙箱模式 `readOnly | workspaceWrite` 决定操作系统能力边界；审批策略 `onRequest | never` 决定是否允许申请额外授权，桌面默认 `onRequest`，非交互策略见迭代 25；审批者字段保留 `user | autoReview`，当前只有人工审批可用，自动审查尚未实现。
 - `AgentSandboxPolicy` 是沙箱模式结合可信项目工作区后生成的具体根目录与网络策略，不与审批策略混成同一个枚举。当前内置命令规则只返回 `allow | forbidden`；类型保留 `prompt`，但未实现用户自定义前缀规则。受宿主保护的命令未命中禁止规则时先进入基础沙箱，不能因可执行文件未知而请求审批；无宿主保护的命令仍需普通审批。
 - 输入区展示权限预设而非底层字段：“请求批准”映射为 `workspaceWrite + onRequest + user`；“帮我批准”映射为 `workspaceWrite + onRequest + autoReview`；“完全访问权限”理论上对应 `dangerFullAccess + never`，但本迭代明确禁用。
 - 会话创建、子 Agent 和恢复流程均从项目工作区生成基础策略；子 Agent 不得扩大父会话边界，explore/plan 固定收窄为只读。
-- 当前不提供 `dangerFullAccess`、`never` 或其他关闭沙箱并跳过审批的完全自动组合；开发阶段直接采用新字段，不维护旧权限模式兼容。
+- 当前不提供 `dangerFullAccess` 或关闭沙箱并跳过审批的完全自动组合；`never` 不关闭沙箱、不自动批准，见迭代 25。开发阶段直接采用新字段，不维护旧权限模式兼容。
 
 #### 阶段 2：Seatbelt 执行层
 
@@ -459,7 +478,7 @@ MCP 是项目级配置，支持 stdio 和 Streamable HTTP。core 的 MCP 服务�
 
 #### 阶段 4：审批与规则
 
-- 第一版审批策略固定为 `onRequest`：沙箱内操作直接执行，需要额外能力的操作弹出审批，明确禁止的操作直接拒绝；`never` 代表不弹窗而不是自动获得全访问，本迭代暂不开放。
+- 桌面默认审批策略为 `onRequest`：沙箱内操作直接执行，需要额外能力的操作弹出审批，明确禁止的操作直接拒绝；迭代 25 增加的 `never` 直接拒绝需审批操作，不复用交互授权，也不自动获得全访问。
 - 命令规则的 `allow` 或“未匹配”只表示允许在当前沙箱策略内尝试执行，不表示绕过沙箱升级审批。当前规则不返回 `prompt`；文件路径预检或可归因的 Seatbelt 拒绝需要额外能力时，交给人工审批决定允许或拒绝。
 - 路径明确的 Write/Edit 在执行前完成边界预检并生成结构化升级请求；Bash 无法完全静态判断时先在基础沙箱运行，确认属于沙箱拒绝后生成升级请求，不能把 `Operation not permitted` 当普通工具错误直接结束。批准后只重试同一条明确命令并携带对应授权，且必须向用户说明它可能已在沙箱内产生部分副作用。
 - “帮我批准”入口禁用；独立自动审查 Agent 尚未实现，不把预留的 `autoReview` 字段描述成已经可用的审批能力。
@@ -548,6 +567,248 @@ MCP 是项目级配置，支持 stdio 和 Streamable HTTP。core 的 MCP 服务�
 
 Git/helper 退出测试现使用共享测试 helper 主动发送就绪通知，替代 Shell 写 PID 文件后的轮询；通知发出前已安装 TERM 处理，测试另验证 TERM 后仍存活。就绪仍限制三秒，管道 close 后有界等待真实 PID 的 ESRCH，EOF/SIGTERM、进程组、重启数据及订阅断言不变。该调整消除测试夹具的旧同步路径，不宣称已归因或修复原 Shell 偶发停顿的系统层原因。Zima accept 曾偶发超时仍未归因，保留 trace 诊断，不凭复跑通过宣称修复。
 
+### 迭代 25：通用非交互 Agent 入口（已完成）
+
+目标：提供无需 Electron 窗口、无需人工回答的 `axon exec`，用于命令行任务、脚本管道、CI 和外部应用调用。评测只是调用方之一；入口不内置题库、补丁格式、判卷或批量调度逻辑。源码与本机独立 CLI 的新任务/显式恢复/临时会话已接独立后端、真实 Pi/Seatbelt、完整工作流、正文/JSONL、文件/Schema 输出与取消退出，迭代集中验收已完成。
+
+#### 架构与运行边界
+
+```text
+apps/exec：参数 / stdin、可信配置与凭据、输出及信号
+   → packages/app-server：协议客户端
+   → 独立 apps/app-server child：external 身份
+   → core：执行策略、项目 / 会话、完整 Agent 运行协调
+   → runtime-adapters / host-node：模型工具循环、沙箱与 Shell
+```
+
+- 新增 `apps/exec` 可执行入口，发布命令名为 `axon`，首个子命令为 `exec`；开发使用 Bun 源码命令，构建提供独立 CLI 产物，不要求打开或安装 Electron。源码和构建产物均复用独立 app-server，不创建第二套模型循环或直接调用 adapter.query。
+- 默认 Runtime 为 Pi，首版验收平台为 macOS。解析接受中立 runtime ID，但 Zima 非交互执行、Linux/Windows 执行暂不开放；缺少实际沙箱能力时启动失败，不能静默换 Runtime 或裸执行。后续接入仍以 adapter 能力协商为边界，不在 CLI 导入 Runtime SDK。
+- CLI 默认业务目录为 `$HOME/.axon-exec/`，与桌面正式/开发目录分离；配置、渠道引用、项目、应用 JSONL 和 Runtime artifact 均属于该后端。一个目录只允许一个活跃写入者，调用方不得与桌面或另一 exec 共写；`--data-dir` 不能作为绕过该约束的入口。不同目录不代表工作区文件或全盘读取已经隔离。
+- macOS 独立服务以原生 `open(O_EXLOCK | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)` 取得常驻零字节 `.axon-backend.lock` 的独占锁，所有正式服务入口共用，不靠 CLI 父进程或 PID 文件维护；目录别名归同一真实 inode。锁文件 `0600`，拒绝链接/非普通文件/非私有权限；不截断或删除文件，不提供抢锁/陈旧锁清理。后端资源 drain 和协议 flush 完成后才关闭 FD，异常退出由内核释放，exec 后代不继承句柄。该锁仅保护业务目录写入，不代表同项目文件并发控制；用户不应手动删除或替换锁文件。其他平台 CLI 拒绝启动，不回退无锁执行。
+- 普通调用按真实 cwd 复用 CLI 项目、每次创建新会话；只有显式 resume 才继续旧上下文。项目工作区不随单次 Bash workdir 改变。第一版不接管正在运行的桌面后端、不自动导入桌面密钥/会话，不提供会话 Runtime 切换。
+- 命令校验、配置解析、沙箱能力和凭据可用性预检尽量在任务创建/模型调用前完成；未送达与交付未知分开报告，未知交付不自动重发 prompt。
+
+#### 参数契约
+
+| 参数 | 本迭代计划语义 |
+| --- | --- |
+| `PROMPT` / `-` | 文本任务或从 stdin 读取任务；无位置参数且 stdin 为管道时读取 stdin，TTY 下缺少任务直接报错，不启动交互 UI。提供文本任务且另有管道输入时，把输入作为明确分隔的用户附加内容，保留顺序和换行 |
+| `--cd, -C <path>` | 选择真实存在的项目工作区，默认调用目录；其他文件参数相对该目录解析，数据目录参数相对原调用目录解析，不隐式创建工作区 |
+| `--channel <id>` | 选择 exec 配置的启用渠道；默认使用 CLI 配置指定渠道，缺失/禁用直接失败，不启动渠道选择窗口 |
+| `--model, -m <id>` | 覆盖本次模型，必须属于所选渠道；缺省使用该渠道的 CLI 默认模型 |
+| `--runtime <id>` | 新会话默认 pi；resume 不得更改原 Runtime，首版不支持的组合明确报错 |
+| `--sandbox, -s <mode>` | `read-only` / `workspace-write`，默认只读；映射中立策略，命令网络仍默认关闭，受保护目录规则不变 |
+| `--ask-for-approval, -a never` | exec 固定使用 never；其他值拒绝，不退回交互审批。桌面仍默认 onRequest |
+| `--json` | stdout 输出带版本的有序 JSONL 事件，不混入日志、ANSI 或重复的纯文本最终回复 |
+| `--output-last-message, -o <path>` | 原子保存本次工作流最终回复正文，不含 thinking/工具结果；普通模式仍在 stdout 输出正文，JSON 模式仍输出事件。保存失败为非零退出，不伪装运行成功 |
+| `--output-schema <path>` | 读取 JSON Schema，要求最终回复为 JSON 并本地验证；先做 schema 校验。优先使用 adapter 明确支持的结构化输出，否则以中立输出要求加本地校验，不声称协议级保证；不合格明确失败，不自动重跑有副作用任务 |
+| `--profile, -p <name>` | 选择 exec 配置中的命名运行预设；这是 CLI 配置组合，不是另建动态 Agent Profile 系统 |
+| `--config, -c key=value` | 可重复的本次覆盖，仅允许有类型的已知字段；未知键、非法值与密钥字段报错，不持久修改全局配置，不透传 Runtime 私有参数 |
+| `--ignore-user-config` | 不加载 CLI 默认配置/预设，仍允许显式指定可信配置和凭据；不跳过项目 AGENTS.md、沙箱或硬命令规则 |
+| `--config-file <path>` | 显式加载可信 JSON 配置，路径相对原调用目录解析；与 ignore-user-config 同用时只读此文件，缺失或损坏报错 |
+| `--data-dir <path>` | 指定独立 CLI 数据目录；真实路径检查和单写入者约束不变 |
+| `--ephemeral` | 不保留此次项目/会话/Runtime 历史；临时 artifact 和私有数据仍可能落盘，结束后只清理本次自有目录，不删除工作区修改、用户输出文件或既有配置。不与 resume 同用 |
+| `--timeout <seconds>` | 可选正整数总执行期限，默认未设置；覆盖初始化、模型/工具循环及自有子任务，达到期限停止并等待清理，不只取消 RPC 等待 |
+| `--skip-git-repo-check` | 默认要求工作区位于 Git 仓库；允许显式用于其他目录，不扩大读写或网络权限 |
+| `--color <mode>` | `auto` / `always` / `never`，仅人类可读进度/诊断使用；管道默认无 ANSI，JSONL 始终无颜色 |
+| `--help, -h` / `--version, -V` | 不装配后端、不创建数据或请求模型即可输出帮助/版本 |
+| `exec resume <sessionId> [PROMPT|-]` | 在选定数据目录中恢复原会话并发送新的用户任务；只恢复 CLI 根会话，拒绝子会话、缺失任务和不匹配工作区 |
+| `exec resume --last [--all] [PROMPT|-]` | 默认选当前真实工作区最新 CLI 根会话；all 扩大选择范围，恢复仍使用原项目工作区，不把旧会话移入当前目录；无匹配直接报错，不弹选择器 |
+
+运行配置采用 JSON：`$HOME/.axon-exec/config.json` 保存默认值、命名 profiles 与渠道定义，每个渠道可单独填写明文 `apiKey`；显式 config-file 替代默认配置文件，data-dir 不隐式改变配置路径。优先级为内置默认 → 所选 CLI 配置 → 选中 profile → `-c` → 专用参数。配置可覆盖渠道/模型、thinking 等级、Agent system prompt、沙箱、超时及 Skills/MCP/记忆/协作开关；参数外部名字与 shared 内部枚举由入口单点映射。显式 thinking 等级必须通过 adapter 对当前协议/模型的能力校验，不能接受后静默忽略。命名 profile 不能扩大平台能力或绕过安全规则。ignore-user-config 下没有显式文件却选择 profile 时直接报错，不偷偷重读默认文件。不从不可信项目自动加载运行预设。
+
+现行 CLI 配置格式如下，渠道、模型与密钥均为占位值：
+
+```json
+{
+  "defaults": {
+    "channel": "my-channel",
+    "runtime": "pi",
+    "sandbox": "read-only",
+    "systemPrompt": "",
+    "skills": true,
+    "mcp": true,
+    "memory": false,
+    "tasks": true
+  },
+  "profiles": {
+    "coding": {
+      "sandbox": "workspace-write",
+      "timeout": 600,
+      "tasks": false
+    }
+  },
+  "channels": [
+    {
+      "id": "my-channel",
+      "name": "命令行渠道",
+      "provider": "openai",
+      "baseUrl": "https://api.openai.com/v1",
+      "enabled": true,
+      "apiKeyRequired": true,
+      "apiKey": "替换为该渠道的实际密钥",
+      "defaultModel": "my-model",
+      "models": [{ "id": "my-model", "name": "模型", "enabled": true }]
+    }
+  ]
+}
+```
+
+- 顶层仅接受 `defaults/profiles/channels`，缺省为空；文件、未选中 profile 和全部渠道均严格校验，未知字段、渠道之外的密钥字段和 Runtime 私有字段拒绝。配置/Schema 读取限 1 MiB 普通 UTF-8 文件，FIFO 不进入阻塞读取，坏文件不覆盖或静默忽略。
+- 设置可用字段为 `channel/model/runtime/sandbox/thinking/systemPrompt/timeout/skills/mcp/memory/tasks`。runtime 默认 pi、sandbox 默认 read-only、提示词默认空白、Skills/MCP/Task 默认开启、记忆默认关闭；thinking 缺省交由会话默认，显式值需后端能力验证。timeout 缺省不限，显式为 1 到 2147483 的整数秒数；开关必须是 JSON boolean，不接受字符串布尔值。
+- 渠道必须提供 `id/provider/models`（至少一个模型）；name 缺省 id、enabled/apiKeyRequired 缺省 true，baseUrl 缺省官方 Provider 地址，custom/兼容地址需显式填写。model 必须提供 id，name 缺省 id、enabled 缺省 true；选择模型由设置 model 或渠道 defaultModel 指定，不静默选首项，禁用/不存在的渠道模型报错。URL 不接受用户名、密码、query 或 hash，并规范化主机/端口/尾斜杠。
+- `-c` 使用相同设置字段，字符串可直接填写或 JSON 引号包裹，多行提示词用 JSON 字符串；例如 `-c tasks=false -c thinking=high`。它不修改文件，不支持动态添加渠道、API Key 或任意 SDK 参数。
+- 预检解析真实工作区与数据目录祖先，拒绝桌面 `.axon/.axon-dev` 数据目录重叠和链接逃逸、系统根/用户目录/工作区祖先，以及位于工作区内的数据目录；锁和持久化数据不能成为模型可写的项目内容。独占写入者锁已由实际 macOS app-server 落实；CLI 父端在握手时检查真实 Pi 沙箱支持、所选模式及完整内置工具覆盖，能力不足收束 child 并拒绝，不将路径预检当作 OS 沙箱验证。
+
+源码使用方式（渠道/模型为占位值，须先按上述格式配置）：
+
+```bash
+# 普通命令行任务；缺省为只读，stdout 只有最终正文。
+bun run exec:dev exec -C /absolute/project --channel my-channel -m my-model "说明目录结构"
+
+# 脚本管道；显式允许工作区修改，收集事件，期限覆盖整个执行。
+bun run exec:dev exec -C /absolute/project -p coding --sandbox workspace-write \
+  --json --timeout 600 - < /absolute/input/task.txt
+
+# Schema 相对项目目录解析；目标父目录须已存在，正文通过校验后才保存。
+bun run exec:dev exec -C /absolute/project --output-schema schema.json \
+  -o /absolute/output/result.json "生成符合 Schema 的结果"
+
+# 显式恢复，只发送新任务；会话 ID 可从 --json 的 workflow_started 获取。
+bun run exec:dev exec resume SESSION_ID -C /absolute/project "检查刚才修改是否遗漏边界"
+bun run exec:dev exec resume --last -C /absolute/project "继续下一项"
+bun run exec:dev exec resume --last --all "检查最近会话的修改"
+```
+
+#### 非交互策略与凭据
+
+- shared 已提供 `approvalPolicy: never` 和独立的 `userInputPolicy: ask | reject`，core 统一执行；会话/运行校验、存储、上下文说明、主/子 Agent 继承、RPC 和 adapter 消费同步。缺省仍为 `onRequest + ask`，桌面不增加新的选择项。不能靠拒绝反向 RPC 或隐藏权限卡片实现非交互。
+- never 不授予新增权限：基础沙箱内的允许操作执行，需要普通审批或沙箱升级时立即返回中立拒绝，不登记 pending、不生成新 Grant、不触发授权后重跑；硬禁止和只读子角色始终优先。非交互新运行不继承桌面人工会话白名单/Grant。
+- AskUserQuestion 在此入口直接返回“非交互入口无法提供用户回答”的错误工具结果；不伪造回答、不挂起。模型可以在既定范围内调整方案或说明阻塞，一次拒绝不直接等于整轮失败。
+- 默认命令网络关闭。CLI 不支持自动批准所有 MCP/记忆写入或无沙箱工具；需要普通批准的调用返回拒绝。Skills、记忆、MCP 和协作仍由 core 的开关/角色约束装配，disabled 不初始化相关连接、工具或注入相关目录。远程 MCP 的连接、模型网络与本地命令沙箱不能混为同一个授权。
+- CLI 只使用最终选中渠道的 `apiKey`，不读取 `AXON_API_KEY` 或桌面密钥；父入口清除残留同名环境变量，后端、工具、MCP 和 Shell 预热不自动继承它。密钥仅留在父端配置，经私有管道按确切渠道 ID/Provider/Base URL 交付；启动渠道 DTO、argv、系统提示词和自动保存的历史不携带密钥，不把全部配置密钥广播给后端。新任务在启动前检查；resume 先校验原渠道再取其密钥，不使用默认渠道的密钥。`apiKey` 必须是最多 16384 字符、无控制字符的字符串，缺省/空字符串表示未提供；apiKeyRequired 为 true 时缺密钥失败，false 时可不填。
+- CLI 配置中的密钥是用户主动保存的明文，文件应设为 `0600`、放在工作区之外且不提交仓库；不假称加密或对同一用户/有读取权限的模型工具不可见。当前沙箱允许全盘读取，主动读取此配置仍可能暴露密钥；用户 Shell 脚本自行导出密钥也不受继承清理保证。桌面 safeStorage 格式不变，CLI 不复用其密文；OS 安全存储/外部密钥管理器仍后置。渠道目标只匹配用户选中配置的确切目标，不为任意 URL 自动确认；重定向等超出授权仍拒绝。
+
+现行可信装配链已接通：启动 argv 的 `--entry exec` 才启用私有 `axon/host/exec/bootstrap`，读取无密钥渠道与瞬时 Agent 配置；普通业务握手不能更换入口类型，默认桌面不读取该端口。配置严格校验并复制，缺桥/坏配置在创建业务目录前失败。`createBackend` 按稳定渠道 ID 原子保存无凭据定义，运行时 `ChannelManager.resolve` 经中立 `resolveRuntimeCredential` 端口调用私有 `axon/host/runtime-credential/resolve`；父端核对 ID、Provider 与规范化后的确切 Base URL，入口还须限制当前选定渠道。凭据解析失败不尝试其他来源，异常只返回稳定错误；`hasApiKey` 仍表示持久凭据存在，不表示瞬时运行凭据。
+
+`BackendAgentConfiguration` 仅来自可信装配，复制为本次运行上限，不写入 settings.json。Skills 关闭不执行项目/内置/用户目录发现，也不注册 SkillRead；MCP 关闭不调用连接/取工具链；记忆关闭不读取索引/检查文件基线/注入工具，项目原开关也不能越过此上限；协作关闭不注册 Agent/Task 工具、提示词或后台交付回调。AGENTS.md 与沙箱/权限规则不受这些开关影响。空白瞬时提示词显式覆盖持久用户提示词，受管指引仍保留；`generateTitle=false` 禁止额外标题模型请求。默认桌面装配不传该配置，行为保持不变。
+
+CLI 的 `ExecBackendProcess` 提供可信父端连接：源码模式以当前 Bun 执行器直接 argv 启动独立服务，独立构建按 CLI 自身真实位置选配套 `backend/axon-app-server`；不经 Shell、不搜索 PATH、不回退源码。先登记私有桥，再握手并核对版本/目录/真实沙箱，最后登记唯一 external 身份。启动时剔除残留 AXON_API_KEY 和无关的 Zima 解释器环境，只允许所选确切渠道使用其配置密钥，安全存储与人工目标确认明确不可用。固定业务请求自动附加 owner，连接失败立刻失效 owner，不重建或重发。停止先封口，再 EOF；10 秒 TERM、20 秒 KILL 仅作用于自有 child，等待实际 close，非零/信号/强制退出视为清理失败；异常后代持有管道时最终关闭自有管道解除阻塞，不宣称已回收任意后代。源码和构建使用同一命令/工作流编排。
+
+独立构建命令为 `bun run exec:build [--outdir <产物目录>]`，默认 `apps/exec/dist`，只构建本机 macOS arm64/x64；本机证据为 arm64，未声称 x64 实测。CLI `axon` 内嵌 Bun 与 Schema Worker，构建分支使用内嵌 `.js` 线程入口、源码仍为 `.ts`，不依赖工作区中的线程文件。独立后端启动器同样内嵌 Bun，固定加载自身相邻的 `app-server.mjs`，外部 SDK/解析器/MCP 从清单遍历复制完整包和资源，保留每包版本依赖的相对链接与循环关系，不把所有版本扁平化到同一包、不回指源码 node_modules。原 Axon workspace 代码进入业务 bundle，CLI 不导入 Runtime SDK，也不依赖 Electron。须移动完整产物目录，只有两只可执行文件不能完整运行；外部模型、MCP 及系统工具仍按用户可信配置提供，并非全部工具已封装在二进制内。
+
+构建父入口禁自动 dotenv/bunfig/tsconfig/package.json 加载；后端启动器只开启 package.json 读取以解析配套包 exports，dotenv/bunfig/tsconfig 仍禁用，不执行 npm scripts。不把它等同于禁用 Shell 快照中的用户启动配置。构建先在随机自有目录完成并等所有编译 Promise，依赖缺失或任一构建失败不发布；标记清单完成才替换旧自有产物，陌生目录/文件/链接/损坏清单或根/用户目录/源码祖先拒绝覆盖。发布失败尝试恢复旧构建，恢复失败保留暂存旧产物，不删不确定内容；不应在运行中的产物目录上重建。运行资源缺失明确失败、不猜 PATH 或改投源码；无独立 npm SDK、其他平台、签名/公证/发布安装包。
+
+`prepareExecSession` 通过固定业务 RPC 完成执行前准备：显式 thinking 先用中立 `{runtimeId, channelId, modelId}` 查询能力，后端从已启用渠道解析真实 Provider，再调用 adapter；未知或不支持的等级在项目/会话写入前失败。原有桌面按 sessionId 查询保持不变；能力查询不取模型凭据、不发生成请求，取消响应后 drain 仍等待实际查询结束。按真实 cwd 复用本地项目，多个匹配稳定选最早者，无匹配才创建；每次任务新建 `never + reject` 根会话，不隐式续跑。显式启用记忆时开启所选项目开关；关闭时只用瞬时装配上限，不覆盖既有项目开关或删除文件。准备阶段校验返回目录/身份/策略，异常不重投或删除交付未知的记录。原始用户正文从准备模块经 core 队列、AgentService 到模型输入及应用 JSONL 保留首尾空白和换行；只用 trim 判定空白任务无效，并拒绝空字符与超长输入。main 准备完成后绑定事件范围，再执行工作流，不调用普通 send。
+
+源码 `exec:dev` 和默认后端 child 使用明确的 `bun run --no-env-file --config=<Axon可信空配置>` 参数，不自动加载任务工作区 dotenv/bunfig preload；移除指向裸 `.ts` 的源码 bin，以免绕过此启动边界。调用方自身已经加载的运行器 preload/环境仍是可信宿主责任，不承诺撤销其副作用；不改变用户 Shell 快照初始化路线。
+
+#### 输出、恢复与完成语义
+
+- `ExecRunStream` 已在握手前安装固定事件/反向请求处理，send 前绑定原 external 与根会话；核对真实主/子 runId、sessionId、起始时间、source 和开始/收束顺序。公开 `ExecAgentEvent`（shared）带 `version:1/executionId/sequence/timestamp/type:agent_event/run/visibleSessionId/event`，不输出 clientId、私有管道包或 SDK 对象。delta、工具、思考、压缩、重试、拒绝等保持原始中立顺序；最终候选仅取主轮完整 assistant 的 text，按 uuid 更新并响应丢弃，不混入子回复。最新主轮须同时有 result 与 run_finished，且成功、未停止、终态已落盘，才能形成成功的本轮快照；存储失败可无 result，但不能判成功。新主轮开始不沿用旧回复，不能靠此快照宣布整个工作流完成。
+- `ExecEvent` 包含共享身份/顺序的 `workflow_started {workflow}` 与 `workflow_finished {result}`；握手前订阅固定工作流通知，开始先于模型轮次，结束必须匹配同一根/workflowId/开始时间和最新主 run/completion，所有已看到子轮均实际结束。首次用户落盘失败可仅有明确 persisted=false 的完成包，不假造开始事件。工作流/终态解析仅投影中立字段，不把额外私有属性输出；未知事件类型、坏字段、错身份、提前/重复终态及结束后的迟到模型事件封口失败。执行 RPC 返回后 main 调用 `ExecRunStream.confirm(value)`，与通知终态完整核对一次；通知缺失或应答不一致不能输出成功正文，不重发任务。失败/取消返回空最终正文，JSONL 中的局部事件仍保留。
+- `ExecOutputStream` 提供 stdout 单写入者：JSON 模式一行一事件，不另写纯文本；普通模式不写流事件，仅在确认工作流完成且 child 正常退出后写最终正文。一个在途 write，等待真实回调再发下一行；队列包含在途数据默认限 64 MiB，超限、断管、提前关闭即时失败并唤醒 flush，不丢事件后返回成功。事件收集默认最多保留 4096 个轮次及 16 MiB 候选正文，超限明确失败；新主轮释放旧正文候选。失败清理保留错误监听直到实际 close，避免迟到 error 无人接收；模块 dispose 不关闭调用方 stdout，但命令入口取消正在背压的自有 stdout 时会销毁它，避免超时后仍挂起。
+- CLI 层另提供 `exec_started` 和清理/正文交付后的唯一 `exec_finished {completion:{exitCode,cleanup,error?}}`，cleanup 为 completed/failed/not_started。后端业务完成不代替 CLI 成功；0 要求确认正常工作流及实际清理成功。协议失败只可报告失败终态；帮助/版本不登记执行。输出坏管可能无法交付 terminal，操作系统退出码仍是最终依据。总期限从命令入口开始计时，配置解析后扣除已用时间，在 stdin、Git 预检、初始化、工作流及输出期间生效。SIGINT/SIGTERM 和期限取消原请求，封口/关闭自有后端并等待实际 close，保留首个故障原因；已有取消原因同时遇到清理故障时另在事件/诊断标明。正常背压等待，取消后的 stdout 和诊断交付最多留一秒，不自动重跑。
+- `--output-schema` 已接通 Ajv/ajv-formats 本地编译与完整最终 JSON 校验：省略 `$schema` 使用 draft-07，支持 2019-09/2020-12，标准 formats 与文件内引用；未知关键字、无法解析的引用、外部引用及 `$async` 拒绝。输入限 1 MiB/100 层；编译/校验在自有 Worker，各限五秒且纳入总期限/信号，取消仍等实际线程退出，不宣称 OS 级内存沙箱。坏 Schema 在后端创建前退出 2。当前 adapter 契约未声明结构化输出能力，使用可信私有装配 `finalOutputInstruction` 约束主 Agent 的最终回复；不修改用户任务/永久设置，不约束子 Agent，不发送未经支持声明的 `response_format`。最终正文必须整体为合格 JSON，不提取围栏、不强制转换/补默认值/删除字段；不合格退出 3，线程故障退出 1，不重跑模型或工具，已保存应用/Runtime 历史不回滚。JSONL 可保留局部正文事件，但 CLI 终态必须失败。
+- `--output-last-message/-o` 已接通 CLI 自有原子保存：预检不创建文件，父目录须已存在；拒绝链接/设备/FIFO/目录及业务目录、已加载配置和 Schema 输入目标。后端实际退出、最终 Schema 校验及线程回收完成后，以同目录随机 `0600` 临时文件完整写入/同步，再复核目录身份与目标类型并 rename 替换；失败只尝试清理自有临时文件，退出非零，不删旧输出或工作区。普通 stdout 仍输出相同最终正文；JSON 模式仍仅输出事件。保存先于 stdout/CLI 成功终态，若之后断管/取消，已完成文件仍保留，整体退出非零；不宣称跨文件、历史和管道的事务回滚。
+- 普通模式 stderr 为脱敏进度/诊断，stdout 只输出最终正文。JSON 模式定义 Axon 自身的版本化事件外壳，包含执行 ID、真实 sessionId/runId、顺序号、时间和中立消息；SDK 私有对象、凭据与内部协议日志不外泄。流式正文、thinking、工具开始/结果、压缩、权限拒绝、用量和终态按已有中立事件映射，未知/不可用用量不编造为零。
+- 区分单轮 run 终态与整个 exec 工作流终态：后台子任务及结果交付引起的合成续跑归同一执行范围。core 提供明确完成信号，待自有子任务、待交付结果、合成续跑全部收束才输出唯一执行终态与最终回复；不得凭第一段正文、第一次 run idle 或 adapter 提前返回判成功。超时/停止覆盖此范围，不停止其他客户端运行。
+- core 的内部 `collaboration.waitForRootIdle(rootSessionId)` 在主发送链结束后循环等待此根实际子执行和后台交付 Promise；交付中的合成主轮还能派生后继，不能只等第一批。执行 finally 内先释放子 owner/启动排队后继，再结算根工作；completed/canceled 状态不替代真实执行结束，取消须先停止子树再等待。根等待不等待其他根，不用全局 drain 停掉整个后端；同根并发等待复用同一 Promise。交付/终态存储失败即使日志已捕获或先于等待发生，也由根等待报告安全错误；没有执行器的非终态记录明确失败。后台续跑接管失败抛回交付器。此原语本身不拥有执行身份或授权停止，完整工作流由下面的协调器负责。
+- `AgentWorkflowCoordinator` 已经现有 `AgentRunCoordinator`/固定 RPC 接入：仅 external 可执行非交互根会话，初始发送前由后端生成 `{sessionId, workflowId, startedAt}`，内部发送及后台续跑携带同一可信令牌，不向用户输入、Runtime 或历史追加该字段。主轮空隙仍保留范围，普通 send/更新/删除被拒绝；旧普通会话的子执行/交付尚未实际结束时也拒绝接管。RPC 为 `AGENT_EXECUTE_WORKFLOW`（标准 AgentSendInput）、`AGENT_GET_WORKFLOW`（根 ID）及 `AGENT_CANCEL_WORKFLOW`（精确根/工作流 ID）；控制同时校验原客户端，旧令牌不能影响下一执行。取消请求等待或客户端注销会封口、停止主链/子树，仍等待真实 finally；失败清理不能跳过另一停止动作。桌面白名单不开放这些方法，原 send 的单轮语义不变。
+- 工作流以唯一 `workflow_started/workflow_finished` 中立通知及 RPC 结果报告；result 包含 workflow、completed/failed/canceled、可选最新主 run/completion/error。完成需最后主轮 success、未停止且 persisted，同时根子执行/交付/续跑已经实际收束；模型/交付/存储错误为 failed。子原文存储失败独立传给根收束，任务仍保存失败结果供模型消费，但父模型正常回复不能掩盖历史故障；取消后的迟到存储失败仍报告，持久化错误优先于先发生的交付错误。取消期间存储或停止故障不能被 canceled 掩盖；正常取消不重新启动迟到通知。通知只给原客户端，已断开不改投他人。整个范围从登记到 finally 才释放，不能靠通知消费者/首轮快照决定退出。
+- 正常退出必须确认终态/历史持久化（非 ephemeral）、输出文件写入和实际后端资源清理；后置标题请求也纳入资源收束，不强制为了标题再消耗非交互模型预算。stdout 背压、管道断开、父端信号、child 异常及交付未知明确处理，不能挂死或自动重放任务。
+- ephemeral 已接源码链：输出目标预检及 Schema 编译完成后，在经路径隔离预检的 `--data-dir`（默认 `~/.axon-exec`）下用 mkdtemp 原子创建随机 `0700` 的 `.axon-ephemeral-*` 根。容器可创建但不删除；配置仍从原配置路径读取，后端只接收新根，不读取或改写既有项目/会话。完整业务 JSON/JSONL、Runtime artifact、私有快照和本根锁都在此根，运行中仍落盘；正常 drain/实际 child close 后、Schema 线程退出后，复核容器/根的真实路径及 inode，再删除此自有根，之后才写用户输出/CLI 成功终态。删除内部链接不跟随外部目标，不逐个删除正式锁文件以抢占服务。模型/工作流失败、格式不合格、SIGINT/SIGTERM 和总期限仍走此清理；不取消清理以抢先退出。工作区修改、输出、用户配置、既有业务目录不回滚；输出不可放在业务容器内。
+- 后端未正常 drain/强制退出时不删除 ephemeral 根，以免异常后代仍持有文件；目录被替换或删除失败也保留、不猜路径重试，事件 cleanup 标为 failed、整体非零，已有取消码仍保留并补充清理诊断。父进程 SIGKILL/崩溃不能保证 finally；不自动扫描删除遗留根或承诺安全擦除。临时会话 ID 仅供本次事件关联，正式数据目录无此会话，不能恢复。
+- 退出码约定：0 为工作流正常结束且输出/清理成功；1 为运行、持久化或清理故障；2 为输入/配置/能力预检错误；3 为最终输出 schema 不满足；124 为期限达到；130 为 SIGINT；143 为 SIGTERM。普通工具拒绝后模型正常结束可为 0，不能把 0 解释为业务目标已验证成功。清理失败在事件/诊断另记录，即使此前已收到正常模型回复也不得退出 0。
+- resume 继续复用 Runtime artifact 优先、应用层语义恢复次之的现行链路，压缩摘要和原始 UI 历史不改写；恢复提示必须明确显示降级原因。无自动跨 Runtime 导入、分叉、回退或中断后无提示续跑。临时会话不能 resume。
+- resume 已接源码链：可信 `--entry exec` 装配标记新根 `creationOrigin: exec`，由 core 解析项目并保存真实 `creationWorkspacePath` 到根 state.json；普通创建/更新输入不可自报、修改或清除，子会话不继承来源，全局目录仍只存摘要。不推断普通 external 消息是 CLI 根，不补写旧记录。CLI 经固定项目/会话 RPC 读取完整元数据，不直接读索引或 SDK 文件；ID 恢复须匹配调用工作区，last 选当前真实目录最新 CLI 根，all 只扩大候选范围，仍在原项目执行。原工作区改绑、目录失效、数据重叠、缺匹配/普通/子会话或不支持 Runtime 明确拒绝；选定原目录后复用 Git/数据隔离预检，不把调用目录是 Git 仓库当作原目录的证明。文件参数仍相对 `-C`/调用工作区解析，不随 all 改投另一目录。
+- 恢复默认使用原渠道/模型，而非新任务 defaults 的选择；profile、`-c` 和专用参数可明确覆盖，须在当前可信配置中存在且启用，显式 thinking 仍查询能力。Runtime 归属不允许更改，本次沙箱默认仍为只读，never/reject 不放宽。恢复时凭据桥初始不授权目标，校验根/目录/配置/能力后才由父端 `authorizeChannel` 授权该可信 ID/Provider/规范化地址，不能从会话记录自报 URL，也不能把单次密钥改投第二渠道；缺密钥在元数据更新/新任务发送前拒绝。更新不改项目、来源及原 artifact 引用，只调用一次工作流并发送本次新用户正文。
+- 精确 artifact 正常时保留对应 Runtime 压缩/工具历史，不从应用 JSONL 拼另一套 SDK 消息。artifact 或引用缺失时，core 提供最近成功压缩摘要（最多 30k 字符）及有界可见历史（总背景约 60k，每条最多 8k），不注入思考/result；adapter 创建新 artifact，发 `runtime_session_recovered` 中立事件，CLI stderr 也提示语义恢复。应用历史没有 Runtime 保留段标识，可能补入摘要覆盖过的近期原文，不能宣称还原精确压缩上下文。最近成功摘要优先于后续失败/noop 摘要；不删除应用原文或重放旧模型/工具请求。真实 SDK 压缩/独立后端重启回归已验证：应用原文和摘要均保留，原 artifact 的下一请求含摘要/保留段但不含已压缩原文；删除自有 artifact 后以真实应用摘要语义降级。
+
+#### 实施阶段与验收
+
+1. **策略契约（已完成）**：never、非交互追问及主/子继承的中立链路已接通；桌面默认和交互行为不变，不修改 Pi SDK。策略随元数据持久化；父在途轮次的限制不能因设置修改而放宽子任务；never 不登记交互等待、不消费旧白名单/Grant，reject 返回错误工具结果而不生成用户答案。真实 core/RPC 夹具与相关专项 9 文件 89 测试、625 次断言通过；七个 workspace 类型检查通过。不将专项验证等同于迭代集中验收。
+2. **参数与配置（已完成）**：Bun workspace、帮助/版本、严格参数/stdin、真实 cwd/Git/路径隔离、JSON 配置/profile/覆盖、启用渠道模型与单次凭据处理；非法输入退出 2。参数专项 12/109 通过，功能装配/锁/能力校验随任务闭环接通。Schema 编译/最终验证已在阶段 5A 接通。
+3. **最小任务闭环（已完成）**：可信私有配置/凭据与实际功能上限、真实目录独占、源码 child/沙箱握手、项目复用/新建 never-reject 根会话、原始正文、中立事件和有界 stdout 已接 main。CLI 不接管桌面数据、不隐式 resume、不启动第二套模型循环。
+4. **完整工作流生命周期（已完成，2026-10-11）**：按根等待实际子执行/交付/派生续跑，持久化故障不吞掉；原客户端/根/workflowId 保留空隙归属。main 校验通知/执行应答/最后主轮，实际 child 正常退出后交付正文/CLI 唯一终态；期限、信号、EOF/输出故障先取消再实际收束，不重发。专项 9 文件 65 测试/535 次断言通过；真实 CLI → 独立 app-server → Pi SDK → Seatbelt 的本机模型夹具 4 测试/54 次断言通过，覆盖工具循环、正文/JSONL、同目录重复新任务、只读拒绝/显式工作区写入、401 无重复请求、SIGTERM/总期限取消与历史落盘。八 workspace 类型通过；不代表全仓/桌面/构建重测，没有外部模型请求。
+5. **恢复和脚本输出（已完成，2026-10-11）**：5A 文件/Schema 输出、5B resume/last/all、5C ephemeral 清理、5D 独立 CLI 构建/配套后端/Worker 资源已接入。5A 证据为专项 30/350 与真实源码 6/88；5B 专项 168/905、真实源码 8/131；5C 专项 36/376、真实源码 10/173。5D CLI 范围 12 文件 88 测试/1849 次断言及八 workspace 类型通过，实际本机构建可搬移且无系统 Bun/Node/Electron，Schema/工具/恢复/临时/缺资源/取消均用真实 Pi/Seatbelt 和 localhost 模型验证。不代表全仓/桌面/压缩后完整 SDK 的迭代集中验收。
+6. **迭代集中验收（已完成，2026-10-11）**：全仓 194 文件/1307 通过/0 失败/1 跳过、9056 次断言；跳过项是未显式配置解释器的 Zima 真实 workdir，非交互首版仍不支持 Zima。八 workspace 类型和源码构建通过，含独立 CLI 搬移及无系统 Bun/Node 的真实运行。覆盖参数/配置/stdin、主子 never/追问拒绝、完整后台交付、真实 Seatbelt/stdio/Pi SDK、真实自动压缩后重启/降级、凭据/初始化边界、信号/期限/异常清理、文件/Schema/退出码。源码 Electron 审批/追问/UI 历史恢复夹具、实际 Shell/Seatbelt 和生产启动/重载/多业务退出分别通过；快照冒烟等待真实预热收束，而非仅观察已 rename 文件，生产工具不等待预热的时机保持不变。只使用本机模型/MCP，不验收发布安装/签名或外部模型。README 已提供通用脚本和第三方进程调用示例。
+
+每个阶段结束交付一个可运行的小主题并说明上下游，用户继续后才进入下一阶段，不把迭代收尾移到之后。运行前检查 shellSnapshot 等宿主初始化也可能执行用户启动配置，非交互不意味着这些可信本地配置没有副作用。
+
+#### 本迭代不包含
+
+- TUI、常驻 daemon、HTTP/WebSocket/远程入口、定时调度、批量评测驱动和判卷。
+- Zima 无人值守执行、Linux/Windows 沙箱、全盘写入/危险全访问、自动审查 Agent、跳过硬规则或自动批准普通工具。
+- 图片/附件命令参数（现行 Agent 输入尚无中立附件契约）、额外写目录 `--add-dir`、域名网络代理、CLI OS 安全存储/凭据管理命令、专用 review 子命令和通用插件/登录命令。这些需各自契约，不能接受参数却静默忽略；渠道配置可手动填写 apiKey，不提供管理入口。
+- CLI 自动开放系统网络、忽略项目规则、关闭沙箱或与桌面共享正式写入目录；仅相似命令外观不等于具有未实现的能力。
+
+### 迭代 26：Agent 暂停与继续（已完成）
+
+产品语义为结束当前执行并保留续做入口，不冻结网络流、函数栈或 Shell；继续属于原逻辑 turn，单次执行仍启动新 runId，不重新投递原任务或自动重放已执行工具。此前基础暂停能力已完成源码集中验收；原轮继续的后续完善已接入 Pi/Zima/core/UI，本次验证范围和证据见 PROGRESS。
+
+#### 阶段 1：中断背景（已接入）
+
+- core 的 `buildAgentInterruptionPrompt(historyBeforeRun)` 根据当前用户输入落盘前的应用 JSONL 查找最近真实 result。仅 `terminal_reason: stopped` 且 `stopped_by_user: true` 产生固定提醒，不依据错误文案推断；内部压缩 result 不算新轮终态。
+- 提醒放在 Agent 系统上下文的动态尾部，Pi/Zima 共用。正常 artifact 续跑及引用丢失的语义恢复都能消费，不把历史正文、思考、工具参数复制进提醒，不新增持久化字段或改写历史。
+- 提醒说明工具可能部分执行、缺失结果不等于未执行/成功，需要续做时先核实必要状态，权限重新走本轮流程；当前用户消息优先，不因提醒自行继续旧任务。
+- 后续真实轮成功/失败后不再沿用旧停止提醒。崩溃留下的更新用户输入无终态时，不将更早停止冒充最新轮状态。原停止、CLI resume、Chat 和权限行为不变；本阶段不把 result 当作可立即继续的资源收束凭据。
+
+#### 阶段 2A：后端暂停/继续契约（已接入）
+
+- shared 提供 `AgentPauseSnapshot {sessionId, turnId, runId, runStartedAt, pauseId, state: pausing | paused}` 和 `AgentContinueInput {sessionId, pauseId}`。turnId 来自原输入的 UUID；runId/runStartedAt 只标识单次实际执行。固定 RPC 为 `AGENT_PAUSE`（原 sessionId/runId）、`AGENT_GET_PAUSE`（sessionId）及 `AGENT_CONTINUE`（sessionId/pauseId）；暂停/继续限 main/quick，external 仍使用原 CLI 工作流取消/恢复。
+- `AgentRunCoordinator.pauseRun` 只接受原 owner 的当前普通根轮，拒绝旧轮、子轮和 CLI 根。同步登记 pausing 并封口，沿用停止的清空未发送队列语义；分别尝试取消主链和子树，等待原 owner 链 finally，再调用本根子执行/交付等待。暂停期间禁止新发送、设置改动、删除和后台自动续跑；不等待其他根、不调用全局 drain。
+- 收束依据是 adapter query 返回/finally、AgentService 的 run_finished（persisted + stopped）及本根协作等待。仅 result 到达不能标记 paused；清理/交付/存储失败、入口失效或缺少已保存停止终态均不生成继续凭据。阶段 2B1 已接 Pi 独立压缩取消与查询清理错误上报；不将中立夹具通过宣称为真实 SDK 全路径保证。
+- 实际收束后在应用 JSONL 追加宿主 system marker `subtype: axon_paused`，保存 pause_id/turn_id/原 run_id/run_started_at/stopped_result_uuid/项目和可信实际工作区；uuid 等于 pause_id。只追加，不改写 result 或 Runtime artifact。内存 pausing 不落盘，重启不会把未完成暂停误当 ready；读取校验原输入 UUID、关联停止终态和工作区，普通停止不生成 marker。新输入/真实终态、已接纳继续或项目工作区改绑使旧凭据失效；最新 marker 损坏不回退到更早凭据。
+- `continueRun` 核对确切 pauseId、turnId 和空闲状态后同步占有新 owner，调用 `AgentService.continueMessage`，不经过普通发送或 synthetic 用户输入。Service 先确认 adapter 的 `continueQuery` 能力和确切暂停记录，再追加 `system/axon_continued`，携带 turn_id/resumed_pause_id/stopped_result_uuid/新 run_id；标记写入后即消费原暂停，异常退出也不自动重发结果未知的继续。新执行使用原项目、工具及权限装配，adapter 收到无 prompt 的继续参数和宿主中断背景。普通 RPC 不能自报内部输入或原轮归属。缺少 adapter 能力时不落标记、不消耗凭据。已暂停时允许另一已登记桌面入口显式继续，来源保存在系统标记；旧交互/事件仍留在原身份，不自动转移。
+- 清理失败通过安全业务错误报告，不伪造 paused；传输取消不回滚已接纳的暂停，不自动重发交付未知的继续请求，应重新读权威快照/历史确认。桌面入口和状态通知由阶段 3 接入。
+
+#### 阶段 2B1：Runtime 取消与清理故障（已接入）
+
+- Pi adapter 的同一活跃对象共享 abortWork：先调用 SDK `abortCompaction()`，再调用 `abort()` 取消生成/重试并等待空闲；压缩取消失败仍尝试普通取消。查询 finally 等实际 prompt/abort，再尝试解绑和 dispose，不使用短超时伪造完成，不修改 Pi SDK。
+- Pi/Zima 暂存最后的中立 result，正常查询清理确认后才交付；正文、思考及工具事件仍按原顺序实时发送。Pi 的本轮故障标志只属于当前活跃对象，不能拿全局错误数组长度推断另一轮失败。跨轮 Shell 环境的释放仍由其原生命周期管理，不为暂停无差别取消共享缓存或全局资源。
+- Zima 的普通停止等待本次 session.abort 确认，再关闭传输并等待实际进程 close 和宿主回调 drain；确认失败时终止自有进程并报告故障。整体 adapter dispose 会主动结束传输，尚在途业务取消确认的拒绝不误报为新的清理故障，实际进程/回调等待仍保留。关闭异常仍尝试终止及真实 drain，不发布正常 result。不修改独立 Zima 仓库或协议，不宣称已测试其真实模型压缩。
+- shared 的 `AgentRuntimeCleanupError` 只携带固定中文诊断，不携带 SDK 原因或凭据；adapter 同时保留原全局退出诊断。AgentService 将该错误转换为 `runtime_cleanup_failed`、failed、不可重试，不让用户停止标志覆盖它。正常错误 result 可落盘；防御提前 result 后才抛清理错误的 adapter 时，保留原唯一 result，但 run_finished 报 failed/persisted=false，阻止暂停凭据，不追加第二个 result。
+- 取消/清理与终态交付不放行停止后的普通 delta，不恢复半截工具参数。部分正文/思考及工具状态由下面的 2B2 统一处理。
+
+#### 阶段 2B2：部分历史边界（已接入）
+
+- core 的 `AgentInterruptedHistory` 每轮只积累已接纳的未完成正文/思考及未回传调用。完整 assistant 消息删除同 UUID 草稿；已收到的 retry/discard 撤销也同步删除，不复活被丢弃内容。停止后普通 delta、新 assistant/输入/进度仍不接纳，不读取或改写 Runtime artifact。
+- 真实查询收束的 result 或取消/清理异常到达后，先将停止前已收到的块按 contentIndex 顺序冻结为 `assistant/isPartial:true/stop_reason:interrupted`，再保存唯一终态。保留正文空白和思考顺序，沿用草稿 UUID 替换 UI 投影；不逐 token 写盘。只有未完整工具参数、没有正文/思考的草稿仅从 UI 撤销，不制造空消息；即使参数 delta 含 toolcall_end 也不推断调用已提交。
+- 完整 assistant 中登记的调用才能接纳停止后的真实 tool_result，按本轮 ID 过滤未知/已回传调用和混入文本，不覆盖实际成功/失败结果。Pi 取消期间允许实际 toolResult 的 message_end 通过，仍禁止迟到 assistant；Zima 原协议 tool.finished 保持同样中立回传。未收到结果的已登记调用追加 `isSynthetic:true` 用户工具记录，块为 `execution_status:unknown/is_error:true`，固定说明是否完成及副作用未知；这是应用诊断，不是 Runtime 伪造结果、失败证明或未执行证明。
+- renderer 复用原工具行和活动组：未知结果单独标识并保持可见，不显示成功勾选或计为确定失败，不进入成功写入汇总。重启 UI 从应用 JSONL 恢复部分内容及诊断；artifact 仍优先精确续跑，缺失时中立语义背景明确区分部分助手输出/工具未知，不将思考或半截参数重新注入执行。
+- 部分检查点保存失败和 2B1 的清理故障仍阻止可继续凭据，不用正常停止掩盖故障；已产生的文件/远端副作用不回滚。当前只覆盖正常受控停止/暂停，不承诺崩溃或强制退出前未落盘 token 可恢复；真实 SDK/宿主取消按本节末尾范围验证。
+
+#### 阶段 3：跨进程与桌面入口（已完成）
+
+- shared 提供固定 PAUSE/GET_PAUSE/CONTINUE IPC 与暂停变化通知。main 先校验真实主 frame/窗口身份和参数，浮窗暂停/继续只能指向绑定会话；新控制不开放任意 RPC。暂停和继续的长请求使用原页面生命周期信号、不套普通 RPC 超时，不自动重发。preload 仅暴露中立 DTO。
+- core 的暂停变化通知只有 sessionId，先登记 pausing 再通知，marker 保存且原暂停锁解除后再次通知；新发送占有/释放 owner 及会话更新/删除也令观察缓存失效。app-server 向已登记入口投递通知，main 只送原有效页面；它不转投旧正文或交互、不携带继续凭据或授予控制权。
+- renderer 按会话请求版本及页面代次重读权威暂停快照；变化通知还查询公开活动快照，补齐另一入口的开始/结束观察状态，不恢复其 owner。原入口由实时流、终态和控制应答校准历史，观察入口在暂停或所观察运行结束时重读，避免每条通知重复抢占分页快照租额。旧响应不能复活旧 pauseId 或覆盖已观察新轮。进入会话/浮窗重新聚焦会重读历史及暂停状态，重建后依靠持久 marker 恢复，不从 stopped result 直接推断可继续。
+- 主窗口和快捷浮窗共用 AgentRunControl：原入口运行中显示暂停，观察入口仅显示其他入口运行中；pausing 同步禁止重复控制/发送/改设置，主轮已结束但子树/交付仍收束时继续保持正在暂停。paused 且读取成功后可继续，也可发送新任务。读取失败显示状态未确认，只提供只读重查，不重新提交控制；旧缓存不开放继续。Chat 停止不变。
+- 继续只发送已读确切 pauseId，无用户可编辑恢复正文；后端调用独立继续入口，不新增应用用户消息。正常用户停止仍保存 stopped result/暂停 marker，但 renderer 不渲染通用停止错误卡；保留既有正文和思考/工具详情，尾活动组停止动画并保留原展开选择。renderer 按 `axon_continued.turn_id` 和确切 stopped_result_uuid 重新打开原回复，继续期间不显示旧执行的时间/复制尾栏，结束后只展示一处尾栏，文件变更与 Skill 使用汇总包含中断前后。正文仍是活动组边界，真实错误不会被合并隐藏；普通新用户输入另起一轮。真实清理/存储/运行失败及工具未知状态继续显示。提交锁同步拒绝重复继续，新 run 身份开始后解除提交锁，允许再次暂停，不等整轮 RPC 返回才放行。响应/异常后复读权威状态及历史，页面已释放则不修改状态；交付未知不自动重发。浮窗继续也立即上拉展示会话。
+- 源码 Agent 冒烟脚本验证部分检查点、权威凭据、新 PID 重启恢复、主窗→浮窗继续→浮窗暂停→主窗继续、观察入口无控制权及来源标记，并保存截图。模型事件由隔离夹具提供；实际 SDK/宿主取消另行验证，不将该 GUI 夹具宣称为真实模型执行。
+
+#### 后续完善：无新增用户发言、保留原逻辑轮的继续（Pi/Zima 已接入）
+
+- shared 新增可选 `continueQuery` 与不带 prompt 的输入。Pi adapter 复用原查询的惰性启动、工具/沙箱/事件转换、取消和清理；只在执行阶段调用 SDK 公开 `sendCustomMessage`，以 `customType: axon_interruption` 保存中断背景并 `triggerTurn: true`。不调用普通 prompt、不新增 Runtime 的用户消息条目、不写固定续做指令，也不丢弃有效 assistant 来规避尾部限制。
+- 这不是零上下文变更：Runtime 新增宿主 custom_message，SDK 可将该背景映射为模型请求的 user 角色；它不表示用户重新发言。artifact 缺失时明确将有界恢复背景并入这条宿主上下文，不伪装为当前用户输入。
+- 会话级入口保留 SDK 的后置重试/压缩/agent_settled；继续首请求前用公开 getContextUsage、shouldCompact、compact 补阈值检查，相关事件映射为 threshold。公开 compact 的内部空闲事件不生成本次运行的提前 result；压缩中取消后不再启动模型。阈值检查不取代 SDK 自身后置/溢出处理。
+- 阶段一已通过真实 Pi SDK 回环模型验证：保留 assistant 尾部、跨 adapter 恢复、工具执行一次、429 自动重试和唯一终态；另有阈值/取消/配置拒绝的中立 SDK 夹具测试。阶段二已将 core/UI 接入同一继续入口，测试覆盖重启、多次暂停/继续、旧身份拒绝、凭据消费、同轮显示和汇总；未修改 SDK 源码或版本。
+- Zima adapter 使用独立 session.continue 请求，下发与普通运行相同的模型、工作区、工具和审批装配，但禁止 prompt，只传 interruption_id/interruption_context。握手 capabilities.continue=true 才发送，不支持时明确失败，无普通用户输入回退。Zima 上游新增严格继续 DTO 和 Engine.continue_run，重用原模型/工具/压缩/重试/取消循环；artifact 仍仅在安全检查点落盘，缺失时使用明确语义背景创建独立恢复 artifact。
+- Zima 将中断背景保存为 system/metadata.kind=host_interruption，不新增 Runtime user；三种 Provider 在模型协议边界编码为 user，避免将 assistant 尾部误当预填充。此角色只代表协议承载，不代表新的人类消息。旧工具不会被引擎重放；模型若需再执行有副作用的操作仍须核实状态并走新执行的人工审批，Zima 未增加 OS 沙箱。
+- 真实 Pi/core 四阶段暂停后继续及 assistant 尾部专项、真实 Zima/core 跨进程重建后继续、重新审批和 429 重试已通过。Zima 离线 Runtime/stdio/工具/压缩/终端宿主集中回归通过；源码桌面及全仓最终证据以 PROGRESS 为准，不沿用旧验收代替新链路。
+- 应用 turn_id 沿原输入 UUID，包含可信后台文本输入的归属但不显示其用户气泡；多次暂停仍归同一回复。不改写旧历史中的普通或 synthetic 继续消息；崩溃且尚未形成受控暂停 marker 时不自动恢复 ready。外部模型与安装包不属于本次验收。
+
+#### 集中验收（此前基础实现已完成，2026-10-14）
+
+- 全仓 199 文件：1362 通过、0 失败、1 跳过、9428 次断言；八 workspace 类型、源码 Electron 构建及 diff 检查通过。跳过项为未显式配置解释器的真实 Zima workdir；Zima 取消/清理使用本机协议 child，未宣称其外部模型压缩实测。
+- 真实 Pi SDK/core 回环模型验证正文流、半截工具参数、429 重试等待及自动压缩中的暂停：请求关闭或重试取消、唯一停止终态、完成后才产生继续凭据；半截参数不执行。既有全仓测试验证实际工具等待、审批/追问、MCP lease/进程关闭、子树交付、清理/存储失败、旧身份和重建/降级。
+- 真实源码 Electron 两窗口验证上述阶段 3 流程；真实 Electron 宿主 Shell/Seatbelt 验证停止、超时、进程回收及权限/PATH/cwd 回归；Chat 快捷浮窗回归通过。GUI 模型和工具事件为中立夹具，真实 SDK 与 OS 执行由独立测试证明，不宣称每种资源组合都在 GUI 重演。
+- 验收修正了旧测试将工具回传误计为人类输入的断言，并收窄 renderer 重复历史读取，未放宽分页租额、沙箱或 SDK 策略。一次双窗口冒烟整体超时未定位，添加阶段诊断后两次原流程及最终含暂停重启流程通过；保留偶发诊断，不将其归因为已修复缺陷。详细日志、截图与遗留项见 PROGRESS。
+- 仅源码、本机模型和临时数据；未修改 Pi SDK、独立 Zima 仓库或正式会话，未验收打包安装及外部模型。
+
+本迭代不恢复分叉/回退、运行中消息注入、同项目并发执行、后台 PTY/终端或其他暂不实现项。
+
 ## 横切约束
 
 1. Runtime 专属代码只能进入对应 adapter。
@@ -565,11 +826,11 @@ Git/helper 退出测试现使用共享测试 helper 主动发送就绪通知，�
 
 - **Chat 工具与高级渠道**：Chat 工具执行、联网、生图、订阅渠道和代理能力。**暂不实现。**
 - **内嵌终端与浏览器自动化**：PTY 终端、终端会话和受管浏览器工具。**暂不实现。**
-- **Automation 与远程入口**：定时任务、无头 Agent 和远程机器人桥接。**暂不实现。**
+- **Automation 与远程入口**：定时任务、无人值守调度和远程机器人桥接。**暂不实现；单次非交互入口已恢复为迭代 25。**
 - **Planning 产品系统**：计划、待办、日历、提醒及其 Agent 联动。**暂不实现。**
-- **引导与平台工程**：首启引导、教程、平台专项、性能专项、CLI 和完整发布链。**暂不实现。**
+- **引导与平台工程**：首启引导、教程、平台专项、性能专项、TUI/其他 CLI 产品能力和完整发布链。**暂不实现；exec 子命令按迭代 25 开发。**
 - **会话 Runtime 切换**：Pi/Zima 双向切换、独立 artifact 和增量历史导入。**暂不实现。**
-- **高级会话控制**：分叉、回退、运行中消息注入、软中断和同项目并发执行。**暂不实现。**
+- **高级会话控制**：分叉、回退、运行中消息注入和同项目并发执行。**暂不实现；Agent 暂停与继续已恢复为迭代 26。**
 - **高级项目与文件交互**：会话跨项目移动、通用 @提及、文件移动和独立预览。**暂不实现。**
 - **扩展记忆能力**：Chat 记忆、普通项目文件陈旧监听和自动记忆维护。**暂不实现。**
 - **扩展桌面体验**：语音、悬浮状态窗、自动更新、通知声音、截图和 Runtime 进程隔离。**暂不实现。**

@@ -60,7 +60,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   if (method === 'runtime.handshake') {
     if (mode === 'handshake') return
     reply(id, { protocol_version: mode === 'invalid-handshake' ? 1 : 2,
-      runtime: { name: 'zima-agent-runtime', version: '1.0.0-test', boot_id: bootId } })
+      runtime: { name: 'zima-agent-runtime', version: '1.0.0-test', boot_id: bootId },
+      capabilities: { continue: mode !== 'no-continue' } })
     return
   }
   if (method === 'runtime.shutdown') {
@@ -68,8 +69,29 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     reply(id, { shutdown: true })
     process.exit(0)
   }
-  if (method === 'session.run') {
+  if (method === 'session.run' || method === 'session.continue') {
     if (mode === 'accept') return
+    if (method === 'session.continue') {
+      if ('prompt' in params || !params.interruption_id?.trim() || !params.interruption_context?.trim()) throw new Error('继续参数错误')
+      const directory = join(params.runtime.session_directory, params.session_id)
+      mkdirSync(directory, { recursive: true })
+      writeFileSync(join(directory, 'state.json'), JSON.stringify({ method, params }))
+      const run = { sessionId: params.session_id, runId: params.run_id, prompt: params.interruption_id, sequence: 0 }
+      runs.set(run.runId, run)
+      reply(id, { accepted: true, session_id: run.sessionId, run_id: run.runId, artifact_directory: directory })
+      if (run.prompt === 'continue-abort') return
+      if (run.prompt === 'continue-approval') {
+        run.toolName = 'Write'
+        assistant(run, '', [{ id: `tool-${run.runId}`, function: { name: 'Write', arguments: { path: 'continued.txt', content: 'ok' } } }])
+        event(run, 'approval.requested', { request_id: `callback-${run.runId}`, tool_call_id: `tool-${run.runId}`,
+          name: 'Write', arguments: { path: 'continued.txt', content: 'ok' } })
+        return
+      }
+      event(run, 'assistant.delta', { message_id: `message-${run.runId}`, channel: 'thinking', delta: '继续思考' })
+      assistant(run, '原任务继续完成')
+      finish(run)
+      return
+    }
     const directory = join(params.runtime.session_directory, params.session_id)
     mkdirSync(directory, { recursive: true })
     writeFileSync(join(directory, 'state.json'), params.prompt === 'thinking-config'
@@ -84,6 +106,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       return
     }
     if (run.prompt === 'abort') return
+    if (run.prompt === 'abort-tool') {
+      assistant(run, '', [{ id: `tool-${run.runId}`, function: { name: 'Bash', arguments: { command: 'pwd' } } }])
+      return
+    }
     if (run.prompt === 'ask-user') {
       // 完整参数必须通过生产 AskUserQuestion 解析，不能用接受任意参数的自定义工具代替。
       const tool = params.tools.host_tools.find((candidate) => candidate.name === 'AskUserQuestion')
@@ -106,6 +132,15 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       assistant(run, '', [{ id: toolCallId, function: { name: tool.name, arguments: args } }])
       event(run, 'host_tool.requested', { request_id: `callback-${run.runId}`, tool_call_id: toolCallId,
         name: tool.name, arguments: args })
+      return
+    }
+    if (['bash-workdir', 'bash-workdir-outside', 'bash-workdir-invalid'].includes(run.prompt)) {
+      run.toolName = 'Bash'
+      const args = { command: 'pwd', workdir: run.prompt === 'bash-workdir' ? 'child' : run.prompt === 'bash-workdir-outside' ? '..' : 'missing' }
+      const toolCallId = `tool-${run.runId}`
+      assistant(run, '', [{ id: toolCallId, function: { name: 'Bash', arguments: args } }])
+      event(run, 'approval.requested', { request_id: `callback-${run.runId}`, tool_call_id: toolCallId,
+        name: 'Bash', arguments: args })
       return
     }
     if (run.prompt === 'approval' || run.prompt === 'host' || run.prompt === 'interaction') {
@@ -170,6 +205,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   const run = runs.get(params.run_id)
   if (method === 'session.abort' && run) {
     reply(id, { aborted: true })
+    if (run.prompt === 'abort-tool') event(run, 'tool.finished', {
+      tool_call_id: `tool-${run.runId}`, name: 'Bash', result: { status: 'success', content: '取消期间真实回传' },
+    })
     finish(run, 'aborted')
     return
   }
@@ -178,7 +216,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     const toolCallId = `tool-${run.runId}`
     event(run, 'tool.finished', {
       tool_call_id: toolCallId, name: run.toolName ?? (run.prompt === 'approval' ? 'Write' : 'remote_echo'),
-      result: { status: params.behavior === 'deny' || params.is_error ? 'error' : 'success', content: params.content ?? 'ok' },
+      result: { status: params.behavior === 'deny' || params.is_error ? 'error' : 'success',
+        content: params.content ?? (run.toolName === 'Bash' ? JSON.stringify(params.updated_arguments) : 'ok') },
     })
     finish(run)
   }

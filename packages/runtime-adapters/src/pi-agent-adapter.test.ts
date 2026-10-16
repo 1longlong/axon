@@ -1,16 +1,18 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type {
   AgentCustomToolDefinition,
+  AgentContinueQueryInput,
   AgentHostToolExecutionPort,
   AgentSandboxShellCommandRequest,
   AgentSandboxPolicy,
+  AgentStreamPayload,
   SDKAssistantMessage,
   SDKMessage,
 } from '@axon/shared'
-import { AgentSandboxEscalationError } from '@axon/shared'
+import { AgentRuntimeCleanupError, AgentSandboxEscalationError } from '@axon/shared'
 import {
   convertPiMessage,
   convertPiCompactionEnd,
@@ -38,7 +40,7 @@ const DEFAULT_EXECUTION_POLICY = {
 const SANDBOX_POLICY: AgentSandboxPolicy = {
   platform: 'macos',
   mode: 'workspaceWrite',
-  workingDirectory: '/tmp/project',
+  sandboxCwd: '/tmp/project',
   readAccess: { type: 'fullAccess' },
   writableRoots: ['/tmp/project'],
   protectedReadOnlyRoots: ['/tmp/project/.git'],
@@ -487,6 +489,8 @@ interface RuntimeHarness {
   load: NonNullable<ConstructorParameters<typeof PiAgentAdapter>[0]>
   state: {
     prompt?: string
+    customMessage?: { customType: string; content: string; display: boolean; details: { interruptionId: string } }
+    compactions?: number
     disposed: boolean
     openedSessionFile?: string
     toolResult?: unknown
@@ -514,8 +518,12 @@ interface RuntimeHarnessOptions {
   beforeSessionCreate?: () => Promise<void>
   promptWork?: () => Promise<void>
   abortWork?: () => Promise<void>
+  onAbortCompaction?: () => void
+  emitToolResultOnAbort?: boolean
   onUnsubscribe?: () => void
   onDispose?: () => void
+  continuationUsage?: { tokens: number; contextWindow: number }
+  compactWork?: () => Promise<void>
 }
 
 interface RuntimeHarnessTool {
@@ -547,6 +555,26 @@ function createRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarne
     },
     async prompt(prompt: string) {
       state.prompt = prompt
+      await session.runMessages()
+    },
+    async sendCustomMessage(message: NonNullable<RuntimeHarness['state']['customMessage']>, options: { triggerTurn: boolean }) {
+      expect(options.triggerTurn).toBe(true)
+      state.customMessage = message
+      await session.runMessages()
+    },
+    getContextUsage() { return options.continuationUsage },
+    settingsManager: { getCompactionSettings: () => ({ enabled: true, reserveTokens: 100 }) },
+    async compact() {
+      state.compactions = (state.compactions ?? 0) + 1
+      // 公开 compact 先等待旧执行空闲，不能把该 settled 当作继续成功。
+      for (const listener of listeners) listener({ type: 'agent_settled', messages: [] })
+      for (const listener of listeners) listener({ type: 'compaction_start', reason: 'manual' })
+      await options.compactWork?.()
+      const result = { summary: '继续前摘要', firstKeptEntryId: 'entry-1', tokensBefore: 950, estimatedTokensAfter: 100 }
+      for (const listener of listeners) listener({ type: 'compaction_end', reason: 'manual', result, aborted: false, willRetry: false })
+      return result
+    },
+    async runMessages() {
       if (options.promptWork) { await options.promptWork(); return }
       state.initialToolNames = agentState.tools.map((tool) => tool.name)
       const selectedTool = tools.find((tool) => tool.name === options.executeTool)
@@ -598,15 +626,24 @@ function createRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarne
     async abort() {
       state.aborted = true
       await options.abortWork?.()
+      if (options.emitToolResultOnAbort) {
+        for (const listener of listeners) listener({ type: 'message_end', message: runtimeMessage({
+          role: 'toolResult', toolCallId: 'finishing-tool', toolName: 'bash',
+          content: [{ type: 'text', text: '取消期间真实回传' }], isError: false,
+        }) })
+      }
       const aborted = runtimeMessage({ role: 'assistant', content: [{ type: 'text', text: '半截' }], stopReason: 'aborted' })
       for (const listener of listeners) listener({ type: 'message_end', message: aborted })
       for (const listener of listeners) listener({ type: 'agent_end', messages: [aborted], willRetry: false })
       for (const listener of listeners) listener({ type: 'agent_settled', messages: [aborted] })
       finishPrompt?.()
     },
+    abortCompaction() { options.onAbortCompaction?.() },
     dispose() { state.disposed = true; options.onDispose?.() },
   }
   const runtime = {
+    shouldCompact: (tokens: number, window: number, settings: { enabled: boolean; reserveTokens: number }) =>
+      settings.enabled && tokens > window - settings.reserveTokens,
     getAgentDir: () => '/tmp/pi-test-agent',
     ModelRuntime: {
       async create() {
@@ -649,6 +686,8 @@ function createRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarne
       state.sandboxedToolOptionsSeen ||= Boolean(toolOptions)
       return {
         name: 'bash',
+        description: '执行 Shell 命令',
+        parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
         execute: async (_toolUseId: string, input: { command: string }, signal?: AbortSignal) => {
           await toolOptions?.operations?.exec(input.command, cwd, { onData: () => {}, signal })
           return { content: [] }
@@ -730,7 +769,161 @@ async function expectPending(work: Promise<unknown>): Promise<void> {
   expect(settled).toBe(false)
 }
 
+/** 夹具不读真实 artifact；通过显式语义背景测试独立的无用户文本入口。 */
+function continuationInput(query: PiAgentQueryOptions): AgentContinueQueryInput {
+  const { prompt: _prompt, ...context } = query
+  return { ...context, interruptionId: 'pause-1', interruptionContext: '<system-reminder>上一轮被中断，工具可能部分执行。</system-reminder>',
+    recoveryPrompt: '[会话恢复上下文]\n原用户任务和此前回复' }
+}
+
+describe('Pi adapter 无新增用户发言的继续入口', () => {
+  test('使用公开宿主上下文入口，语义恢复背景不伪装成当前用户消息', async () => {
+    const f = lifecycleFixture()
+    try {
+      const payloads: AgentStreamPayload[] = []
+      for await (const payload of f.adapter.continueQuery(continuationInput(f.query))) payloads.push(payload)
+      expect(f.harness.state.prompt).toBeUndefined()
+      expect(f.harness.state.customMessage).toMatchObject({ customType: 'axon_interruption', display: false,
+        details: { interruptionId: 'pause-1' } })
+      expect(f.harness.state.customMessage?.content).toContain('原用户任务和此前回复')
+      expect(f.harness.state.customMessage?.content).toContain('上一轮被中断')
+      expect(f.harness.state.customMessage?.content).not.toContain('[当前用户消息]')
+      expect(payloads.filter((payload) => payload.kind === 'sdk_message' && payload.message.type === 'result')).toHaveLength(1)
+      expect(f.harness.state.disposed).toBe(true)
+    } finally { await f.cleanup() }
+  })
+
+  test('缺少中断背景或历史时在加载 SDK 前拒绝，不偷偷新建普通用户轮', async () => {
+    let loads = 0
+    const f = lifecycleFixture({ beforeLoad: async () => { loads++ } })
+    try {
+      const input = continuationInput(f.query)
+      for (const invalid of [{ ...input, interruptionId: '' }, { ...input, interruptionContext: ' ' },
+        { ...input, recoveryPrompt: undefined }]) {
+        await expect(f.adapter.continueQuery(invalid).next()).rejects.toThrow('继续执行需要')
+      }
+      expect(loads).toBe(0)
+      expect(f.harness.state.prompt).toBeUndefined()
+      expect(f.harness.state.customMessage).toBeUndefined()
+    } finally { await f.cleanup() }
+  })
+
+  test('继续前按阈值压缩，压缩自己的空闲事件不提前报告整轮完成', async () => {
+    const f = lifecycleFixture({ continuationUsage: { tokens: 950, contextWindow: 1000 } })
+    try {
+      const payloads: AgentStreamPayload[] = []
+      for await (const payload of f.adapter.continueQuery(continuationInput(f.query))) payloads.push(payload)
+      expect(f.harness.state.compactions).toBe(1)
+      expect(payloads).toContainEqual({ kind: 'compaction_status', status: { phase: 'started', reason: 'threshold' } })
+      const resultIndex = payloads.findIndex((payload) => payload.kind === 'sdk_message' && payload.message.type === 'result')
+      const assistantIndex = payloads.findIndex((payload) => payload.kind === 'sdk_message' && payload.message.type === 'assistant')
+      expect(assistantIndex).toBeGreaterThan(-1)
+      expect(resultIndex).toBeGreaterThan(assistantIndex)
+      expect(payloads.filter((payload) => payload.kind === 'sdk_message' && payload.message.type === 'result')).toHaveLength(1)
+      expect(f.harness.state.prompt).toBeUndefined()
+    } finally { await f.cleanup() }
+  })
+
+  test('继续前压缩中取消，不再启动宿主消息循环，仍只交付停止终态', async () => {
+    const entered = lifecycleGate(), compact = lifecycleGate()
+    const f = lifecycleFixture({ continuationUsage: { tokens: 950, contextWindow: 1000 },
+      compactWork: async () => { entered.release(); await compact.promise } })
+    try {
+      const payloads: AgentStreamPayload[] = []
+      const querying = (async () => {
+        for await (const payload of f.adapter.continueQuery(continuationInput(f.query))) payloads.push(payload)
+      })()
+      await entered.promise
+      f.adapter.abort(f.query.sessionId)
+      compact.release()
+      await querying
+      expect(f.harness.state.customMessage).toBeUndefined()
+      expect(f.harness.state.prompt).toBeUndefined()
+      const results = payloads.filter((payload) => payload.kind === 'sdk_message' && payload.message.type === 'result')
+      expect(results).toHaveLength(1)
+      expect(results[0]).toMatchObject({ kind: 'sdk_message', message: { terminal_reason: 'stopped', stopped_by_user: true } })
+    } finally { compact.release(); await f.cleanup() }
+  })
+})
+
 describe('Pi adapter 真实退出等待', () => {
+  test('prompt 拒绝也不能跳过取消等待之后的订阅和会话释放', async () => {
+    const released: string[] = []
+    const fixture = lifecycleFixture({ promptWork: async () => { throw new Error('查询失败') },
+      onUnsubscribe: () => { released.push('unsubscribe') }, onDispose: () => { released.push('dispose') },
+    })
+    try {
+      const iterator = fixture.adapter.query(fixture.query)
+      await iterator.next()
+      await expect(iterator.next()).rejects.toThrow('查询失败')
+      expect(released).toEqual(['unsubscribe', 'dispose'])
+    } finally { await fixture.cleanup() }
+  })
+
+  test('普通停止先取消独立压缩，再取消生成；prompt/abort 完成且资源释放后才交付 result', async () => {
+    const prompt = lifecycleGate(), abort = lifecycleGate(), entered = lifecycleGate()
+    const order: string[] = []
+    const fixture = lifecycleFixture({ promptWork: () => prompt.promise,
+      onAbortCompaction: () => { order.push('compaction') },
+      abortWork: async () => { order.push('abort'); entered.release(); await abort.promise },
+      onDispose: () => { order.push('dispose') },
+    })
+    try {
+      const iterator = fixture.adapter.query(fixture.query)
+      await iterator.next()
+      fixture.adapter.abort(fixture.query.sessionId)
+      fixture.adapter.abort(fixture.query.sessionId)
+      await entered.promise
+      const result = iterator.next()
+      await expectPending(result)
+      expect(order).toEqual(['compaction', 'abort'])
+      abort.release()
+      await expectPending(result)
+      prompt.release()
+      expect((await result).value).toMatchObject({ kind: 'sdk_message', message: { type: 'result', stopped_by_user: true } })
+      expect(order).toEqual(['compaction', 'abort', 'dispose'])
+      expect((await iterator.next()).done).toBe(true)
+    } finally { prompt.release(); abort.release(); await fixture.cleanup() }
+  })
+
+  test('正常结果必须等 dispose；某轮清理失败不发布 result，也不污染其他轮', async () => {
+    let fail = true
+    const fixture = lifecycleFixture({ onDispose: () => { if (fail) throw new Error('SDK_SECRET_123') } })
+    try {
+      const payloads: SDKMessage[] = []
+      const querying = (async () => {
+        for await (const payload of fixture.adapter.query(fixture.query)) {
+          if (payload.kind === 'sdk_message') payloads.push(payload.message)
+        }
+      })()
+      const error = await querying.catch((reason: unknown) => reason)
+      expect(error).toBeInstanceOf(AgentRuntimeCleanupError)
+      expect(String(error)).not.toContain('SDK_SECRET_123')
+      expect(payloads.some((message) => message.type === 'result')).toBe(false)
+      fail = false
+      const subsequent: SDKMessage[] = []
+      for await (const payload of fixture.adapter.query({ ...fixture.query, sessionId: 'another-session' })) {
+        if (payload.kind === 'sdk_message') subsequent.push(payload.message)
+      }
+      expect(subsequent.some((message) => message.type === 'result')).toBe(true)
+    } finally { await fixture.cleanup().catch(() => {}) }
+  })
+
+  test('压缩取消异常仍尝试普通 abort 并释放资源，但不能报告正常停止', async () => {
+    const order: string[] = []
+    const fixture = lifecycleFixture({ waitForAbort: true,
+      onAbortCompaction: () => { order.push('compaction'); throw new Error('PRIVATE_SECRET') },
+      abortWork: async () => { order.push('abort') }, onDispose: () => { order.push('dispose') },
+    })
+    try {
+      const iterator = fixture.adapter.query(fixture.query)
+      await iterator.next()
+      fixture.adapter.abort(fixture.query.sessionId)
+      await expect(iterator.next()).rejects.toBeInstanceOf(AgentRuntimeCleanupError)
+      expect(order).toEqual(['compaction', 'abort', 'dispose'])
+    } finally { await fixture.cleanup().catch(() => {}) }
+  })
+
   test('消费者暂停在 yield 时，退出仍驱动 finally，分别等待 prompt 与 abort', async () => {
     const prompt = lifecycleGate()
     const abort = lifecycleGate()
@@ -936,7 +1129,7 @@ describe('PiAgentAdapter 查询主链', () => {
       sessionId: 'prewarm', prompt: 'hi', model: 'test-model',
       apiKey: 'secret', baseUrl: 'https://example.test/v1', provider: 'openai',
       cwd: directory, systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY,
-      sandboxPolicy: { ...SANDBOX_POLICY, workingDirectory: directory },
+      sandboxPolicy: { ...SANDBOX_POLICY, sandboxCwd: directory },
       runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
     }
     try {
@@ -1036,7 +1229,7 @@ describe('PiAgentAdapter 查询主链', () => {
     try {
       const sandboxPolicy: AgentSandboxPolicy = {
         ...SANDBOX_POLICY,
-        workingDirectory: directory,
+        sandboxCwd: directory,
         writableRoots: [directory],
         protectedReadOnlyRoots: [join(directory, '.git')],
       }
@@ -1095,7 +1288,7 @@ describe('PiAgentAdapter 查询主链', () => {
         cwd: directory, systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY,
         sandboxPolicy: {
           ...SANDBOX_POLICY,
-          workingDirectory: directory,
+          sandboxCwd: directory,
           writableRoots: [directory],
           protectedReadOnlyRoots: [join(directory, '.git')],
         },
@@ -1125,6 +1318,45 @@ describe('PiAgentAdapter 查询主链', () => {
       adapter.dispose()
       rmSync(directory, { recursive: true, force: true })
     }
+  })
+
+  test('Pi Bash 审批更新执行目录不改变沙箱基准，非法目录仍不执行', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'axon-pi-workdir-approval-'))
+    mkdirSync(join(directory, 'child'))
+    let executions = 0
+    let approvedWorkdir: string | undefined
+    const harness = createRuntimeHarness({ executeTool: 'bash', toolInput: { command: 'pwd', workdir: 'child' } })
+    const adapter = new PiAgentAdapter(harness.load, hostToolPort({
+      executeShellCommand: async (request) => {
+        expect(request.cwd).toBe(realpathSync(approvedWorkdir ? join(directory, approvedWorkdir) : join(directory, 'child')))
+        expect(request.policy.sandboxCwd).toBe(directory)
+        expect(request.policy.writableRoots).toEqual([directory])
+        expect(request.command).toBe('pwd')
+        executions += 1
+        return { exitCode: 0, timedOut: false, aborted: false, stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false }
+      },
+    }))
+    const query: PiAgentQueryOptions = {
+      sessionId: 'workdir-approval', prompt: '测试', model: 'test-model', apiKey: 'secret',
+      baseUrl: 'https://example.test/v1', provider: 'openai', cwd: directory,
+      systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY,
+      sandboxPolicy: { ...SANDBOX_POLICY, sandboxCwd: directory, writableRoots: [directory] },
+      runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
+      canUseTool: async (_name, args) => {
+        expect(args.workdir).toBe(realpathSync(join(directory, 'child')))
+        return approvedWorkdir ? { behavior: 'allow', updatedInput: { command: 'pwd', workdir: approvedWorkdir } } : { behavior: 'allow' }
+      },
+    }
+    try {
+      for await (const _payload of adapter.query(query)) {}
+      expect(executions).toBe(1)
+      approvedWorkdir = '..'
+      for await (const _payload of adapter.query(query)) {}
+      expect(executions).toBe(2)
+      approvedWorkdir = 'missing'
+      await expect((async () => { for await (const _payload of adapter.query(query)) {} })()).rejects.toThrow('不存在')
+      expect(executions).toBe(2)
+    } finally { adapter.dispose(); await adapter.drain(); rmSync(directory, { recursive: true, force: true }) }
   })
 
   test('Bash Seatbelt 拒绝沿用结构化审批，并携带网络 Grant 重试原命令', async () => {
@@ -1158,7 +1390,7 @@ describe('PiAgentAdapter 查询主链', () => {
         apiKey: 'secret', baseUrl: 'https://example.test/v1', provider: 'openai',
         cwd: directory, systemPrompt: '测试', executionPolicy: DEFAULT_EXECUTION_POLICY,
         sandboxPolicy: {
-          ...SANDBOX_POLICY, workingDirectory: directory, writableRoots: [directory],
+          ...SANDBOX_POLICY, sandboxCwd: directory, writableRoots: [directory],
           protectedReadOnlyRoots: [join(directory, '.git')],
         },
         runtimeAgentDir: join(directory, 'agent'), runtimeSessionDir: join(directory, 'sessions'),
@@ -1564,7 +1796,7 @@ describe('PiAgentAdapter 查询主链', () => {
       provider: 'openai',
       systemPrompt: '当前系统提示词\n根规则',
       executionPolicy: DEFAULT_EXECUTION_POLICY,
-      sandboxPolicy: { ...SANDBOX_POLICY, workingDirectory: directory, writableRoots: [directory] },
+      sandboxPolicy: { ...SANDBOX_POLICY, sandboxCwd: directory, writableRoots: [directory] },
       allowedBuiltinTools: ['Read'],
       runtimeAgentDir: join(directory, '.runtime'),
       runtimeSessionDir: join(directory, '.runtime', 'sessions'),
@@ -1583,12 +1815,12 @@ describe('PiAgentAdapter 查询主链', () => {
     }
   })
 
-  test('abort 丢弃半截 assistant，并以 stopped result 收束流', async () => {
+  test('abort 丢弃迟到 assistant，但真实工具回传仍在唯一 stopped result 之前交付', async () => {
     const { mkdtempSync, rmSync } = await import('node:fs')
     const { tmpdir } = await import('node:os')
     const { join } = await import('node:path')
     const directory = mkdtempSync(join(tmpdir(), 'axon-pi-abort-'))
-    const harness = createRuntimeHarness({ waitForAbort: true })
+    const harness = createRuntimeHarness({ waitForAbort: true, emitToolResultOnAbort: true })
     const adapter = new PiAgentAdapter(harness.load, hostToolPort())
     const query: PiAgentQueryOptions = {
       sessionId: 'app-session-1',
@@ -1616,6 +1848,10 @@ describe('PiAgentAdapter 查询主链', () => {
       expect(harness.state.aborted).toBe(true)
       expect(remaining.some((payload) =>
         payload.kind === 'sdk_message' && payload.message.type === 'assistant')).toBe(false)
+      expect(remaining[0]).toMatchObject({ kind: 'sdk_message', message: {
+        type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'finishing-tool', is_error: false }] },
+      } })
+      expect(remaining.at(-1)).toMatchObject({ kind: 'sdk_message', message: { type: 'result' } })
       expect(remaining).toContainEqual({
         kind: 'sdk_message',
         message: expect.objectContaining({ type: 'result', terminal_reason: 'stopped' }),

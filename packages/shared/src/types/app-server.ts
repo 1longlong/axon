@@ -2,9 +2,10 @@
 import type { AgentRuntimeCapabilities, AgentRuntimeId } from './agent-session'
 import type { AgentSandboxCapability } from './agent-sandbox'
 import type { AgentGenerationEvent, AgentQueueSnapshot } from './agent-run'
-import type { BackendAgentRunEvent, ChatGenerationIdentityEvent } from './backend'
+import type { BackendAgentRunEvent, BackendAgentWorkflowEvent, ChatGenerationIdentityEvent, AgentPauseChangedEvent } from './backend'
 import type { ChatGenerationEvent } from './chat'
-import type { Channel } from './channel'
+import type { Channel, RuntimeChannelDefinition } from './channel'
+import type { BackendAgentConfiguration } from './backend'
 import type { AppSettings } from './settings'
 import type { UserProfile } from './user-profile'
 import type { AgentProject, AgentProjectWatchClosedEvent } from './agent-project'
@@ -61,6 +62,8 @@ export const APP_SERVER_RPC_OPTIONS = {
 
 /** 应用握手版本与 JSON-RPC 帧版本独立；首版不读取旧握手格式。 */
 export const APP_SERVER_PROTOCOL_VERSION = 1
+/** 可信目录租约失败；data.code 为 busy 或 unavailable，父端不能自动重建/重投。 */
+export const APP_SERVER_DIRECTORY_LOCK_ERROR = -32006
 export const APP_SERVER_METHODS = {
   INITIALIZE: 'axon/initialize',
   REGISTER_CLIENT: 'axon/client/register',
@@ -115,8 +118,14 @@ export const APP_SERVER_METHODS = {
   AGENT_UPDATE_SESSION: 'axon/agent/session/update',
   AGENT_DELETE_SESSION: 'axon/agent/session/delete',
   AGENT_SEND: 'axon/agent/send',
+  AGENT_EXECUTE_WORKFLOW: 'axon/agent/workflow/execute',
+  AGENT_GET_WORKFLOW: 'axon/agent/workflow/get',
+  AGENT_CANCEL_WORKFLOW: 'axon/agent/workflow/cancel',
   AGENT_GET_RUN: 'axon/agent/run/get',
   AGENT_STOP: 'axon/agent/run/stop',
+  AGENT_PAUSE: 'axon/agent/run/pause',
+  AGENT_GET_PAUSE: 'axon/agent/pause/get',
+  AGENT_CONTINUE: 'axon/agent/continue',
   AGENT_LIST_QUEUE: 'axon/agent/queue/list',
   AGENT_CANCEL_QUEUE: 'axon/agent/queue/cancel',
   AGENT_MOVE_QUEUE: 'axon/agent/queue/move',
@@ -138,8 +147,10 @@ export const APP_SERVER_CLIENT_METHODS = {
 } as const
 export const APP_SERVER_NOTIFICATIONS = {
   AGENT_RUN: 'axon/event/agent/run',
+  AGENT_WORKFLOW: 'axon/event/agent/workflow',
   AGENT_QUEUE: 'axon/event/agent/queue',
   AGENT_METADATA: 'axon/event/agent/metadata',
+  AGENT_PAUSE_CHANGED: 'axon/event/agent/pause-changed',
   CHAT_GENERATION: 'axon/event/chat/generation',
   CHAT_GENERATION_IDENTITY: 'axon/event/chat/generation-identity',
   SETTINGS_UPDATED: 'axon/event/settings/updated',
@@ -166,9 +177,11 @@ export interface AppServerSettingsEvent { clientId: string; settings: AppSetting
 export interface AppServerUserProfileEvent { clientId: string; profile: UserProfile }
 export interface AppServerChannelsEvent { clientId: string; channels: Channel[] }
 export interface AppServerAgentRunEvent { clientId: string; event: BackendAgentRunEvent }
+export interface AppServerAgentWorkflowEvent { clientId: string; event: BackendAgentWorkflowEvent }
 export interface AppServerChatGenerationEvent { clientId: string; event: ChatGenerationEvent }
 export interface AppServerChatGenerationIdentityEvent { clientId: string; event: ChatGenerationIdentityEvent }
 export interface AppServerAgentQueueEvent { clientId: string; snapshot: AgentQueueSnapshot }
+export interface AppServerAgentPauseChangedEvent { clientId: string; event: AgentPauseChangedEvent }
 export interface AppServerAgentMetadataEvent {
   clientId: string
   event: Extract<AgentGenerationEvent, { type: 'session_title' }>
@@ -208,6 +221,19 @@ export const APP_SERVER_HOST_METHODS = {
   ENCRYPT_CREDENTIAL: 'axon/host/credential/encrypt',
   DECRYPT_CREDENTIAL: 'axon/host/credential/decrypt',
   CONFIRM_CHANNEL_TARGET: 'axon/host/channel-target/confirm',
+  GET_EXEC_BOOTSTRAP: 'axon/host/exec/bootstrap',
+  RESOLVE_RUNTIME_CREDENTIAL: 'axon/host/runtime-credential/resolve',
 } as const
 export interface AppServerHostCredentialInput { value: string }
 export interface AppServerHostChannelTargetInput { clientId: string; url: string }
+
+/** 仅 --entry exec 的可信后端从父进程读取；不属于页面业务配置。 */
+export interface AppServerExecBootstrap {
+  channels: RuntimeChannelDefinition[]
+  agent: BackendAgentConfiguration
+}
+export interface AppServerRuntimeCredentialTarget {
+  channelId: string
+  provider: Channel['provider']
+  baseUrl: string
+}

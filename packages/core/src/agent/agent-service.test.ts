@@ -10,10 +10,14 @@ import type {
   AgentQueryInput,
   AgentStreamPayload,
   ResolvedChannel,
+  SDKAssistantMessage,
+  SDKToolResultBlock,
+  SDKUserMessage,
 } from '@axon/shared'
+import { AgentRuntimeCleanupError } from '@axon/shared'
 import { AgentEventBus } from './agent-event-bus'
 import { AgentService, AgentServiceError } from './agent-service'
-import { AgentSessionManager } from './agent-session-manager'
+import { AgentSessionManager, AgentSessionManagerError } from './agent-session-manager'
 import { AgentRootStateStore } from './agent-root-state-store'
 import {
   resolveProjectInstructions,
@@ -306,7 +310,7 @@ describe('AgentService 消息编排主链', () => {
 
     expect(adapter.input).toMatchObject({
       sessionId: 'session-1',
-      prompt: '检查项目',
+      prompt: '  检查项目  ',
       model: 'model-1',
       cwd: directory,
       systemPrompt: '全局规则',
@@ -323,6 +327,7 @@ describe('AgentService 消息编排主链', () => {
       runtimeSessionFile: join(directory, 'runtime', 'sessions', 'runtime-1.jsonl'),
     })
     expect(sessions.getMessages('session-1').map((message) => message.type)).toEqual(['user', 'assistant', 'result'])
+    expect(sessions.getMessages('session-1')[0]).toMatchObject({ message: { content: [{ type: 'text', text: '  检查项目  ' }] } })
     expect(events.map((event) => event.type)).toEqual([
       'run_started', 'stream', 'stream', 'stream', 'stream', 'stream', 'run_finished',
     ])
@@ -402,7 +407,7 @@ describe('AgentService 消息编排主链', () => {
     expect(adapter.input?.sandboxPolicy).toEqual({
       platform: 'macos',
       mode: 'workspaceWrite',
-      workingDirectory: canonicalDirectory,
+      sandboxCwd: canonicalDirectory,
       readAccess: { type: 'fullAccess' },
       writableRoots: [canonicalDirectory],
       protectedReadOnlyRoots: [
@@ -625,6 +630,157 @@ describe('AgentService 消息编排主链', () => {
 })
 
 describe('AgentService 并发、停止与输入边界', () => {
+  test('Pi/Zima 中立链保存停止前部分内容，既有真实工具回传优先，其余未知；重建历史可恢复', async () => {
+    for (const runtimeId of ['pi', 'zima'] as const) {
+      const session = sessions.create({ runtimeId, channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1' })
+      class InterruptedAdapter extends FakeAdapter {
+        override async *query(): AsyncIterable<AgentStreamPayload> {
+          yield { kind: 'sdk_message', message: {
+            type: 'assistant', uuid: `calls-${runtimeId}`, parent_tool_use_id: null, message: { content: ['done', 'late', 'unknown'].map((id) => ({
+              type: 'tool_use', id, name: 'Bash', input: { command: 'pwd' },
+            })) },
+          } }
+          yield { kind: 'sdk_message', message: { type: 'user', parent_tool_use_id: null, message: { content: [{
+            type: 'tool_result', tool_use_id: 'done', content: '停止前真实结果',
+          }] } } }
+          yield { kind: 'sdk_delta', delta: { uuid: `partial-${runtimeId}`, deltas: [
+            { type: 'thinking_delta', contentIndex: 0, delta: '先思考' },
+            { type: 'text_delta', contentIndex: 1, delta: ' 部分回复\n' },
+            { type: 'toolcall_delta', contentIndex: 2, delta: '{"command":"不要执行', toolCall: { id: 'half', name: 'Bash' } },
+            { type: 'thinking_delta', contentIndex: 3, delta: '后思考' },
+          ] } }
+          service.stop(session.id)
+          yield { kind: 'sdk_delta', delta: { uuid: `partial-${runtimeId}`, deltas: [{ type: 'text_delta', contentIndex: 1, delta: '迟到文字' }] } }
+          yield { kind: 'sdk_message', message: { type: 'assistant', parent_tool_use_id: null, message: { content: [{ type: 'text', text: '迟到完整消息' }] } } }
+          yield { kind: 'sdk_message', message: { type: 'user', parent_tool_use_id: null, message: { content: [
+            { type: 'text', text: '迟到用户文本' }, { type: 'tool_result', tool_use_id: 'old', content: '旧轮结果' },
+            { type: 'tool_result', tool_use_id: 'late', content: '取消期间真实完成', is_error: false },
+          ] } } }
+          yield { kind: 'sdk_message', message: { type: 'result', subtype: 'success', usage: { input_tokens: 1 } } }
+        }
+      }
+      const adapter = new InterruptedAdapter()
+      let messageId = 0
+      const { service, events } = createService(adapter, resolvedChannel(), { resolveAdapter: () => adapter, createId: () => `${runtimeId}-${++messageId}` })
+      const outcome = await service.sendMessage({ sessionId: session.id, text: '执行任务' })
+      expect(outcome.result.terminal_reason).toBe('stopped')
+      const manager = new AgentSessionManager({ indexPath: join(directory, 'agent-sessions.json'), sessionsDir: join(directory, 'messages'), stateStore: rootStateStore })
+      const history = manager.getMessages(session.id)
+      const partial = history.find((message) => message.type === 'assistant' && (message as SDKAssistantMessage).isPartial) as SDKAssistantMessage
+      expect(partial.uuid).toBe(`partial-${runtimeId}`)
+      expect(partial.message.content).toEqual([
+        { type: 'thinking', thinking: '先思考' }, { type: 'text', text: ' 部分回复\n' }, { type: 'thinking', thinking: '后思考' },
+      ])
+      const results = history.filter((message) => message.type === 'user').flatMap((message) => (message as SDKUserMessage).message?.content ?? [])
+        .filter((block): block is SDKToolResultBlock => block.type === 'tool_result')
+      expect(results).toHaveLength(3)
+      expect(results.find((block) => block.tool_use_id === 'done')?.content).toBe('停止前真实结果')
+      expect(results.find((block) => block.tool_use_id === 'late')).toMatchObject({ content: '取消期间真实完成', is_error: false })
+      expect(results.find((block) => block.tool_use_id === 'unknown')).toMatchObject({ execution_status: 'unknown', is_error: true })
+      expect(JSON.stringify(history)).not.toContain('迟到')
+      expect(JSON.stringify(history)).not.toContain('不要执行')
+      expect(history.at(-1)?.type).toBe('result')
+      expect(history.filter((message) => message.type === 'result')).toHaveLength(1)
+      expect(events.filter((event) => event.type === 'stream' && event.payload.kind === 'sdk_message' && (event.payload.message as SDKAssistantMessage).isPartial)).toHaveLength(1)
+    }
+  })
+
+  test('无 result 的取消/清理故障也保存部分正文；落盘失败不报告已保存停止', async () => {
+    for (const failure of ['abort', 'cleanup', 'persistence'] as const) {
+      const session = sessions.create({ channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1' })
+      class PartialAdapter extends FakeAdapter {
+        override async *query(): AsyncIterable<AgentStreamPayload> {
+          yield { kind: 'sdk_delta', delta: { uuid: `draft-${failure}`, deltas: [{ type: 'text_delta', contentIndex: 0, delta: '部分正文' }] } }
+          service.stop(session.id)
+          if (failure === 'cleanup') throw new AgentRuntimeCleanupError()
+          throw new DOMException('取消', 'AbortError')
+        }
+      }
+      const { service, events } = createService(new PartialAdapter())
+      const originalAppend = sessions.appendMessage.bind(sessions)
+      if (failure === 'persistence') sessions.appendMessage = (id, message) => {
+        if (message.type === 'assistant') throw new AgentSessionManagerError('storage_error', '测试保存失败')
+        return originalAppend(id, message)
+      }
+      try {
+        if (failure === 'persistence') await expectServiceError(() => service.sendMessage({ sessionId: session.id, text: '任务' }), 'persistence_error')
+        else await service.sendMessage({ sessionId: session.id, text: '任务' })
+      } finally { sessions.appendMessage = originalAppend }
+      const history = sessions.getMessages(session.id)
+      const finished = events.find((event) => event.type === 'run_finished')
+      expect(finished).toMatchObject({ completion: { persisted: failure !== 'persistence' } })
+      if (failure === 'persistence') expect(history.filter((message) => message.type === 'result')).toHaveLength(0)
+      else {
+        expect(history.at(-2)).toMatchObject({ type: 'assistant', isPartial: true, message: { content: [{ type: 'text', text: '部分正文' }] } })
+        expect(history.at(-1)).toMatchObject({ terminal_reason: failure === 'cleanup' ? 'failed' : 'stopped' })
+      }
+    }
+  })
+  test('用户取消不能覆盖 adapter 清理故障；提前 result 的故障也阻止可继续完成包', async () => {
+    for (const earlyResult of [false, true]) {
+      const session = sessions.create({ channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1' })
+      const adapter = new FakeAdapter()
+      const { service, events } = createService(adapter)
+      adapter.query = async function* () {
+        service.stop(session.id)
+        if (earlyResult) yield { kind: 'sdk_message', message: { type: 'result', subtype: 'success', usage: { input_tokens: 1 } } }
+        throw new AgentRuntimeCleanupError()
+      }
+      if (earlyResult) await expect(service.sendMessage({ sessionId: session.id, text: '暂停任务' })).rejects.toMatchObject({ code: 'runtime_error' })
+      else await service.sendMessage({ sessionId: session.id, text: '暂停任务' })
+      const finished = events.findLast((event) => event.type === 'run_finished')
+      expect(finished).toMatchObject({ completion: {
+        terminalReason: 'failed', error: { code: 'runtime_cleanup_failed', retryable: false },
+        stoppedByUser: false, persisted: !earlyResult,
+      } })
+      expect(sessions.getMessages(session.id).filter((message) => message.type === 'result')).toHaveLength(1)
+    }
+  })
+
+  test('停止落盘后重建服务，Pi/Zima 下一轮获得中断提醒；原输入不重投且完成后不再提醒', async () => {
+    let nextMessage = 0
+    for (const runtimeId of ['pi', 'zima'] as const) {
+      const session = sessions.create({ runtimeId, channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1' })
+      const adapter = new FakeAdapter()
+      adapter.waitForAbort = true
+      // 分别覆盖有 Runtime 引用和无引用的中立背景；夹具不执行真实 SDK/模型。
+      adapter.emitRuntimeSession = runtimeId === 'pi'
+      let entered!: () => void
+      const ready = new Promise<void>((resolve) => { entered = resolve })
+      adapter.onQuery = () => { entered() }
+      const options = { resolveAdapter: () => adapter, createId: () => `pause-${++nextMessage}` }
+      const original = createService(adapter, resolvedChannel(), options).service
+      const running = original.sendMessage({ sessionId: session.id, text: '原任务只投递一次' })
+      await ready
+      expect(adapter.input?.systemPrompt).not.toContain('上一轮执行被用户停止')
+      expect(original.stop(session.id)).toBe(true)
+      await running
+      await original.drain()
+
+      // 新实例重新读取磁盘，提醒来源是应用 JSONL，而非旧服务的内存取消标志。
+      sessions = new AgentSessionManager({
+        indexPath: join(directory, 'agent-sessions.json'), sessionsDir: join(directory, 'messages'),
+        stateStore: new AgentRootStateStore(join(directory, 'messages')),
+      })
+      adapter.waitForAbort = false
+      adapter.onQuery = undefined
+      adapter.stream = [{ kind: 'sdk_message', message: { type: 'result', subtype: 'success', usage: { input_tokens: 1 } } }]
+      const resumed = createService(adapter, resolvedChannel(), options).service
+      await resumed.sendMessage({ sessionId: session.id, text: '继续剩余工作' })
+      expect(adapter.input?.prompt).toBe('继续剩余工作')
+      expect(adapter.input?.systemPrompt).toStartWith('全局规则')
+      expect(adapter.input?.systemPrompt).toContain('上一轮执行被用户停止')
+      expect(adapter.input?.systemPrompt).not.toContain('原任务只投递一次')
+      expect(adapter.input?.resumeSessionId).toBe(runtimeId === 'pi' ? 'runtime-1' : undefined)
+      const originalInputs = sessions.getMessages(session.id).filter((message) => message.type === 'user'
+        && JSON.stringify(message).includes('原任务只投递一次'))
+      expect(originalInputs).toHaveLength(1)
+
+      await resumed.sendMessage({ sessionId: session.id, text: '新的任务' })
+      expect(adapter.input?.systemPrompt).not.toContain('上一轮执行被用户停止')
+    }
+  })
+
   test('异步运行条件校验期间可停止、拒绝重复运行，失败清理还会释放空闲等待者', async () => {
     sessions.create({ channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1' })
     let finish: () => void = () => { throw new Error('校验未启动') }

@@ -1,8 +1,27 @@
 import { describe, expect, test } from 'bun:test'
 import type { SDKMessage } from '@axon/shared'
-import { getResultSkillActivations } from './agent-skill-usage'
+import { getResultSkillActivations, getTurnSkillActivations } from './agent-skill-usage'
 
 describe('Agent 每轮 Skill 使用摘要', () => {
+  test('原轮继续后保留此前 Skill 并合并重复来源，不从相邻系统标记读取伪造记录', () => {
+    const activation = {
+      name: 'review-code', directoryKind: 'agents' as const,
+      relativeInstructionPath: '.agents/skills/review-code/SKILL.md',
+    }
+    expect(getTurnSkillActivations([
+      { type: 'result', subtype: 'error', stopped_by_user: true, terminal_reason: 'stopped',
+        skill_activations: [{ ...activation, sources: ['skill_read'] }] },
+      { type: 'system', subtype: 'axon_continued', skill_activations: [{ ...activation, name: 'forged', sources: ['explicit'] }] },
+      { type: 'result', subtype: 'success', skill_activations: [
+        { ...activation, sources: ['explicit', 'skill_read'] },
+        { name: 'other', directoryKind: 'builtin', relativeInstructionPath: '$HOME/.axon/skills/other/SKILL.md', sources: ['skill_read'] },
+      ] },
+    ])).toEqual([
+      { ...activation, sources: ['skill_read', 'explicit'] },
+      { name: 'other', directoryKind: 'builtin', relativeInstructionPath: '$HOME/.axon/skills/other/SKILL.md', sources: ['skill_read'] },
+    ])
+  })
+
   test('读取 result 中的合法激活并按名称去重', () => {
     const message: SDKMessage = {
       type: 'result',

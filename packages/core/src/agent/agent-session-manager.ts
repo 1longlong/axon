@@ -13,7 +13,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import {
   DEFAULT_AGENT_SESSION_TITLE,
   AGENT_RUNTIME_CAPABILITIES,
@@ -32,6 +32,7 @@ import type {
   AgentSubagentType,
   AgentSessionUpdateInput,
   AgentThinkingLevel,
+  AgentUserInputPolicy,
   SDKMessage,
 } from '@axon/shared'
 import { readJsonFileSafe, writeJsonFileAtomic, writeTextFileAtomic } from '../storage/safe-file'
@@ -43,7 +44,8 @@ const MAX_SESSION_MESSAGES = 100_000
 const MAX_SESSIONS_FILE_BYTES = 128 * 1024 * 1024
 const MAX_MESSAGE_LINE_BYTES = 8 * 1024 * 1024
 const SANDBOX_MODES: readonly AgentSandboxMode[] = ['readOnly', 'workspaceWrite']
-const APPROVAL_POLICIES: readonly AgentApprovalPolicy[] = ['onRequest']
+const APPROVAL_POLICIES: readonly AgentApprovalPolicy[] = ['onRequest', 'never']
+const USER_INPUT_POLICIES: readonly AgentUserInputPolicy[] = ['ask', 'reject']
 const APPROVAL_REVIEWERS: readonly AgentApprovalReviewer[] = ['user', 'autoReview']
 const THINKING_LEVELS: readonly AgentThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 const SUBAGENT_TYPES: readonly AgentSubagentType[] = ['coder', 'explore', 'plan']
@@ -142,6 +144,14 @@ function normalizeApprovalReviewer(value: unknown): AgentApprovalReviewer | unde
   return value as AgentApprovalReviewer
 }
 
+function normalizeUserInputPolicy(value: unknown): AgentUserInputPolicy | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || !USER_INPUT_POLICIES.includes(value as AgentUserInputPolicy)) {
+    throw new AgentSessionManagerError('invalid_input', '用户追问策略无效')
+  }
+  return value as AgentUserInputPolicy
+}
+
 function normalizeThinkingLevel(value: unknown): AgentThinkingLevel | undefined {
   if (value === undefined || value === null) return undefined
   if (typeof value !== 'string' || !THINKING_LEVELS.includes(value as AgentThinkingLevel)) {
@@ -219,15 +229,23 @@ function normalizeMeta(value: unknown): AgentSessionMeta {
   const sandboxMode = normalizeSandboxMode(meta.sandboxMode) ?? 'workspaceWrite'
   const approvalPolicy = normalizeApprovalPolicy(meta.approvalPolicy) ?? 'onRequest'
   const approvalReviewer = normalizeApprovalReviewer(meta.approvalReviewer) ?? 'user'
+  const userInputPolicy = normalizeUserInputPolicy(meta.userInputPolicy) ?? 'ask'
   const thinkingLevel = normalizeThinkingLevel(meta.thinkingLevel)
   const memoryFileStates = normalizeMemoryFileStates(meta.memoryFileStates)
   const lineage = normalizeLineage(meta, id)
   const subagentType = normalizeSubagentType(meta.subagentType)
+  if (meta.creationOrigin !== undefined && (meta.creationOrigin !== 'exec' || lineage.parentSessionId
+    || typeof meta.creationWorkspacePath !== 'string' || !isAbsolute(meta.creationWorkspacePath)
+    || meta.creationWorkspacePath.length > 4096 || meta.creationWorkspacePath.includes('\0'))
+    || meta.creationOrigin === undefined && meta.creationWorkspacePath !== undefined) {
+    throw new AgentSessionManagerError('invalid_input', '会话创建来源无效')
+  }
   if (Boolean(lineage.parentSessionId) !== Boolean(subagentType)) {
     throw new AgentSessionManagerError('invalid_input', '子 Agent 类型与父子关系不一致')
   }
   return {
     id,
+    ...(meta.creationOrigin === undefined ? {} : { creationOrigin: 'exec' as const, creationWorkspacePath: meta.creationWorkspacePath as string }),
     runtimeId: normalizeRuntimeId(meta.runtimeId),
     title: normalizeTitle(meta.title),
     ...(channelId === undefined ? {} : { channelId }),
@@ -238,6 +256,7 @@ function normalizeMeta(value: unknown): AgentSessionMeta {
     sandboxMode,
     approvalPolicy,
     approvalReviewer,
+    userInputPolicy,
     ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
     ...(memoryFileStates === undefined ? {} : { memoryFileStates }),
     ...(lineage.parentSessionId === undefined ? {} : { parentSessionId: lineage.parentSessionId }),
@@ -368,6 +387,7 @@ export class AgentSessionManager {
     return meta ? cloneJson(meta) : undefined
   }
 
+  /** 校验创建输入并落盘；新会话默认交互，子会话不能放宽父限制，元数据归根 state。 */
   create(input: AgentSessionCreateInput = {}): AgentSessionMeta {
     const index = this.readIndex()
     const timestamp = this.currentTimestamp()
@@ -375,12 +395,19 @@ export class AgentSessionManager {
     const modelId = normalizeOptionalId(input.modelId, '模型 ID', 512)
     const projectId = normalizeOptionalId(input.projectId, '项目 ID', 128)
     const sandboxMode = normalizeSandboxMode(input.sandboxMode) ?? 'workspaceWrite'
-    const approvalPolicy = normalizeApprovalPolicy(input.approvalPolicy) ?? 'onRequest'
+    let approvalPolicy = normalizeApprovalPolicy(input.approvalPolicy) ?? 'onRequest'
     const approvalReviewer = normalizeApprovalReviewer(input.approvalReviewer) ?? 'user'
+    let userInputPolicy = normalizeUserInputPolicy(input.userInputPolicy) ?? 'ask'
     const requestedThinkingLevel = normalizeThinkingLevel(input.thinkingLevel)
     const id = this.createUniqueId(this.list())
     const lineage = normalizeLineage(input as Record<string, unknown>, id)
     const subagentType = normalizeSubagentType(input.subagentType)
+    if (input.creationOrigin !== undefined && (input.creationOrigin !== 'exec' || lineage.parentSessionId
+      || typeof input.creationWorkspacePath !== 'string' || !isAbsolute(input.creationWorkspacePath)
+      || input.creationWorkspacePath.length > 4096 || input.creationWorkspacePath.includes('\0'))
+      || input.creationOrigin === undefined && input.creationWorkspacePath !== undefined) {
+      throw new AgentSessionManagerError('invalid_input', '会话创建来源无效')
+    }
     if (Boolean(lineage.parentSessionId) !== Boolean(subagentType)) {
       throw new AgentSessionManagerError('invalid_input', '子 Agent 类型与父子关系不一致')
     }
@@ -398,9 +425,13 @@ export class AgentSessionManager {
       if (parent.runtimeId !== runtimeId) {
         throw new AgentSessionManagerError('invalid_input', '子 Agent 必须继承父会话 Runtime')
       }
+      // 直接使用存储入口也不得放宽父交互限制；缺省子字段不能恢复 ask/onRequest。
+      if (parent.approvalPolicy === 'never') approvalPolicy = 'never'
+      if (parent.userInputPolicy === 'reject') userInputPolicy = 'reject'
     }
     const meta: AgentSessionMeta = {
       id,
+      ...(input.creationOrigin === undefined ? {} : { creationOrigin: input.creationOrigin, creationWorkspacePath: input.creationWorkspacePath }),
       runtimeId,
       title: normalizeTitle(input.title),
       ...(channelId === undefined ? {} : { channelId }),
@@ -409,6 +440,7 @@ export class AgentSessionManager {
       sandboxMode,
       approvalPolicy,
       approvalReviewer,
+      userInputPolicy,
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(lineage.parentSessionId === undefined ? {} : { parentSessionId: lineage.parentSessionId }),
       ...(lineage.rootSessionId === undefined ? {} : { rootSessionId: lineage.rootSessionId }),
@@ -438,6 +470,7 @@ export class AgentSessionManager {
     return cloneJson(meta)
   }
 
+  /** 校验并写回下一轮设置，子限制仍服从父会话；不改变已开始轮次的执行策略。 */
   update(id: string, input: AgentSessionUpdateInput): AgentSessionMeta {
     const normalizedId = normalizeId(id, '会话 ID')
     const index = this.readIndex()
@@ -459,12 +492,20 @@ export class AgentSessionManager {
     const sandboxMode = input.sandboxMode === undefined
       ? existing.sandboxMode ?? 'workspaceWrite'
       : normalizeSandboxMode(input.sandboxMode) ?? 'workspaceWrite'
-    const approvalPolicy = input.approvalPolicy === undefined
+    let approvalPolicy = input.approvalPolicy === undefined
       ? existing.approvalPolicy ?? 'onRequest'
       : normalizeApprovalPolicy(input.approvalPolicy) ?? 'onRequest'
     const approvalReviewer = input.approvalReviewer === undefined
       ? existing.approvalReviewer ?? 'user'
       : normalizeApprovalReviewer(input.approvalReviewer) ?? 'user'
+    let userInputPolicy = input.userInputPolicy === undefined
+      ? existing.userInputPolicy ?? 'ask'
+      : normalizeUserInputPolicy(input.userInputPolicy) ?? 'ask'
+    if (existing.parentSessionId) {
+      const parent = this.get(existing.parentSessionId)
+      if (parent?.approvalPolicy === 'never') approvalPolicy = 'never'
+      if (parent?.userInputPolicy === 'reject') userInputPolicy = 'reject'
+    }
     const thinkingLevel = input.thinkingLevel === undefined
       ? existing.thinkingLevel
       : normalizeThinkingLevel(input.thinkingLevel)
@@ -480,6 +521,7 @@ export class AgentSessionManager {
       : normalizeMemoryFileStates(input.memoryFileStates, true)
     const updated: AgentSessionMeta = {
       id: existing.id,
+      ...(existing.creationOrigin === undefined ? {} : { creationOrigin: existing.creationOrigin, creationWorkspacePath: existing.creationWorkspacePath }),
       runtimeId: existing.runtimeId,
       title: input.title === undefined ? existing.title : normalizeTitle(input.title),
       ...(channelId === undefined ? {} : { channelId }),
@@ -490,6 +532,7 @@ export class AgentSessionManager {
       sandboxMode,
       approvalPolicy,
       approvalReviewer,
+      userInputPolicy,
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(memoryFileStates === undefined ? {} : { memoryFileStates }),
       ...(existing.parentSessionId === undefined ? {} : { parentSessionId: existing.parentSessionId }),

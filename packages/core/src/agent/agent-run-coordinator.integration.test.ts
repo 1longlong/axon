@@ -51,6 +51,24 @@ async function open(validateRuntimeSession?: BackendOptions['validateRuntimeSess
 }
 
 describe('非 Electron 入口的 Agent 运行协调', () => {
+  test('首轮预检期间暂停仍取消执行，但无输入和停止终态时不能创建可继续凭据', async () => {
+    const validate = deferred<void>()
+    const { backend, coordinator, adapter, owner, session } = await open(() => validate.promise)
+    let queries = 0
+    adapter.handler = async function* () { queries++; yield* success('不应执行') }
+    const sending = coordinator.send(owner, { sessionId: session.id, text: '等待预检' }, () => {})
+    const run = coordinator.getOwnedRun(owner, session.id)!
+    const pausing = coordinator.pauseRun(owner, { sessionId: session.id, runId: run.runId })
+      .then(() => undefined, (error: unknown) => error)
+    validate.resolve()
+    await sending
+    expect(await pausing).toMatchObject({ code: 'runtime_error' })
+    expect(queries).toBe(0)
+    expect(backend.sessions.getMessages(session.id)).toEqual([])
+    expect(coordinator.getPause(owner, session.id)).toBeNull()
+    expect(coordinator.getOwnedRun(owner, session.id)).toBeUndefined()
+  })
+
   test('运行预检期已有真实身份，精确停止不会写入半轮历史或在迟到预检后启动模型', async () => {
     const validate = deferred<void>()
     const { backend, coordinator, adapter, owner, other, session } = await open(() => validate.promise)

@@ -30,8 +30,8 @@ export function createUserStoppedResult(input: UserStoppedResultInput): SDKResul
 }
 
 /**
- * 用户停止后丢弃迟到的 delta、工具消息与重试状态，只允许唯一 result 继续下游。
- * 即使 adapter 存在竞态，编排层也不会把停止后的活动写入 Axon JSONL 或 UI。
+ * 用户停止后不再接纳普通活动，只规范化唯一 result。
+ * 既有工具回传由 core 的本轮调用表另行核验，迟到 delta 和新调用不能污染历史。
  */
 export function normalizePayloadAfterUserStop(
   payload: AgentStreamPayload,

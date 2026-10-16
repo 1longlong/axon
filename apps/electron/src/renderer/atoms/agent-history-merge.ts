@@ -1,4 +1,4 @@
-/** Agent 历史读取期间的实时覆盖层；只保留当前读请求的最终变更，不缓存所有 delta。 */
+/** Agent 历史读取的实时覆盖层；调用方可预置当前草稿，再记录读取期间的最终变更。 */
 import type { AgentGenerationEvent, SDKMessage } from '@axon/shared'
 
 export interface AgentHistoryChanges {
@@ -25,7 +25,7 @@ export function recordAgentHistoryChange(changes: AgentHistoryChanges, event: Ag
   }
 }
 
-/** 完整快照是基线：合并读取期间的新完整消息/新草稿，草稿不能覆盖磁盘已有完整同 ID 消息。 */
+/** 完整快照是基线：合并标记的在途草稿/实时变更，草稿不能覆盖磁盘已有完整同 ID 消息。 */
 export function mergeAgentHistory(snapshot: readonly SDKMessage[], live: readonly SDKMessage[], changes: AgentHistoryChanges): SDKMessage[] {
   const current = new Map(live.flatMap((message) => { const key = uuid(message); return key ? [[key, message] as const] : [] }))
   const seen = new Set<string>()

@@ -21,12 +21,14 @@ import type { AgentDelegationManager } from './agent-delegation-manager'
 import { AgentSessionManagerError } from '../agent/agent-session-manager'
 import type { AgentSessionManager } from '../agent/agent-session-manager'
 import type { AgentRunOutcome, AgentService } from '../agent/agent-service'
+import { AgentServiceError } from '../agent/agent-service'
 import { AsyncWorkTracker } from '../async/async-work-tracker'
 
 export interface AgentCollaborationServiceOptions {
   sessions: Pick<AgentSessionManager, 'get' | 'create' | 'delete'>
   delegations: Pick<AgentDelegationManager, 'list' | 'get' | 'create' | 'transition'>
   agent: Pick<AgentService, 'sendMessage' | 'stop' | 'isActive'>
+    & Partial<Pick<AgentService, 'getActiveExecutionPolicy'>>
   resolveProjectCwd: (projectId: string) => string
   /** 父任务存在交互入口时，把同一 owner 临时绑定到子会话；外部任务可返回 undefined。 */
   bindChildInteractionOwner?: (parentSessionId: string, childSessionId: string) => (() => void) | undefined
@@ -96,6 +98,10 @@ export class AgentCollaborationService {
   private readonly work = new AsyncWorkTracker()
   private disposed = false
   private readonly executions = new Map<string, Promise<void>>()
+  /** 包含实际子执行 finally 与后台结果交付，不以 state.json 的终态代替 Promise 结束。 */
+  private readonly rootWork = new Map<string, Set<Promise<void>>>()
+  private readonly rootFailures = new Map<string, 'runtime_error' | 'persistence_error'>()
+  private readonly rootIdleWaits = new Map<string, Promise<void>>()
   private readonly waiters = new Map<string, Set<DelegationWaiter>>()
   private readonly interactionReleases = new Map<string, () => void>()
   private readonly pendingInteractions = new Map<string, Set<string>>()
@@ -148,6 +154,7 @@ export class AgentCollaborationService {
     ))
     // runtime 重放同一工具调用时返回原记录，不能再次创建会话或重复执行任务。
     if (existing) return existing
+    const parentRunPolicy = this.options.agent.getActiveExecutionPolicy?.(parent.id)
     const childInput: AgentSessionCreateInput = {
       title: input.title,
       runtimeId: parent.runtimeId,
@@ -157,8 +164,10 @@ export class AgentCollaborationService {
       // 只读角色只继承父边界的收窄版本，Shell 同样不能获得项目写权限。
       sandboxMode: input.subagentType === 'explore' || input.subagentType === 'plan'
         ? 'readOnly' : parent.sandboxMode,
-      approvalPolicy: parent.approvalPolicy,
+      // 设置只影响后续轮次；父轮开始时的非交互限制必须落入子会话。
+      approvalPolicy: parentRunPolicy?.approvalPolicy === 'never' ? 'never' : parent.approvalPolicy,
       approvalReviewer: parent.approvalReviewer,
+      userInputPolicy: parentRunPolicy?.userInputPolicy === 'reject' ? 'reject' : parent.userInputPolicy,
       thinkingLevel: parent.thinkingLevel,
       parentSessionId: parent.id,
       rootSessionId: lineage.rootSessionId,
@@ -366,16 +375,18 @@ export class AgentCollaborationService {
         console.warn(`[Agent 协作] 启动排队子任务失败: ${item.id}`, error)
         continue
       }
-      const execution = this.work.run(() => this.execute(running))
+      const execution = this.runRootWork(running.rootSessionId, async () => {
+        try { await this.execute(running) }
+        finally {
+          // 先释放本执行并启动排队后继，再结算根工作；等待者不能落在两个任务之间。
+          if (this.executions.get(running.id) === execution) this.executions.delete(running.id)
+          this.releaseInteractionOwner(running.id)
+          this.schedule(running.rootSessionId)
+        }
+      })
       this.executions.set(running.id, execution)
-      const finish = (): void => {
-        if (this.executions.get(running.id) === execution) this.executions.delete(running.id)
-        this.releaseInteractionOwner(running.id)
-        this.schedule(running.rootSessionId)
-      }
-      void execution.then(finish, (error) => {
-        console.error(`[Agent 协作] 子任务执行器意外失败: ${running.id}`, error)
-        finish()
+      void execution.catch(() => {
+        console.error(`[Agent 协作] 子任务执行器意外失败: ${running.id}`)
       })
     }
   }
@@ -392,8 +403,14 @@ export class AgentCollaborationService {
     } catch (error) {
       cause = error
     }
+    const storageFailed = cause instanceof AgentSessionManagerError
+      || cause instanceof AgentServiceError && cause.code === 'persistence_error'
     const current = this.options.delegations.get(delegation.id)
-    if (!current || isAgentDelegationTerminal(current.status)) return
+    if (!current || isAgentDelegationTerminal(current.status)) {
+      // 取消先写任务状态，但不能掩盖执行终于退出时发现的原文落盘失败。
+      if (storageFailed) throw new AgentCollaborationServiceError('persistence_error', '无法保存子会话历史')
+      return
+    }
 
     const result = outcome?.result
     let terminal: AgentDelegation
@@ -417,12 +434,15 @@ export class AgentCollaborationService {
       if (
         !(error instanceof AgentDelegationManagerError && error.code === 'invalid_transition')
         && !(error instanceof AgentSessionManagerError)
-      ) console.error(`[Agent 协作] 收束子任务失败: ${delegation.id}`, error)
+      ) console.error(`[Agent 协作] 收束子任务失败: ${delegation.id}`)
       this.rejectWaiters(
         delegation.id,
         new AgentCollaborationServiceError('persistence_error', '无法保存子任务终态'),
       )
+      throw new AgentCollaborationServiceError('persistence_error', '无法保存子任务终态')
     }
+    // 模型仍消费已保存的失败任务结果；独立的根工作故障阻止工作流误报持久化成功。
+    if (storageFailed) throw new AgentCollaborationServiceError('persistence_error', '无法保存子会话历史')
   }
 
   /** 后台通知失败不改变已经持久化的任务终态，结果仍可通过 TaskOutput 读取。 */
@@ -431,11 +451,66 @@ export class AgentCollaborationService {
     const handler = this.backgroundCompletionHandler
     if (!handler) {
       console.warn(`[Agent 协作] 后台任务完成处理器不可用: ${delegation.id}`)
+      if (!this.rootFailures.has(delegation.rootSessionId)) this.rootFailures.set(delegation.rootSessionId, 'runtime_error')
       return
     }
-    void this.work.run(() => handler(delegation)).catch((error) => {
-      console.warn(`[Agent 协作] 后台任务自动通知失败: ${delegation.id}`, error)
+    void this.runRootWork(delegation.rootSessionId, () => handler(delegation)).catch(() => {
+      console.warn(`[Agent 协作] 后台任务自动通知失败: ${delegation.id}`)
     })
+  }
+
+  /** 先登记根归属再启动工作；失败留到根收束消费，不能因日志 catch 吞掉交付失败。 */
+  private runRootWork(rootSessionId: string, start: () => Promise<void>): Promise<void> {
+    let resolve!: (value: void | PromiseLike<void>) => void, reject!: (error: unknown) => void
+    const actual = new Promise<void>((done, failed) => { resolve = done; reject = failed })
+    const group = this.rootWork.get(rootSessionId) ?? new Set<Promise<void>>()
+    group.add(actual)
+    this.rootWork.set(rootSessionId, group)
+    const release = (): void => {
+      group.delete(actual)
+      if (!group.size && this.rootWork.get(rootSessionId) === group) this.rootWork.delete(rootSessionId)
+    }
+    void actual.then(release, (error: unknown) => {
+      const code = (error instanceof AgentCollaborationServiceError || error instanceof AgentServiceError)
+        && error.code === 'persistence_error' ? 'persistence_error' : 'runtime_error'
+      if (code === 'persistence_error' || !this.rootFailures.has(rootSessionId)) this.rootFailures.set(rootSessionId, code)
+      release()
+    })
+    // 全局退出仍等待同一真实 Promise；根等待只观察自己的任务，不等其他项目。
+    const tracked = this.work.run(() => actual)
+    try { resolve(start()) } catch (error) { reject(error) }
+    return tracked
+  }
+
+  /** 主发送链完成后等待本根的执行、交付和后继；取消调用者应先取消子树，再等实际结束。 */
+  waitForRootIdle(rawRootSessionId: string): Promise<void> {
+    const rootSessionId = normalizeRequired(rawRootSessionId, '根会话 ID')
+    const session = this.options.sessions.get(rootSessionId)
+    if (!session || session.parentSessionId) throw new AgentCollaborationServiceError('not_found', '根 Agent 会话不存在')
+    const previous = this.rootIdleWaits.get(rootSessionId)
+    if (previous) return previous
+    const waiting = this.work.run(async () => {
+      // 回调中的合成续跑还能派生新任务，因此每批真实 Promise 结束后必须重新取根集合。
+      while (this.rootWork.get(rootSessionId)?.size) {
+        await Promise.allSettled([...this.rootWork.get(rootSessionId)!])
+      }
+      const failure = this.rootFailures.get(rootSessionId)
+      this.rootFailures.delete(rootSessionId)
+      if (failure) throw new AgentCollaborationServiceError(failure, '子任务执行或后台结果交付未完整完成')
+      if (this.options.delegations.list(rootSessionId).some((item) => !isAgentDelegationTerminal(item.status))) {
+        throw new AgentCollaborationServiceError('runtime_error', '存在没有实际执行器的未完成子任务')
+      }
+    })
+    this.rootIdleWaits.set(rootSessionId, waiting)
+    const release = (): void => { if (this.rootIdleWaits.get(rootSessionId) === waiting) this.rootIdleWaits.delete(rootSessionId) }
+    void waiting.then(release, release)
+    return waiting
+  }
+
+  /** 开始新工作流前检查旧子执行/交付；主轮空闲不允许接管另一入口尚在收尾的根。 */
+  isRootBusy(rootSessionId: string): boolean {
+    return Boolean(this.rootWork.get(rootSessionId)?.size)
+      || this.options.delegations.list(rootSessionId).some((item) => !isAgentDelegationTerminal(item.status))
   }
 
   /** 先禁用派生/调度/后台续跑，再取消全部子树；失败不跳过其余根或 waiter 清理。 */

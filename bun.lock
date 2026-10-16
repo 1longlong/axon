@@ -17,7 +17,7 @@
     },
     "apps/app-server": {
       "name": "@axon/app-server-app",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "dependencies": {
         "@axon/app-server": "workspace:*",
         "@axon/core": "workspace:*",
@@ -28,7 +28,7 @@
     },
     "apps/electron": {
       "name": "@axon/electron",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "dependencies": {
         "@axon/app-server": "workspace:*",
         "@axon/app-server-app": "workspace:*",
@@ -71,9 +71,19 @@
         "vite": "^6.0.3",
       },
     },
+    "apps/exec": {
+      "name": "@axon/exec",
+      "version": "0.1.5",
+      "dependencies": {
+        "@axon/app-server": "workspace:*",
+        "@axon/shared": "workspace:*",
+        "ajv": "^8.20.0",
+        "ajv-formats": "^3.0.1",
+      },
+    },
     "packages/app-server": {
       "name": "@axon/app-server",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "dependencies": {
         "@axon/core": "workspace:*",
         "@axon/shared": "workspace:*",
@@ -84,7 +94,7 @@
     },
     "packages/core": {
       "name": "@axon/core",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "dependencies": {
         "@axon/shared": "workspace:*",
         "@modelcontextprotocol/sdk": "1.29.0",
@@ -98,7 +108,7 @@
     },
     "packages/host-node": {
       "name": "@axon/host-node",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "dependencies": {
         "@axon/core": "workspace:*",
         "@axon/shared": "workspace:*",
@@ -109,7 +119,7 @@
     },
     "packages/runtime-adapters": {
       "name": "@axon/runtime-adapters",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "dependencies": {
         "@axon/core": "workspace:*",
         "@axon/shared": "workspace:*",
@@ -123,7 +133,7 @@
     },
     "packages/shared": {
       "name": "@axon/shared",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "devDependencies": {
         "typescript": "^5.0.0",
       },
@@ -194,6 +204,8 @@
     "@axon/core": ["@axon/core@workspace:packages/core"],
 
     "@axon/electron": ["@axon/electron@workspace:apps/electron"],
+
+    "@axon/exec": ["@axon/exec@workspace:apps/exec"],
 
     "@axon/host-node": ["@axon/host-node@workspace:packages/host-node"],
 

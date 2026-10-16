@@ -3,7 +3,7 @@ import { accessSync, constants, statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { createBackend, createBackendPaths } from '@axon/core'
 import type { AxonBackend } from '@axon/core'
-import { AppServerBootstrapCleanupError, createPrivateHostPorts } from '@axon/app-server'
+import { AppServerBootstrapCleanupError, createExecHostPorts, createPrivateHostPorts } from '@axon/app-server'
 import type { AppServerBootstrap, JsonRpcPeer } from '@axon/app-server'
 import { AgentSandboxCommandService, checkAgentEnvironment } from '@axon/host-node'
 import { PiAgentAdapter, ZimaAgentAdapter, assertZimaConnection } from '@axon/runtime-adapters'
@@ -20,10 +20,18 @@ function configuredPython(value: string | undefined): value is string {
 /** 握手成功后才创建业务目录；能力报告来源于本次宿主探测，不接受父端替代沙箱结果。 */
 export async function bootstrapAppServerBackend(
   peer: JsonRpcPeer, input: AppServerInitializeInput, config: AppServerStartupConfig, signal: AbortSignal,
+  holdDirectory?: (signal: AbortSignal) => void | Promise<void>,
 ): Promise<AppServerBootstrap> {
   signal.throwIfAborted()
   const paths = createBackendPaths(config)
   const host = createPrivateHostPorts(peer, input.hostCapabilities)
+  // 入口类型来自可信 argv，不允许业务握手把桌面改成另一种凭据/配置来源。
+  const execHost = config.entry === 'exec' ? await createExecHostPorts(peer, signal) : undefined
+  signal.throwIfAborted()
+  // 配置校验后、任何业务文件读改写前取锁；实际服务拥有句柄到进程退出。
+  if (execHost && !holdDirectory) throw new Error('非交互后端未提供目录独占能力')
+  await holdDirectory?.(signal)
+  signal.throwIfAborted()
   let backend: AxonBackend | undefined
   const executor = new AgentSandboxCommandService({ shellSnapshotDirectory: paths.shellSnapshotsDir,
     getShellSessionActivity: () => new Map(backend?.sessions.list().map((session) => [session.id, session.updatedAt]) ?? []) })
@@ -46,6 +54,8 @@ export async function bootstrapAppServerBackend(
   }
   try {
     backend = createBackend({ paths, applicationVersion: config.applicationVersion, credentialCodec: host.credentialCodec,
+      ...(execHost ? { sessionCreationOrigin: 'exec' as const, agentConfiguration: execHost.bootstrap.agent, runtimeChannels: execHost.bootstrap.channels,
+        resolveRuntimeCredential: execHost.resolveRuntimeCredential } : {}),
       confirmChannelTarget: host.confirmChannelTarget, resolveAdapter, checkEnvironment: checkAgentEnvironment,
       ownedResources: [pi, zima, executor],
       validateCreate: validateRuntime, validateRuntimeSession: validateRuntime })

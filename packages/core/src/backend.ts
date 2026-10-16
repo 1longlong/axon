@@ -1,10 +1,13 @@
 /** 后端业务装配：接收明确目录、版本、凭据和 Runtime，自行拥有运行与交互协调。 */
 
+import { realpathSync } from 'node:fs'
 import type {
   AgentMemoryFile,
   AgentProviderAdapter,
   AgentRuntimeId,
   AgentSessionCreateInput,
+  BackendAgentConfiguration,
+  RuntimeChannelDefinition,
   AppSettings,
   UserProfile,
 } from '@axon/shared'
@@ -84,6 +87,12 @@ export interface BackendOptions {
   providerStream?: ChatStreamExecutor
   connectMcpServer?: McpToolProviderOptions['connectServer']
   skillCatalog?: AgentSkillCatalogProvider
+  /** 仅可信装配入口提供；不暴露为普通会话更新或设置 RPC。 */
+  agentConfiguration?: BackendAgentConfiguration
+  /** 只在可信 exec 装配中设置；不能由业务参数变更。 */
+  sessionCreationOrigin?: 'exec'
+  runtimeChannels?: readonly RuntimeChannelDefinition[]
+  resolveRuntimeCredential?: ConstructorParameters<typeof ChannelManager>[0]['resolveRuntimeCredential']
 }
 
 /** 后端内部服务集合；不是可绕过 owner 校验的跨进程协议 API。 */
@@ -136,6 +145,11 @@ export interface AxonBackend {
 export function createBackend(options: BackendOptions): AxonBackend {
   const userAgent = createAxonUserAgent(options.applicationVersion)
   const paths = { ...options.paths }
+  // 复制配置，避免入口在运行中修改引用以放宽已关闭的能力。
+  const agentConfiguration = options.agentConfiguration && {
+    ...options.agentConfiguration, features: { ...options.agentConfiguration.features },
+  }
+  const features = agentConfiguration?.features ?? { skills: true, mcp: true, memory: true, tasks: true }
   initializeBackendDirectories(paths)
   const settings = {
     get: () => getSettings(paths.settingsPath),
@@ -145,7 +159,9 @@ export function createBackend(options: BackendOptions): AxonBackend {
     get: () => getUserProfile(paths.userProfilePath),
     update: (updates: Partial<UserProfile>) => updateUserProfile(updates, paths.userProfilePath),
   }
-  const channels = new ChannelManager({ configPath: paths.channelsPath, credentialCodec: options.credentialCodec })
+  const channels = new ChannelManager({ configPath: paths.channelsPath, credentialCodec: options.credentialCodec,
+    resolveRuntimeCredential: options.resolveRuntimeCredential })
+  if (options.runtimeChannels) channels.configureRuntimeChannels(options.runtimeChannels)
   const conversations = new ConversationManager({ indexPath: paths.conversationsIndexPath, messagesDir: paths.conversationsDir })
   const attachments = new AttachmentService({ attachmentsDir: paths.attachmentsDir })
   const attachmentController = new AttachmentController(attachments)
@@ -214,16 +230,20 @@ export function createBackend(options: BackendOptions): AxonBackend {
     runtimeConfigDir: paths.runtimeConfigDir, runtimeSessionDir: paths.runtimeSessionsDir,
     resolveProjectCwd: (id) => projects.resolveProjectCwd(id),
     resolveProjectInstructions: (projectRoot) => resolveProjectInstructions({ projectRoot }),
-    discoverAgentSkills: (projectRoot) => discoverAgentSkills({ projectRoot, ...globalSkillRoots }),
-    getProjectMemoryContext: (id, previous) => projects.get(id)?.memoryEnabled
-      ? resolveAgentMemoryContext(id, memoryService, previous) : undefined,
+    discoverAgentSkills: features.skills ? (projectRoot) => discoverAgentSkills({ projectRoot, ...globalSkillRoots }) : undefined,
+    getProjectMemoryContext: features.memory
+      ? (id, previous) => projects.get(id)?.memoryEnabled ? resolveAgentMemoryContext(id, memoryService, previous) : undefined
+      : undefined,
     getSystemPrompt: (session) => {
       const config = settings.get()
-      const base = [buildAgentSystemPrompt(config.agentSystemPrompt, config.gitAttributionEnabled),
+      const base = [buildAgentSystemPrompt(agentConfiguration?.systemPrompt ?? config.agentSystemPrompt, config.gitAttributionEnabled),
         buildAgentToolGuidance(session.subagentType)].join('\n\n')
-      return session.subagentType ? buildSubagentSystemPrompt(base, session.subagentType) : buildAgentCollaborationSystemPrompt(base)
+      if (session.subagentType) return buildSubagentSystemPrompt(base, session.subagentType)
+      // 最终格式只约束根回复，合成续跑也消费同一要求；子任务不继承外部调用方的输出格式。
+      return [features.tasks ? buildAgentCollaborationSystemPrompt(base) : base,
+        agentConfiguration?.finalOutputInstruction ?? ''].filter(Boolean).join('\n\n')
     },
-    getCustomTools: async ({ sessionId, projectId, runStartedAt, runSignal }) => {
+    getCustomTools: async ({ sessionId, projectId, runStartedAt, runSignal, executionPolicy }) => {
       const session = sessions.get(sessionId)
       const role = session?.subagentType
       const updateMemoryBaseline = (file: AgentMemoryFile): void => {
@@ -233,21 +253,21 @@ export function createBackend(options: BackendOptions): AxonBackend {
         } })
       }
       // 主/子角色只收到各自允许的工具；搜索目录只能由过滤后的集合生成。
-      const memoryTools = projects.get(projectId)?.memoryEnabled
+      const memoryTools = features.memory && projects.get(projectId)?.memoryEnabled
         ? createAgentMemoryTools({ projectId, memory: memoryService, onRead: updateMemoryBaseline, onWrite: updateMemoryBaseline })
           .filter((tool) => !role || role === 'coder' || tool.name !== 'MemoryWrite') : []
       return withAgentToolSearch([
-        ...(!role ? [askUsers.createTool(sessionId, runStartedAt, runSignal)] : []),
-        ...(session?.parentSessionId ? [] : createAgentCollaborationTools({ sessionId, runSignal, collaboration })),
+        ...(!role ? [askUsers.createTool(sessionId, runStartedAt, runSignal, executionPolicy.userInputPolicy)] : []),
+        ...(!features.tasks || session?.parentSessionId ? [] : createAgentCollaborationTools({ sessionId, runSignal, collaboration })),
         ...memoryTools,
-        ...(role === 'explore' || role === 'plan' ? [] : await mcpTools.getTools(projectId, runSignal)),
+        ...(!features.mcp || role === 'explore' || role === 'plan' ? [] : await mcpTools.getTools(projectId, runSignal)),
       ])
     },
     createCanUseTool: (sessionId, startedAt, signal) => permissions.createCanUseTool(
       sessionId, startedAt, signal, sessions.get(sessionId)?.subagentType,
     ),
     onStopSession: (id) => collaboration.cancelDescendants(id),
-    generateTitle: createAgentTitleGenerator(userAgent, options.providerStream),
+    generateTitle: agentConfiguration?.generateTitle === false ? undefined : createAgentTitleGenerator(userAgent, options.providerStream),
   })
   // 工具回调只在真正查询时执行；先完成双向装配，再开放服务，避免循环初始化单例。
   collaboration = new AgentCollaborationService({
@@ -259,13 +279,18 @@ export function createBackend(options: BackendOptions): AxonBackend {
   unsubscribeAskUsers = askUsers.subscribe((event) => collaboration.handleInteractionEvent(event))
   agentRuns = new AgentRunCoordinator({ clients, sessions, agent, events, permissions, askUsers,
     validateCreate: options.validateCreate,
+    sessionCreationOrigin: options.sessionCreationOrigin,
+    resolveCreationWorkspace: (projectId) => realpathSync(projects.resolveProjectCwd(projectId)),
+    cancelWorkflowDescendants: (id) => { collaboration.cancelDescendants(id) },
+    waitForWorkflowDescendants: (id) => collaboration.waitForRootIdle(id),
+    isWorkflowRootBusy: (id) => collaboration.isRootBusy(id),
     cancelChild: (childId) => {
       const child = sessions.get(childId)
       const task = child?.rootSessionId ? tasks.list(child.rootSessionId).find((item) => item.childSessionId === childId) : undefined
       if (task) collaboration.cancel(task.parentSessionId, task.id)
     },
   })
-  collaboration.setBackgroundCompletionHandler((delegation) => agentRuns.notifyBackgroundCompletion(delegation))
+  if (features.tasks) collaboration.setBackgroundCompletionHandler((delegation) => agentRuns.notifyBackgroundCompletion(delegation))
   const parseDocument = createDocumentParser()
   const chat = new ChatService({
     channelManager: channels, conversationManager: conversations, userAgent, stream: options.providerStream,

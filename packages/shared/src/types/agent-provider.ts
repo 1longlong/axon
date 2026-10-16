@@ -6,7 +6,7 @@
  * 可选方法 = 能力协商：编排层必须探测后调用，未实现时降级。
  */
 
-import type { AgentReasoningCapability, AgentThinkingLevel } from './agent-session'
+import type { AgentReasoningCapability, AgentThinkingLevel, AgentUserInputPolicy } from './agent-session'
 import type { AgentStreamPayload } from './agent-message'
 import type {
   AgentApprovalPolicy,
@@ -25,6 +25,8 @@ export interface AgentExecutionPolicy {
   sandboxMode: AgentSandboxMode
   approvalPolicy: AgentApprovalPolicy
   approvalReviewer: AgentApprovalReviewer
+  /** 缺省为 ask；宿主追问工厂消费本轮策略，Runtime 不自行生成用户回答。 */
+  userInputPolicy?: AgentUserInputPolicy
 }
 
 /** 可信 adapter 按实际工具实例声明执行边界；模型参数不能设置此字段。 */
@@ -186,6 +188,13 @@ export interface AgentQueryInput {
   onRuntimeSession?: (sessionId: string, sessionFile?: string) => void
 }
 
+/** 宿主核验暂停凭据后续做已有任务；没有用户文本，只携带中断背景。 */
+export interface AgentContinueQueryInput extends Omit<AgentQueryInput, 'prompt'> {
+  interruptionId: string
+  /** 描述此前被中断及工具副作用边界，不承载新的用户任务。 */
+  interruptionContext: string
+}
+
 /** adapter 用于判断当前 Provider/模型能否原生承载会话内动态工具定义。 */
 export interface AgentDeferredToolCapabilityInput {
   provider: ProviderType
@@ -216,8 +225,10 @@ export interface AgentProviderAdapter {
   ): AgentReasoningCapability | undefined | Promise<AgentReasoningCapability | undefined>
   /** 未实现或返回 false 时，编排层必须把 deferred 工具降级为普通 eager 工具。 */
   supportsDeferredTools?(input: AgentDeferredToolCapabilityInput): boolean | Promise<boolean>
-  /** 发起查询，返回完整消息与仅供渲染的增量事件流。 */
+  /** 返回消息/增量；本轮自有资源清理确认后再交付唯一 result，清理故障抛中立错误。 */
   query(input: AgentQueryInput): AsyncIterable<AgentStreamPayload>
+  /** 无新增用户发言地续做已有历史；未实现时不得伪装成普通 prompt 调用。 */
+  continueQuery?(input: AgentContinueQueryInput): AsyncIterable<AgentStreamPayload>
   /** 中止指定会话的执行（硬停止）。 */
   abort(sessionId: string): void
   /** 软中断当前 turn 但保留活跃 Query，允许立即续跑新消息（可选能力）。 */
@@ -232,4 +243,11 @@ export interface AgentProviderAdapter {
   sendQueuedMessage?(sessionId: string, message: SDKUserMessageInput, options?: SendQueuedMessageOptions): Promise<void>
   /** 取消队列中的待发送消息（可选）。 */
   cancelQueuedMessage?(sessionId: string, messageUuid: string): Promise<void>
+}
+/** adapter 清理故障的中立标记；不携带 SDK 原因，core 不得把它规范化为普通用户停止。 */
+export class AgentRuntimeCleanupError extends Error {
+  constructor() {
+    super('Agent Runtime 资源清理失败，未确认可继续状态')
+    this.name = 'AgentRuntimeCleanupError'
+  }
 }

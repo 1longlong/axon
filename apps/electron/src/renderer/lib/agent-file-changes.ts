@@ -1,4 +1,5 @@
 import type { SDKMessage } from '@axon/shared'
+import { groupAgentTurns } from './agent-turn-groups'
 
 export type AgentFileChangeOperation = 'write' | 'edit'
 
@@ -58,29 +59,28 @@ function aggregateSuccessfulCalls(calls: readonly PendingFileCall[]): AgentFileC
 }
 
 /**
- * 以非合成 result 作为轮次终点，只汇总已有成功 tool_result 的写入操作；
+ * 沿显示轮次汇总中断前后已有成功 tool_result 的写入操作；
  * 失败、权限拒绝和未完成调用不冒充文件变更。
  */
 export function collectAgentTurnFileChanges(messages: readonly SDKMessage[]): AgentTurnFileChanges[] {
   const summaries: AgentTurnFileChanges[] = []
-  let calls: PendingFileCall[] = []
-
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index]! as Record<string, unknown>
-    if (message.type === 'assistant') {
-      const payload = asRecord(message.message)
-      const content = Array.isArray(payload?.content) ? payload.content : []
-      for (const block of content) {
-        const call = readFileCall(block)
-        if (call) calls.push(call)
+  for (const group of groupAgentTurns(messages)) {
+    if (group.kind !== 'reply' || group.resultIndex === undefined) continue
+    const calls: PendingFileCall[] = []
+    for (const raw of group.messages) {
+      const message = raw as Record<string, unknown>
+      if (message.type === 'assistant') {
+        const payload = asRecord(message.message)
+        const content = Array.isArray(payload?.content) ? payload.content : []
+        for (const block of content) {
+          const call = readFileCall(block)
+          if (call) calls.push(call)
+        }
       }
+      markSuccessfulResults(message, calls)
     }
-    markSuccessfulResults(message, calls)
-    if (message.type === 'result' && message.isSyntheticCompactionResult !== true) {
-      const files = aggregateSuccessfulCalls(calls)
-      if (files.length > 0) summaries.push({ resultIndex: index, files })
-      calls = []
-    }
+    const files = aggregateSuccessfulCalls(calls)
+    if (files.length > 0) summaries.push({ resultIndex: group.resultIndex, files })
   }
   return summaries
 }

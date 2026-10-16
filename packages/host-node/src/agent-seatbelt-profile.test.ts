@@ -6,7 +6,7 @@ function policy(overrides: Partial<AgentSandboxPolicy> = {}): AgentSandboxPolicy
   return {
     platform: 'macos',
     mode: 'workspaceWrite',
-    workingDirectory: '/Users/example/Project "A"',
+    sandboxCwd: '/Users/example/Project "A"',
     readAccess: { type: 'fullAccess' },
     writableRoots: ['/Users/example/Project "A"'],
     protectedReadOnlyRoots: ['/Users/example/Project "A"/.git'],

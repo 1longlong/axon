@@ -25,6 +25,9 @@ import {
 import type {
   AgentActiveRun,
   AgentRunIdentityEvent,
+  AgentPauseSnapshot,
+  AgentContinueInput,
+  AgentPauseChangedEvent,
   BackendOwnedRun,
   BackendRunControlInput,
   AgentAskUserResponse,
@@ -195,6 +198,17 @@ const api = {
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.SEND, input),
     stop: (target: BackendRunControlInput): Promise<boolean> =>
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.STOP, target),
+    pause: (target: BackendRunControlInput): Promise<AgentPauseSnapshot> =>
+      ipcRenderer.invoke(AGENT_IPC_CHANNELS.PAUSE, target),
+    getPause: (sessionId: string): Promise<AgentPauseSnapshot | null> =>
+      ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_PAUSE, sessionId),
+    continue: (input: AgentContinueInput): Promise<AgentSendResult> =>
+      ipcRenderer.invoke(AGENT_IPC_CHANNELS.CONTINUE, input),
+    onPauseChanged: (callback: (event: AgentPauseChangedEvent) => void): (() => void) => {
+      const listener = (_event: IpcRendererEvent, event: AgentPauseChangedEvent): void => callback(event)
+      ipcRenderer.on(AGENT_IPC_CHANNELS.PAUSE_EVENT, listener)
+      return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.PAUSE_EVENT, listener)
+    },
     isActive: (sessionId: string): Promise<boolean> =>
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.IS_ACTIVE, sessionId),
     listQueuedMessages: (sessionId: string): Promise<AgentQueuedMessage[]> =>

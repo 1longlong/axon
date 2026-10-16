@@ -1945,24 +1945,25 @@ renderer 在运行时把完整 JSONL 消息与内存 delta 合并；自动重试
 
 ### 15.1 从模型命令到宿主请求
 
-模型调用 Bash 的参数仍然只有业务命令，例如：
-
-```json
-{
-  "command": "go version"
-}
-```
-
-调用顺序为 `Pi Bash → 权限判断 → createPiSandboxedBashOperations().exec() → 宿主 executeShellCommand() → Seatbelt → 工具结果 → Pi 下一次模型请求`。adapter 不生成 Shell 包装或 Seatbelt profile；它把原始命令、可信 cwd 和当前授权转换为中立宿主请求。以下是省略环境细节及不可 JSON 化回调的示例：
+模型调用 Bash 时把命令和本次执行目录分开，例如：
 
 ```json
 {
   "command": "go version",
-  "cwd": "/absolute/project/workspace",
+  "workdir": "/absolute/other-directory"
+}
+```
+
+调用顺序为 `Pi Bash → 目录合法性校验/权限判断 → createPiSandboxedBashOperations().exec() → 宿主 executeShellCommand() → Seatbelt → 工具结果 → Pi 下一次模型请求`。adapter 不生成 Shell 包装或 Seatbelt profile；模型的 `workdir` 解析为单次 `cwd`，可信项目根则固定为 `policy.sandboxCwd`，不能随本次目录改变可写根或保护目录。以下是省略环境细节及不可 JSON 化回调的示例：
+
+```json
+{
+  "command": "go version",
+  "cwd": "/absolute/other-directory",
   "policy": {
     "platform": "macos",
     "mode": "workspaceWrite",
-    "workingDirectory": "/absolute/project/workspace",
+    "sandboxCwd": "/absolute/project/workspace",
     "readAccess": { "type": "fullAccess" },
     "writableRoots": ["/absolute/project/workspace"],
     "protectedReadOnlyRoots": ["/absolute/project/workspace/.git"],
@@ -1972,6 +1973,8 @@ renderer 在运行时把完整 JSONL 消息与内存 delta 合并；自动重试
   "timeoutMs": 120000
 }
 ```
+
+执行目录可以在项目外，换目录不自动授权该目录写入；单次批准的精确 Grant 才能增加对应资源访问。相对 `workdir` 从项目根解析，省略/空字符串默认项目根，各次调用不继承目录变化。Zima 同样传递单次目录并保留普通人工审批，但不具备宿主 OS 沙箱。
 
 真实请求还可携带 `environment`（SDK 初始环境）、`environmentOverrides`（显式差异，`undefined` 表示删除，不能用 JSON 完整表达）和 `pathPrepend`（runtime 管理工具目录）。区分三者是为了避免 GUI 进程旧 PATH 覆盖已恢复的用户 PATH，同时保留本轮显式覆盖。宿主受控临时目录在恢复后仍优先。
 
@@ -2019,3 +2022,40 @@ stdout/stderr 由宿主回传 Pi，再成为工具结果；Pi 后续模型请求
 ```
 
 第一项允许先在匹配模式的实际沙箱中尝试，后两项需要普通审批。模型参数中伪造 `toolExecution` 或工具名不改变该判断。explore/plan 创建及每轮运行都采用只读策略：explore 的 Bash 只在宿主明确覆盖该工具时开放；写项目文件被拦截后直接返回错误工具结果，不申请升级或复用历史 Grant，下一次模型请求消费该失败信息继续处理。
+
+## 16. Agent 暂停后继续：不是一条新的用户消息
+
+桌面只发送 sessionId/pauseId。core 校验已收束暂停和原 turn_id，先保存 system/axon_continued 消费旧凭据，再调用 adapter.continueQuery；新 runId 用于停止/审批，UI 仍将新内容接回原回复。应用 JSONL 不新增 user，原停止前正文、思考和工具状态保留。
+
+Pi adapter 通过公开 sendCustomMessage 保存 display:false 的 axon_interruption 宿主背景并 triggerTurn:true，不调用普通 prompt、不修改 SDK。Zima adapter 在握手确认 capabilities.continue 后发送以下独立请求：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "continue-request-2",
+  "method": "session.continue",
+  "params": {
+    "session_id": "session-1",
+    "run_id": "new-execution-2",
+    "interruption_id": "pause-1",
+    "interruption_context": "<system-reminder>原任务已获继续授权；先核实部分副作用，需要权限时重新申请。</system-reminder>",
+    "working_directory": "/absolute/project",
+    "model": {
+      "provider": "openai-compatible",
+      "name": "model-name",
+      "base_url": "https://provider.example/v1",
+      "api_key": "仅进程内使用"
+    },
+    "runtime": {
+      "session_directory": "/absolute/runtime-sessions/zima",
+      "resume_file": "/absolute/runtime-sessions/zima/session-1/state.json"
+    },
+    "tools": { "approval_mode": "host" },
+    "features": { "skills": false, "mcp": false, "subagents": false }
+  }
+}
+```
+
+请求没有 prompt；Zima 的普通模型、压缩、重试、工具和取消处理不变。Runtime 历史新增 system/metadata.kind=host_interruption 的宿主背景，而不是用户发言；Provider 边界将其编码为模型协议的 user，避免助手预填充限制。Pi 也可将 custom_message 编码为模型 user；“不新增用户消息”不等于模型上下文完全不变。
+
+artifact 缺失时使用 runtime.recovery_prompt 的明确语义背景恢复，不恢复半条流或自动重放旧工具。不支持继续的 Runtime 明确报错，不退回固定的隐藏用户文本。重启识别受控暂停及逻辑轮的完整规则见核心设计的迭代 26。

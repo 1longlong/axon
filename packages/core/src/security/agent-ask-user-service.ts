@@ -8,6 +8,7 @@ import type {
   AgentCustomToolDefinition,
   AgentCustomToolResult,
   AgentGenerationEvent,
+  AgentUserInputPolicy,
   BackendClientId,
 } from '@axon/shared'
 
@@ -85,8 +86,11 @@ export class AgentAskUserService {
     this.cancelSession(sessionId, 'owner_gone', '问题所属客户端已断开')
   }
 
-  /** 为本轮创建中立自定义工具；真正调用时才登记问题并暂停工具执行。 */
-  createTool(sessionId: string, runStartedAt: number, runSignal: AbortSignal): AgentCustomToolDefinition {
+  /** 将本轮追问策略封入工具；非交互直接返回错误，交互调用才登记问题并等待。 */
+  createTool(
+    sessionId: string, runStartedAt: number, runSignal: AbortSignal,
+    userInputPolicy: AgentUserInputPolicy = 'ask',
+  ): AgentCustomToolDefinition {
     return {
       name: 'AskUserQuestion',
       permissionMode: 'managed',
@@ -117,7 +121,7 @@ export class AgentAskUserService {
         },
       },
       execute: (input, options) => this.waitForAnswer(
-        sessionId, runStartedAt, input, runSignal, options.signal,
+        sessionId, runStartedAt, input, runSignal, userInputPolicy, options.signal,
       ),
     }
   }
@@ -170,11 +174,16 @@ export class AgentAskUserService {
     runStartedAt: number,
     input: Record<string, unknown>,
     runSignal: AbortSignal,
+    userInputPolicy: AgentUserInputPolicy,
     toolSignal?: AbortSignal,
   ): Promise<AgentCustomToolResult> {
     const questions = parseQuestions(input)
     const owner = this.owners.get(sessionId)
     if (!questions) return Promise.resolve({ content: 'AskUserQuestion 参数无效', isError: true })
+    // 不创建 requestId/pending，也不把拒绝广播成需要 UI 或反向 RPC 答复的请求。
+    if (userInputPolicy === 'reject') {
+      return Promise.resolve({ content: '非交互入口无法提供用户回答；请在既定授权范围内继续，或说明缺少的必要信息，不要编造回答。', isError: true })
+    }
     if (owner === undefined || runSignal.aborted || toolSignal?.aborted) {
       return Promise.resolve({ content: '当前没有可接收问题的交互客户端', isError: true })
     }

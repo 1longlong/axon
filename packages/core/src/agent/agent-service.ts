@@ -2,7 +2,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { waitWithSignal } from '../async/wait-with-signal'
-import { AGENT_RUNTIME_CAPABILITIES, DEFAULT_AGENT_SESSION_TITLE } from '@axon/shared'
+import { AGENT_RUNTIME_CAPABILITIES, AgentRuntimeCleanupError, DEFAULT_AGENT_SESSION_TITLE } from '@axon/shared'
 import type {
   AgentActiveRun,
   AgentCanUseTool,
@@ -25,6 +25,7 @@ import type {
   SDKAssistantMessage,
   SDKMessage,
   SDKResultMessage,
+  SDKSystemMessage,
 } from '@axon/shared'
 import { appendDeferredToolCatalogPrompt, resolveDeferredToolMode } from './agent-tool-search'
 import type { ChannelManager } from '../channel/channel-manager'
@@ -33,7 +34,7 @@ import type { AgentSessionManager } from './agent-session-manager'
 import type { AgentEventBus } from './agent-event-bus'
 import { createUserStoppedResult, normalizePayloadAfterUserStop } from './agent-stop-policy'
 import { buildAgentCompletionPayload } from './agent-completion-payload'
-import { buildRecoveryPrompt } from './agent-session-context-prompt'
+import { buildAgentContinuationPrompt, buildAgentExecutionPolicyPrompt, buildAgentInterruptionPrompt, buildRecoveryPrompt } from './agent-session-context-prompt'
 import { buildAgentSandboxPolicy } from '../security/agent-sandbox-policy'
 import {
   buildProjectInstructionSystemPrompt,
@@ -50,6 +51,7 @@ import {
 } from '../project/agent-skill-read-tool'
 import type { AgentTitleGenerationInput, AgentTitleGenerator } from './agent-title-generator'
 import { AsyncWorkTracker } from '../async/async-work-tracker'
+import { AgentInterruptedHistory } from './agent-interrupted-history'
 
 const MAX_AGENT_INPUT_LENGTH = 100_000
 
@@ -111,8 +113,10 @@ export interface AgentCustomToolContext {
 }
 
 interface ActiveAgentRun {
+  turnId: string
   controller: AbortController
   adapter: AgentProviderAdapter
+  executionPolicy: AgentExecutionPolicy
   runStartedAt: number
   source: AgentRunSource
   runId: string
@@ -126,19 +130,31 @@ export interface AgentRunContext {
   synthetic?: boolean
 }
 
+/** 仅协调层核验暂停后调用，不属于用户发送 DTO。 */
+export interface AgentContinueExecutionInput {
+  sessionId: string
+  pauseId: string
+  turnId: string
+}
+
+type AgentExecutionRequest =
+  | { kind: 'message'; input: AgentSendInput }
+  | { kind: 'continue'; input: AgentContinueExecutionInput }
+
 /** 一轮 Agent 的直接返回值；持久化仍由会话层负责，调用方无需回读 JSONL 获取终态。 */
 export interface AgentRunOutcome {
   result: SDKResultMessage
   finalText?: string
 }
 
+/** 标识可规范化，正文仅校验非空与容量；CLI/桌面原始空白共同进入模型和历史。 */
 function normalizeSendInput(value: AgentSendInput): AgentSendInput {
   if (!value || typeof value !== 'object') {
     throw new AgentServiceError('invalid_input', 'Agent 请求格式无效')
   }
   const sessionId = typeof value.sessionId === 'string' ? value.sessionId.trim() : ''
-  const text = typeof value.text === 'string' ? value.text.trim() : ''
-  if (!sessionId || !text || text.length > MAX_AGENT_INPUT_LENGTH) {
+  const text = typeof value.text === 'string' ? value.text : ''
+  if (!sessionId || !text.trim() || text.includes('\0') || text.length > MAX_AGENT_INPUT_LENGTH) {
     throw new AgentServiceError('invalid_input', 'Agent 会话 ID 或消息正文无效')
   }
   return { sessionId, text }
@@ -180,12 +196,12 @@ function allowedSubagentBuiltinTools(type: AgentSubagentType | undefined, sandbo
   return undefined
 }
 
-function createUserMessage(text: string, createId: () => string, synthetic = false, inputOrigin?: 'quick'): SDKMessage {
+function createUserMessage(text: string, uuid: string, synthetic = false, inputOrigin?: 'quick'): SDKMessage {
   return {
     type: 'user',
     message: { content: [{ type: 'text', text }] },
     parent_tool_use_id: null,
-    uuid: createId(),
+    uuid,
     ...(synthetic ? { isSynthetic: true } : {}),
     ...(inputOrigin === 'quick' ? { inputOrigin } : {}),
   }
@@ -196,6 +212,9 @@ function createUserMessage(text: string, createId: () => string, synthetic = fal
  * 收束；能穿透到这里的未知异常不能假定可安全重试。
  */
 function normalizeTerminalError(error: unknown, stopped: boolean): AgentTypedError {
+  if (error instanceof AgentRuntimeCleanupError) return {
+    code: 'runtime_cleanup_failed', category: 'runtime', message: error.message, retryable: false,
+  }
   if (stopped) return {
     code: 'canceled', category: 'canceled', message: 'Agent 执行已停止', retryable: false,
   }
@@ -224,7 +243,7 @@ function normalizeTerminalError(error: unknown, stopped: boolean): AgentTypedErr
 
 /** 把编排失败收束为可落盘的中立 result，供 renderer 分类展示。 */
 function createTerminalError(sessionId: string, cause: unknown, stopped: boolean): SDKMessage {
-  if (stopped) return createUserStoppedResult({ sessionId })
+  if (stopped && !(cause instanceof AgentRuntimeCleanupError)) return createUserStoppedResult({ sessionId })
   const error = normalizeTerminalError(cause, stopped)
   return {
     type: 'result',
@@ -253,17 +272,25 @@ export class AgentService {
 
   /**
    * 执行一轮 Agent：用户消息先落盘，再解析渠道并消费 adapter 流；delta 仅广播，
-   * 完整消息先落盘后广播，保证 UI 看到的终态一定可以从 JSONL 恢复；同时直接返回
+   * 完整消息及停止时冻结的部分检查点先落盘后广播，终态可从 JSONL 恢复；同时直接返回
    * 本轮 result 与最终文本，供协作编排消费而无需再次读取会话文件。
    */
   sendMessage(rawInput: AgentSendInput, context: AgentRunContext = {}): Promise<AgentRunOutcome> {
     if (this.lifetime.signal.aborted) return Promise.reject(new AgentServiceError('runtime_error', 'Agent 服务已释放'))
-    return this.work.run(() => this.executeMessage(rawInput, context))
+    return this.work.run(() => this.executeMessage({ kind: 'message', input: rawInput }, context))
+  }
+
+  /** 续做只消费已保存暂停，不追加用户输入；新执行仍独立登记停止和权限身份。 */
+  continueMessage(input: AgentContinueExecutionInput, context: AgentRunContext = {}): Promise<AgentRunOutcome> {
+    if (this.lifetime.signal.aborted) return Promise.reject(new AgentServiceError('runtime_error', 'Agent 服务已释放'))
+    return this.work.run(() => this.executeMessage({ kind: 'continue', input }, context))
   }
 
   /** 实际轮次与后置标题分别登记；运行空闲事件不代表所有附属请求已经结束。 */
-  private async executeMessage(rawInput: AgentSendInput, context: AgentRunContext): Promise<AgentRunOutcome> {
-    const input = normalizeSendInput(rawInput)
+  private async executeMessage(request: AgentExecutionRequest, context: AgentRunContext): Promise<AgentRunOutcome> {
+    const input = request.kind === 'message' ? normalizeSendInput(request.input) : request.input
+    const userText = request.kind === 'message' ? (input as AgentSendInput).text : undefined
+    const continuation = request.kind === 'continue' ? request.input : undefined
     const source = context.source ?? 'renderer'
     if (this.activeRuns.has(input.sessionId)) {
       throw new AgentServiceError('already_active', '该 Agent 会话已有任务正在执行')
@@ -278,12 +305,29 @@ export class AgentService {
     } catch (error) {
       throw new AgentServiceError('runtime_error', error instanceof Error ? error.message : 'Agent Runtime 不可用')
     }
+    // 能力或凭据不符时不落继续标记，保留原暂停供用户明确选择后续动作。
+    let pausedMarker: SDKSystemMessage | undefined
+    if (continuation) {
+      if (!adapter.continueQuery) throw new AgentServiceError('runtime_error', '当前 Runtime 尚未接入无用户消息继续')
+      const marker = this.options.sessionManager.getMessages(input.sessionId).at(-1)
+      if (marker?.type !== 'system' || marker.subtype !== 'axon_paused' || marker.uuid !== continuation.pauseId
+        || marker.turn_id !== continuation.turnId || typeof marker.stopped_result_uuid !== 'string') {
+        throw new AgentServiceError('invalid_input', '暂停凭据已失效或不属于原轮次')
+      }
+      pausedMarker = marker as SDKSystemMessage
+    }
+    const parent = session.parentSessionId ? this.options.sessionManager.get(session.parentSessionId) : undefined
+    const parentRunPolicy = session.parentSessionId ? this.getActiveExecutionPolicy(session.parentSessionId) : undefined
     const executionPolicy: AgentExecutionPolicy = {
       // 每轮重新守角色硬边界，已有子会话或设置变化也不能恢复项目写权限。
       sandboxMode: session.subagentType === 'explore' || session.subagentType === 'plan'
         ? 'readOnly' : session.sandboxMode ?? 'workspaceWrite',
-      approvalPolicy: session.approvalPolicy ?? 'onRequest',
+      // 同时检查已存父限制和在途父轮；运行中改设置不能放宽本轮派生的子任务。
+      approvalPolicy: parent?.approvalPolicy === 'never' || parentRunPolicy?.approvalPolicy === 'never'
+        ? 'never' : session.approvalPolicy ?? 'onRequest',
       approvalReviewer: session.approvalReviewer ?? 'user',
+      userInputPolicy: parent?.userInputPolicy === 'reject' || parentRunPolicy?.userInputPolicy === 'reject'
+        ? 'reject' : session.userInputPolicy ?? 'ask',
     }
     if (executionPolicy.approvalReviewer === 'autoReview') {
       throw new AgentServiceError('runtime_error', '自动审批 Agent 尚未接入')
@@ -293,8 +337,11 @@ export class AgentService {
     const runStartedAt = Math.max(this.now(), this.lastRunStartedAt + 1)
     this.lastRunStartedAt = runStartedAt
     const active: ActiveAgentRun = {
+      // 预检期也能正确取消当前任务；实际输入仍等预检通过才落盘。
+      turnId: continuation?.turnId ?? this.createId(),
       controller: new AbortController(),
       adapter,
+      executionPolicy,
       runStartedAt,
       source,
       runId: randomUUID(),
@@ -316,20 +363,33 @@ export class AgentService {
     let completionCause: unknown
     let completionPersisted = false
     let titleInput: AgentTitleGenerationInput | undefined
+    const interruptedHistory = new AgentInterruptedHistory()
+    // 只在 query 已结束或清理已抛错后落检查点；停止信号本身不代表已收束。
+    const persistInterruptedHistory = (): void => {
+      if (!active.controller.signal.aborted) return
+      for (const payload of interruptedHistory.takeInterrupted(this.createId)) {
+        if (payload.kind === 'sdk_message') {
+          const message = this.options.sessionManager.appendMessage(input.sessionId, payload.message)
+          this.emitStream(input.sessionId, active, { kind: 'sdk_message', message })
+        } else this.emitStream(input.sessionId, active, payload)
+      }
+    }
 
     try {
       // 当前用户消息尚未追加，恢复上下文只能包含前序历史，避免同一输入出现两次。
       const historyBeforeRun = this.options.sessionManager.getMessages(input.sessionId)
-      // 先保存用户原始意图；后续渠道失效或 runtime 初始化失败时，失败终态会紧随其后。
-      const persistedUser = this.options.sessionManager.appendMessage(
-        input.sessionId,
-        createUserMessage(input.text, this.createId, context.synthetic === true, context.inputOrigin),
-      )
+      // 继续标记原子消费暂停并链接原轮；不能借 synthetic 用户消息模拟继续。
+      const persistedInput = this.options.sessionManager.appendMessage(input.sessionId, continuation ? {
+        type: 'system', subtype: 'axon_continued', turn_id: continuation.turnId,
+        resumed_pause_id: continuation.pauseId, stopped_result_uuid: pausedMarker!.stopped_result_uuid,
+        run_id: active.runId, run_started_at: active.runStartedAt,
+        ...(context.inputOrigin ? { input_origin: context.inputOrigin } : {}),
+      } : createUserMessage(userText!, active.turnId, context.synthetic === true, context.inputOrigin))
       this.options.eventBus.emit({
         type: 'run_started', sessionId: input.sessionId,
         runStartedAt: active.runStartedAt, source: active.source,
       }, { sessionId: input.sessionId, runId: active.runId, runStartedAt: active.runStartedAt })
-      this.emitStream(input.sessionId, active, { kind: 'sdk_message', message: persistedUser })
+      this.emitStream(input.sessionId, active, { kind: 'sdk_message', message: persistedInput })
 
       if (!session.channelId || !session.modelId) {
         throw new AgentServiceError('channel_unavailable', 'Agent 会话尚未选择渠道和模型')
@@ -345,10 +405,10 @@ export class AgentService {
       if (!channel.enabled || !model?.enabled) {
         throw new AgentServiceError('channel_unavailable', 'Agent 会话选择的渠道或模型不可用')
       }
-      titleInput = {
+      if (!continuation) titleInput = {
         channel,
         modelId: session.modelId,
-        userText: input.text,
+        userText: userText!,
         assistantText: '',
         signal: active.controller.signal,
       }
@@ -466,9 +526,10 @@ export class AgentService {
         customTools = resolveDeferredToolMode(customTools, supportsDeferredTools)
       }
 
-      const query: AgentQueryInput = {
+      // 引用缺失但应用历史存在也需提供语义背景；是否能精确恢复仍只由 adapter 判断。
+      const recoveryPrompt = buildRecoveryPrompt(historyBeforeRun)
+      const query: Omit<AgentQueryInput, 'prompt'> = {
         sessionId: input.sessionId,
-        prompt: input.text,
         model: session.modelId,
         cwd: resolvedCwd,
         abortSignal: active.controller.signal,
@@ -480,7 +541,10 @@ export class AgentService {
         // 动态 reminder 放在最终提示词末尾，使文件变化不会被前面的静态说明淹没。
         systemPrompt: appendDeferredToolCatalogPrompt([
           systemPrompt.trim(),
+          buildAgentExecutionPolicyPrompt(executionPolicy),
           memoryPrompt.trim(),
+          // 停止终态来自稳定应用历史；放到动态尾部，不把原任务重新投递给 Runtime。
+          continuation ? '' : buildAgentInterruptionPrompt(historyBeforeRun),
         ].filter(Boolean).join('\n\n'), customTools ?? []),
         ...(projectInstructionManifest
           ? {
@@ -502,8 +566,8 @@ export class AgentService {
         runtimeSessionDir: this.options.runtimeSessionDir,
         ...(session.sdkSessionId ? { resumeSessionId: session.sdkSessionId } : {}),
         ...(session.runtimeSessionFile ? { runtimeSessionFile: session.runtimeSessionFile } : {}),
-        ...((session.sdkSessionId || session.runtimeSessionFile)
-          ? { recoveryPrompt: buildRecoveryPrompt(historyBeforeRun) }
+        ...((session.sdkSessionId || session.runtimeSessionFile || recoveryPrompt)
+          ? { recoveryPrompt }
           : {}),
         ...(customTools ? { customTools } : {}),
         ...(this.options.createCanUseTool
@@ -524,16 +588,22 @@ export class AgentService {
       }
 
       active.controller.signal.throwIfAborted()
-      for await (const incomingPayload of adapter.query(query)) {
+      const stream = continuation
+        ? adapter.continueQuery!({ ...query, interruptionId: continuation.pauseId,
+            interruptionContext: buildAgentContinuationPrompt() })
+        : adapter.query({ ...query, prompt: userText! })
+      for await (const incomingPayload of stream) {
         // token 引用是停止/未来替换运行后的 stale 防线；迟到事件不得污染新一轮。
         if (this.activeRuns.get(input.sessionId) !== active) continue
         // result 是本轮唯一终态；adapter 即使异常多发，后续载荷也不能再次落盘或更新 UI。
         if (terminalReceived) continue
-        // 用户停止后只接受并规范化最终 result；迟到的流片段和工具活动全部丢弃。
+        // 停止后的正文仍丢弃；仅接纳本轮已完整登记调用的实际回传，避免把已成功工具误作未知。
         const payload = active.controller.signal.aborted
           ? normalizePayloadAfterUserStop(incomingPayload, input.sessionId)
+            ?? interruptedHistory.acceptStoppedToolResult(incomingPayload)
           : incomingPayload
         if (!payload) continue
+        if (!active.controller.signal.aborted) interruptedHistory.observe(payload)
         if (payload.kind !== 'sdk_message') {
           // delta、重试状态和草稿清理都是瞬时投影，不得写入可恢复的历史。
           this.emitStream(input.sessionId, active, payload)
@@ -543,6 +613,8 @@ export class AgentService {
         const neutralMessage = payload.message.type === 'result' && skillReadScope
           ? withSkillActivations(payload.message as SDKResultMessage, skillReadScope)
           : payload.message
+        // adapter 的唯一 result 已等资源清理；部分输出和未知工具状态必须先于停止终态落盘。
+        if (neutralMessage.type === 'result') persistInterruptedHistory()
         const message = shouldPersistMessage(neutralMessage)
           ? this.options.sessionManager.appendMessage(input.sessionId, neutralMessage)
           : neutralMessage
@@ -564,9 +636,17 @@ export class AgentService {
         completionCause = persistenceError
         throw persistenceError
       }
+      if (terminalReceived && error instanceof AgentRuntimeCleanupError) {
+        // 防御提前 result 的 adapter：保留原历史唯一 result，但完成包必须报告收束失败。
+        completionResult = createTerminalError(input.sessionId, error, false) as SDKResultMessage
+        completionPersisted = false
+        throw new AgentServiceError('runtime_error', error.message)
+      }
       if (!terminalReceived) {
         let terminal: SDKMessage
         try {
+          // SDK 抛取消/清理错误而无 result 时，也保存停止前已接纳的内容，不放行迟到 delta。
+          persistInterruptedHistory()
           terminal = this.options.sessionManager.appendMessage(
             input.sessionId,
             createTerminalError(input.sessionId, error, active.controller.signal.aborted),
@@ -696,6 +776,17 @@ export class AgentService {
   getActiveRun(sessionId: string): BackendOwnedRun | undefined {
     const run = this.activeRuns.get(sessionId)
     return run ? { sessionId, runId: run.runId, runStartedAt: run.runStartedAt } : undefined
+  }
+
+  /** 协调层暂停绑定本次输入，预检尚未落盘时也不误取更早的用户消息。 */
+  getActiveTurnId(sessionId: string): string | undefined {
+    return this.activeRuns.get(sessionId)?.turnId
+  }
+
+  /** 子任务继承父轮实际策略，而非运行中可能已修改的下轮设置；不泄漏可变对象。 */
+  getActiveExecutionPolicy(sessionId: string): AgentExecutionPolicy | undefined {
+    const run = this.activeRuns.get(sessionId)
+    return run ? { ...run.executionPolicy } : undefined
   }
 
   /** 等待当前会话结束正在执行的一轮；注册后复查，封住结束事件先发生的竞态。 */

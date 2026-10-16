@@ -48,3 +48,13 @@ export function getResultSkillActivations(message: SDKMessage): AgentSkillActiva
   }
   return [...activations.values()]
 }
+
+/** 同一用户任务的多次执行合并展示 Skill 使用，继续不丢弃中断前的记录。 */
+export function getTurnSkillActivations(messages: readonly SDKMessage[]): AgentSkillActivation[] {
+  const activations = new Map<string, AgentSkillActivation>()
+  for (const message of messages) for (const activation of getResultSkillActivations(message)) {
+    const prior = activations.get(activation.name)
+    activations.set(activation.name, prior ? { ...prior, sources: [...new Set([...prior.sources, ...activation.sources])] } : activation)
+  }
+  return [...activations.values()]
+}

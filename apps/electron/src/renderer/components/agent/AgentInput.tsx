@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { ArrowUp, ChevronDown, Loader2, Settings, Square } from 'lucide-react'
+import { ChevronDown, Loader2, Settings } from 'lucide-react'
 import { agentStateAtom } from '@/atoms/agent-state'
 import { chatStateAtom } from '@/atoms/chat-state'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
@@ -10,6 +10,7 @@ import { RichTextInput } from '@/components/chat/RichTextInput'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import { AgentMessageQueue } from './AgentMessageQueue'
 import { AgentPermissionMenu } from './AgentPermissionMenu'
+import { AgentRunControl } from './AgentRunControl'
 import type { AgentPermissionProfile } from './AgentPermissionMenu'
 import { AGENT_RUNTIME_CAPABILITIES } from '@axon/shared'
 import type { AgentReasoningCapability, AgentThinkingLevel } from '@axon/shared'
@@ -30,7 +31,7 @@ function visibleThinkingLevel(level: AgentThinkingLevel, available: readonly Age
   return available[0] ?? 'off'
 }
 
-/** Agent 输入只负责本地草稿和 send/stop；流事件继续由全局 controller 接收。 */
+/** Agent 输入负责草稿/Enter 排队；单个圆形按钮按状态切换发送、暂停和继续。 */
 export function AgentInput({ sessionId }: { sessionId: string }): React.ReactElement {
   const controller = useAgentController()
   const state = useAtomValue(agentStateAtom)
@@ -47,7 +48,10 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
     value?: AgentReasoningCapability
   } | undefined>(undefined)
   const running = state.activeRunsBySession[sessionId] !== undefined
+  const pausing = state.pausesBySession[sessionId]?.state === 'pausing' || state.pauseOperationsBySession[sessionId] === 'pausing'
+  const submittingContinue = state.pauseOperationsBySession[sessionId] === 'continuing'
   const runSource = state.activeRunSourcesBySession[sessionId]
+  const observedOnly = running && !state.ownedRunsBySession[sessionId]
   const externalRunning = runSource === 'external'
   const queuedMessages = state.queuedMessagesBySession[sessionId] ?? []
   const session = state.sessions.find((item) => item.id === sessionId)
@@ -119,10 +123,10 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
 
   const send = React.useCallback(() => {
     const text = value.trim()
-    if (!text || text.length > MAX_AGENT_INPUT_LENGTH || externalRunning || savingModel || savingThinkingLevel || unavailable) return
+    if (!text || text.length > MAX_AGENT_INPUT_LENGTH || observedOnly || pausing || submittingContinue || externalRunning || savingModel || savingThinkingLevel || unavailable) return
     setValue('')
     void controller.send({ sessionId, text })
-  }, [controller, externalRunning, savingModel, savingThinkingLevel, sessionId, unavailable, value])
+  }, [controller, observedOnly, pausing, submittingContinue, externalRunning, savingModel, savingThinkingLevel, sessionId, unavailable, value])
 
   const inputError = modelError ?? thinkingLevelError ?? (value.length > MAX_AGENT_INPUT_LENGTH ? `输入超过 ${MAX_AGENT_INPUT_LENGTH.toLocaleString()} 字` : undefined)
 
@@ -130,7 +134,7 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
     <AgentMessageQueue sessionId={sessionId} messages={queuedMessages} />
     <div className="mx-auto max-w-3xl rounded-[12px] border border-border bg-[hsl(var(--input-surface))] px-3 py-2 shadow-sm focus-within:border-ring/50 focus-within:ring-1 focus-within:ring-ring/15">
       <div className="[&_.chat-rich-input]:min-h-12 [&_.chat-rich-input]:px-1 [&_.chat-rich-input]:text-[13px]">
-        <RichTextInput value={value} disabled={externalRunning || unavailable} onChange={setValue} onSubmit={send} />
+        <RichTextInput value={value} disabled={pausing || submittingContinue || externalRunning || unavailable} onChange={setValue} onSubmit={send} />
       </div>
       <div className="flex items-center justify-between gap-2 pt-2">
         <div className="flex min-w-0 max-w-[25%] shrink-0 items-center gap-1.5">
@@ -142,17 +146,17 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
             aria-label="选择 Agent 思考等级"
             title="选择 Agent 思考等级"
             value={visibleThinkingLevel(thinkingLevel, capability.levels)}
-            disabled={running || savingModel || savingThinkingLevel}
+            disabled={pausing || submittingContinue || running || savingModel || savingThinkingLevel}
             onChange={(event) => void selectThinkingLevel(event.target.value as AgentThinkingLevel)}
             className="h-7 w-full appearance-none rounded bg-transparent pl-1.5 pr-5 font-mono text-[11px] text-muted-foreground outline-none hover:bg-muted/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
           >
             {capability.levels.map((level) => <option key={level} value={level}>{level}</option>)}
           </select><ChevronDown size={10} strokeWidth={2.5} aria-hidden="true" className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground" /></div> : null}
-          <AgentPermissionMenu profile={permissionProfile} disabled={running || savingModel || savingThinkingLevel} supportsSandbox={session?.runtimeId !== 'zima'} />
+          <AgentPermissionMenu profile={permissionProfile} disabled={pausing || submittingContinue || running || savingModel || savingThinkingLevel} supportsSandbox={session?.runtimeId !== 'zima'} />
           {modelOptions.length > 0 ? <div className="relative min-w-0 max-w-48 flex-1"><select
             aria-label="选择 Agent 渠道和模型"
             value={hasModel ? currentModel : ''}
-            disabled={running || savingModel || savingThinkingLevel}
+            disabled={pausing || submittingContinue || running || savingModel || savingThinkingLevel}
             onChange={(event) => void selectModel(event.target.value)}
             className="h-7 w-full min-w-0 appearance-none rounded bg-transparent pl-1.5 pr-5 text-xs text-muted-foreground outline-none hover:bg-muted/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
           >
@@ -166,10 +170,11 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
           </select><ChevronDown size={10} strokeWidth={2.5} aria-hidden="true" className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground" /></div> : <button type="button" onClick={openChannelSettings} className="flex h-7 min-w-0 items-center gap-1.5 whitespace-nowrap rounded px-2 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
             <Settings size={13} />{chatState.channelsStatus === 'loading' ? '加载渠道…' : '配置渠道'}
           </button>}
-          {running ? externalRunning
+          {running && externalRunning
             ? <span className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-2 text-xs text-muted-foreground"><Loader2 size={12} className="animate-spin" />外部运行中</span>
-            : <><button type="button" onClick={send} disabled={!value.trim() || savingModel || savingThinkingLevel} className="flex h-8 shrink-0 items-center whitespace-nowrap rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground shadow-xs hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:opacity-40">排队</button><button type="button" onClick={() => void controller.stop(sessionId)} className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-destructive px-3 text-xs font-medium text-destructive-foreground hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1"><Square size={12} fill="currentColor" />停止</button></>
-            : <button type="button" aria-label="发送消息" title="发送消息" onClick={send} disabled={!value.trim() || savingModel || savingThinkingLevel || unavailable} className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-xs hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:opacity-40"><ArrowUp size={18} aria-hidden="true" /></button>}
+            : <AgentRunControl sessionId={sessionId} disabled={savingModel || savingThinkingLevel || unavailable}
+              onSend={send} hasDraft={Boolean(value.trim())}
+              sendDisabled={pausing || submittingContinue || !value.trim() || value.length > MAX_AGENT_INPUT_LENGTH || savingModel || savingThinkingLevel || unavailable} />}
         </div>
       </div>
     </div>

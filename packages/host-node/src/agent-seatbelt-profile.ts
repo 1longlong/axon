@@ -58,7 +58,7 @@ export function compileSeatbeltProfile(
   if (policy.platform !== 'macos' || policy.readAccess.type !== 'fullAccess') {
     throw new Error('Seatbelt 仅接受 macOS 全盘只读基础策略')
   }
-  encodeSeatbeltPath(policy.workingDirectory)
+  encodeSeatbeltPath(policy.sandboxCwd)
   if (policy.mode === 'readOnly' && policy.writableRoots.length > 0) {
     throw new Error('只读沙箱不能包含可写根')
   }

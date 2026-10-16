@@ -50,8 +50,8 @@ export class AgentRendererController {
   private readonly messageLoadVersions = new Map<string, number>()
   private readonly historyReads = new Map<string, AgentHistoryChanges>()
   private readonly observedRunTokens = new Map<string, number>()
-  private readonly ownedRuns = new Map<string, BackendOwnedRun>()
   private readonly runIdentityVersions = new Map<string, number>()
+  private readonly pauseLoadVersions = new Map<string, number>()
   private lifecycleVersion = 0
 
   constructor(
@@ -72,10 +72,12 @@ export class AgentRendererController {
     const unsubscribeRuns = this.api.onRunChanged(({ phase, run }) => {
       if (lifecycle !== this.lifecycleVersion) return
       this.runIdentityVersions.set(run.sessionId, (this.runIdentityVersions.get(run.sessionId) ?? 0) + 1)
-      const current = this.ownedRuns.get(run.sessionId)
+      const current = this.store.get(agentStateAtom).ownedRunsBySession[run.sessionId]
       if (phase === 'started') {
-        if (!current || run.runStartedAt >= current.runStartedAt) this.ownedRuns.set(run.sessionId, { ...run })
-      } else if (current?.runId === run.runId) this.ownedRuns.delete(run.sessionId)
+        if (!current || run.runStartedAt >= current.runStartedAt) this.setOwnedRun(run.sessionId, run)
+        // 继续 RPC 要等整轮结束；真实新轮已开始便解除提交锁，允许用户再次暂停它。
+        this.setPauseOperation(run.sessionId, undefined, 'continuing')
+      } else if (current?.runId === run.runId) this.setOwnedRun(run.sessionId)
     })
     const unsubscribeEvents = this.api.onEvent((event) => {
       if (lifecycle !== this.lifecycleVersion) return
@@ -108,15 +110,30 @@ export class AgentRendererController {
         },
       }))
     })
+    const unsubscribePauses = this.api.onPauseChanged(({ sessionId }) => {
+      if (lifecycle === this.lifecycleVersion) {
+        const previous = this.store.get(agentStateAtom).activeRunsBySession[sessionId]
+        const observedOnly = previous !== undefined && this.observedRunTokens.get(sessionId) !== previous
+        void this.loadPause(sessionId, true).then(() => {
+          if (lifecycle !== this.lifecycleVersion) return
+          const state = this.store.get(agentStateAtom)
+          // 原入口已有逐消息流和命令完成校准；变化通知不重复抢占分页快照租额。
+          if (state.pauseStatusBySession[sessionId] === 'ready' && !state.pauseOperationsBySession[sessionId]
+            && (state.pausesBySession[sessionId]?.state === 'paused'
+              || (observedOnly && state.activeRunsBySession[sessionId] === undefined))) void this.loadMessages(sessionId, false)
+        })
+      }
+    })
     const cleanup = (): void => {
       unsubscribeEvents()
       unsubscribeQueue()
       unsubscribeRuns()
       unsubscribeProjects()
+      unsubscribePauses()
       if (this.unsubscribe === cleanup) {
         this.unsubscribe = null
         this.lifecycleVersion += 1
-        this.ownedRuns.clear()
+        this.store.set(agentStateAtom, (state) => ({ ...state, ownedRunsBySession: {}, pausesBySession: {}, pauseStatusBySession: {}, pauseOperationsBySession: {} }))
         this.historyReads.clear()
         this.sessionsLoadVersion += 1
         this.projectsLoadVersion += 1
@@ -140,7 +157,7 @@ export class AgentRendererController {
       for (const run of runs) {
         if ((this.observedRunTokens.get(run.sessionId) ?? 0) >= run.runStartedAt) {
           // 同一控制器重启时展示状态可复用，但真实控制缓存已释放，仍需查询原入口身份。
-          if (!this.ownedRuns.has(run.sessionId) && this.store.get(agentStateAtom).activeRunsBySession[run.sessionId] === run.runStartedAt) {
+          if (!this.store.get(agentStateAtom).ownedRunsBySession[run.sessionId] && this.store.get(agentStateAtom).activeRunsBySession[run.sessionId] === run.runStartedAt) {
             void this.restoreOwnedRun(run.sessionId, run.runStartedAt, lifecycle)
           }
           continue
@@ -166,8 +183,55 @@ export class AgentRendererController {
       if (lifecycle !== this.lifecycleVersion || version !== (this.runIdentityVersions.get(sessionId) ?? 0)
         || !run || run.sessionId !== sessionId || run.runStartedAt !== runStartedAt
         || this.store.get(agentStateAtom).activeRunsBySession[sessionId] !== runStartedAt) return
-      this.ownedRuns.set(sessionId, { ...run })
+      this.setOwnedRun(sessionId, run)
     } catch { /* 观察入口或已结束运行没有控制目标，不在点击停止时重新查询。 */ }
+  }
+
+  /** 真实控制身份进入可观察状态；普通运行快照不能调用这里授予 owner。 */
+  private setOwnedRun(sessionId: string, run?: BackendOwnedRun): void {
+    this.store.set(agentStateAtom, (state) => {
+      const ownedRunsBySession = { ...state.ownedRunsBySession }
+      if (run) ownedRunsBySession[sessionId] = { ...run }
+      else delete ownedRunsBySession[sessionId]
+      return { ...state, ownedRunsBySession }
+    })
+  }
+
+  /** 通知只令快照失效；按会话版本/页面代次复读后端，慢响应不能复活旧继续凭据。 */
+  async loadPause(sessionId: string, refreshActivity = false): Promise<void> {
+    const lifecycle = this.lifecycleVersion
+    const observed = this.observedRunTokens.get(sessionId)
+    const version = (this.pauseLoadVersions.get(sessionId) ?? 0) + 1
+    this.pauseLoadVersions.set(sessionId, version)
+    this.store.set(agentStateAtom, (state) => ({ ...state,
+      pauseStatusBySession: { ...state.pauseStatusBySession, [sessionId]: 'loading' },
+    }))
+    try {
+      const snapshot = await this.api.getPause(sessionId)
+      // 另一入口的继续只广播状态失效，不转投它的正文流；公开运行快照补齐观察状态。
+      const runs = refreshActivity ? await this.api.listActiveRuns() : undefined
+      if (lifecycle !== this.lifecycleVersion || this.pauseLoadVersions.get(sessionId) !== version) return
+      this.store.set(agentStateAtom, (state) => {
+        const pausesBySession = { ...state.pausesBySession }
+        const newerRun = snapshot && Math.max(state.activeRunsBySession[sessionId] ?? 0,
+          this.observedRunTokens.get(sessionId) ?? 0) > snapshot.runStartedAt
+        if (snapshot?.sessionId === sessionId && !newerRun) pausesBySession[sessionId] = snapshot
+        else delete pausesBySession[sessionId]
+        const activeRunsBySession = { ...state.activeRunsBySession }, activeRunSourcesBySession = { ...state.activeRunSourcesBySession }
+        if (runs && observed === this.observedRunTokens.get(sessionId)) {
+          const run = runs.find((item) => item.sessionId === sessionId)
+          if (run) { activeRunsBySession[sessionId] = run.runStartedAt; activeRunSourcesBySession[sessionId] = run.source }
+          else { delete activeRunsBySession[sessionId]; delete activeRunSourcesBySession[sessionId] }
+        }
+        return { ...state, pausesBySession, activeRunsBySession, activeRunSourcesBySession,
+          pauseStatusBySession: { ...state.pauseStatusBySession, [sessionId]: 'ready' } }
+      })
+    } catch {
+      if (lifecycle !== this.lifecycleVersion || this.pauseLoadVersions.get(sessionId) !== version) return
+      this.store.set(agentStateAtom, (state) => ({ ...state,
+        pauseStatusBySession: { ...state.pauseStatusBySession, [sessionId]: 'error' },
+      }))
+    }
   }
 
   /** 读取项目即时状态；版本令牌防止慢列表覆盖刚完成的 CRUD。 */
@@ -219,11 +283,17 @@ export class AgentRendererController {
     }
   }
 
-  /** 每个会话独立防乱序；完整 JSONL 作基线，按 UUID 合并读取期间接纳的新消息。 */
-  async loadMessages(sessionId: string): Promise<void> {
+  /** JSONL 作基线，保留当前流式草稿并合并读取期间的新消息；版本令牌拒绝迟到快照。 */
+  async loadMessages(sessionId: string, refreshPause = true): Promise<void> {
+    if (refreshPause) void this.loadPause(sessionId)
     const version = (this.messageLoadVersions.get(sessionId) ?? 0) + 1
     this.messageLoadVersions.set(sessionId, version)
     const changes: AgentHistoryChanges = { byUuid: new Map(), unkeyed: [] }
+    const beforeRead = this.store.get(agentStateAtom)
+    const runStartedAt = beforeRead.activeRunsBySession[sessionId]
+    const draftUuid = runStartedAt !== undefined ? beforeRead.streamingAssistantUuidBySession[sessionId] : undefined
+    // 读取前的在途内容尚未落盘，不能依赖读取期间恰好有新 delta 才保住它。
+    if (draftUuid) changes.byUuid.set(draftUuid, 'draft')
     this.historyReads.set(sessionId, changes)
     this.store.set(agentStateAtom, (state) => ({
       ...state,
@@ -235,13 +305,20 @@ export class AgentRendererController {
     try {
       const messages = await this.api.getMessages(sessionId)
       if (this.messageLoadVersions.get(sessionId) !== version) return
-      this.store.set(agentStateAtom, (state) => ({
-        ...state,
-        messagesBySession: { ...state.messagesBySession, [sessionId]: mergeAgentHistory(messages, state.messagesBySession[sessionId] ?? [], changes) },
-        messageStatusBySession: { ...state.messageStatusBySession, [sessionId]: 'ready' },
-        lastError: state.lastError?.scope === 'messages'
-          && state.lastError.sessionId === sessionId ? null : state.lastError,
-      }))
+      this.store.set(agentStateAtom, (state) => {
+        // 预置草稿只属于原活跃轮；撤回/完整消息由实时事件覆盖，不续接已结束的旧草稿。
+        if (draftUuid && changes.byUuid.get(draftUuid) === 'draft'
+          && (state.activeRunsBySession[sessionId] !== runStartedAt || state.streamingAssistantUuidBySession[sessionId] !== draftUuid)) {
+          changes.byUuid.delete(draftUuid)
+        }
+        return {
+          ...state,
+          messagesBySession: { ...state.messagesBySession, [sessionId]: mergeAgentHistory(messages, state.messagesBySession[sessionId] ?? [], changes) },
+          messageStatusBySession: { ...state.messageStatusBySession, [sessionId]: 'ready' },
+          lastError: state.lastError?.scope === 'messages'
+            && state.lastError.sessionId === sessionId ? null : state.lastError,
+        }
+      })
     } catch {
       if (this.messageLoadVersions.get(sessionId) !== version) return
       this.store.set(agentStateAtom, (state) => ({
@@ -256,8 +333,10 @@ export class AgentRendererController {
 
   /** 主动读取权威队列，用于补偿 IPC 广播与命令响应之间的时序差异。 */
   async loadQueuedMessages(sessionId: string): Promise<void> {
+    const lifecycle = this.lifecycleVersion
     try {
       const messages = await this.api.listQueuedMessages(sessionId)
+      if (lifecycle !== this.lifecycleVersion) return
       this.store.set(agentStateAtom, (state) => ({
         ...state,
         queuedMessagesBySession: { ...state.queuedMessagesBySession, [sessionId]: messages },
@@ -291,7 +370,8 @@ export class AgentRendererController {
 
   async deleteSession(sessionId: string): Promise<AgentSessionMeta> {
     const session = await this.api.deleteSession(sessionId)
-    this.ownedRuns.delete(sessionId)
+    this.setOwnedRun(sessionId)
+    this.pauseLoadVersions.set(sessionId, (this.pauseLoadVersions.get(sessionId) ?? 0) + 1)
     this.historyReads.delete(sessionId)
     this.sessionsLoadVersion += 1
     this.messageLoadVersions.set(sessionId, (this.messageLoadVersions.get(sessionId) ?? 0) + 1)
@@ -307,6 +387,8 @@ export class AgentRendererController {
       const permissions = { ...state.pendingPermissionsBySession }
       const askUsers = { ...state.pendingAskUsersBySession }
       const queuedMessages = { ...state.queuedMessagesBySession }
+      const pauses = { ...state.pausesBySession }, pauseStatus = { ...state.pauseStatusBySession }, pauseOperations = { ...state.pauseOperationsBySession }
+      delete pauses[sessionId]; delete pauseStatus[sessionId]; delete pauseOperations[sessionId]
       delete messages[sessionId]
       delete statuses[sessionId]
       delete activeRuns[sessionId]
@@ -332,6 +414,7 @@ export class AgentRendererController {
         pendingPermissionsBySession: permissions,
         pendingAskUsersBySession: askUsers,
         queuedMessagesBySession: queuedMessages,
+        pausesBySession: pauses, pauseStatusBySession: pauseStatus, pauseOperationsBySession: pauseOperations,
         lastError: state.lastError?.sessionId === sessionId ? null : state.lastError,
       }
     })
@@ -492,7 +575,7 @@ export class AgentRendererController {
 
   /** 点击时同步捕获 UI 已观察的真实轮次；传输迟到也只能尝试停止这一个目标。 */
   async stop(sessionId: string): Promise<boolean> {
-    const target = this.ownedRuns.get(sessionId)
+    const target = this.store.get(agentStateAtom).ownedRunsBySession[sessionId]
     if (!target || this.store.get(agentStateAtom).activeRunsBySession[sessionId] !== target.runStartedAt) return false
     try { return await this.api.stop({ sessionId: target.sessionId, runId: target.runId }) } catch {
       this.store.set(agentStateAtom, (state) => ({
@@ -501,6 +584,62 @@ export class AgentRendererController {
       }))
       return false
     }
+  }
+
+  /** 同步提交锁驱动输入区；旧继续应答不能清掉新暂停操作的锁。 */
+  private setPauseOperation(sessionId: string, operation?: 'pausing' | 'continuing', expected?: 'pausing' | 'continuing'): void {
+    this.store.set(agentStateAtom, (state) => {
+      if (expected && state.pauseOperationsBySession[sessionId] !== expected) return state
+      const pauseOperationsBySession = { ...state.pauseOperationsBySession }
+      if (operation) pauseOperationsBySession[sessionId] = operation
+      else delete pauseOperationsBySession[sessionId]
+      return { ...state, pauseOperationsBySession }
+    })
+  }
+
+  /** 捕获原入口的确切运行目标；立即防重复，但只信后端收束后重读的 paused 凭据。 */
+  async pause(sessionId: string): Promise<boolean> {
+    const state = this.store.get(agentStateAtom), target = state.ownedRunsBySession[sessionId]
+    if (!target || state.activeRunsBySession[sessionId] !== target.runStartedAt || state.pauseOperationsBySession[sessionId]) return false
+    const lifecycle = this.lifecycleVersion
+    this.setPauseOperation(sessionId, 'pausing')
+    try {
+      await this.api.pause({ sessionId: target.sessionId, runId: target.runId })
+      return true
+    } catch {
+      if (lifecycle === this.lifecycleVersion) this.store.set(agentStateAtom, (current) => ({ ...current,
+        lastError: { scope: 'run', sessionId, message: '暂停未能确认完成，请检查会话状态；不会自动重发。' },
+      }))
+      return false
+    } finally {
+      if (lifecycle === this.lifecycleVersion) {
+        await Promise.allSettled([this.loadPause(sessionId, true), this.loadMessages(sessionId, false), this.loadQueuedMessages(sessionId)])
+        if (lifecycle === this.lifecycleVersion) this.setPauseOperation(sessionId, undefined, 'pausing')
+      }
+    }
+  }
+
+  /** 继续使用已读取的确切 pauseId；提交不重发，通知/应答均通过后端快照校准。 */
+  async continue(sessionId: string): Promise<AgentSendResult> {
+    const state = this.store.get(agentStateAtom), pause = state.pausesBySession[sessionId]
+    if (!pause || pause.state !== 'paused' || state.pauseStatusBySession[sessionId] !== 'ready'
+      || state.ownedRunsBySession[sessionId] || state.activeRunsBySession[sessionId] !== undefined || state.pauseOperationsBySession[sessionId]) {
+      return { success: false, code: 'invalid_input', message: '暂停状态尚未确认或已失效' }
+    }
+    const lifecycle = this.lifecycleVersion
+    this.setPauseOperation(sessionId, 'continuing')
+    let result: AgentSendResult
+    try { result = await this.api.continue({ sessionId, pauseId: pause.pauseId }) }
+    catch { result = { success: false, code: 'internal_error', message: '继续请求未能确认，请检查会话状态；不会自动重发。' } }
+    if (lifecycle === this.lifecycleVersion) {
+      await Promise.allSettled([this.loadPause(sessionId, true), this.loadMessages(sessionId, false), this.refreshSessions()])
+      if (lifecycle !== this.lifecycleVersion) return result
+      this.setPauseOperation(sessionId, undefined, 'continuing')
+      if (!result.success) this.store.set(agentStateAtom, (current) => ({ ...current,
+        lastError: { scope: 'run', sessionId, code: result.code, message: result.message },
+      }))
+    }
+    return result
   }
 
   async respondPermission(response: AgentPermissionResponse): Promise<boolean> {

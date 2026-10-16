@@ -97,7 +97,7 @@ function canonicalPotentialPath(path: string): string {
 function canonicalPolicy(policy: AgentSandboxPolicy): AgentSandboxPolicy {
   return {
     ...policy,
-    workingDirectory: canonicalPotentialPath(policy.workingDirectory),
+    sandboxCwd: canonicalPotentialPath(policy.sandboxCwd),
     writableRoots: policy.writableRoots.map(canonicalPotentialPath),
     protectedReadOnlyRoots: policy.protectedReadOnlyRoots.map(canonicalPotentialPath),
   }
@@ -457,7 +457,7 @@ export class AgentSandboxCommandService {
     ]
     const command = await this.executeCommand({
       argv,
-      cwd: context.policy.workingDirectory,
+      cwd: context.policy.sandboxCwd,
       policy: context.policy,
       grants: context.grants,
       ...(context.abortSignal ? { abortSignal: context.abortSignal } : {}),
@@ -568,7 +568,7 @@ export class AgentSandboxCommandService {
       : this.executeCommand(originalRequest, handlers)
   }
 
-  /** 校验原始 argv 与项目边界，应用已批准权限后启动受 Seatbelt 约束的进程。 */
+  /** 校验原始 argv 和执行目录，使用独立的可信沙箱策略及已批准权限启动进程。 */
   executeCommand(
     request: AgentSandboxCommandRequest,
     handlers: AgentSandboxCommandOutputHandlers = {},
@@ -609,9 +609,7 @@ export class AgentSandboxCommandService {
       if (!statSync(cwd).isDirectory()) {
         throw new AgentSandboxExecutionError('invalidRequest', '沙箱命令工作目录不是目录')
       }
-      if (!isWithinRoot(policy.workingDirectory, cwd)) {
-        throw new AgentSandboxExecutionError('invalidRequest', '沙箱命令工作目录越过项目根')
-      }
+      // cwd 只决定进程位置；profile 始终消费可信 policy，不把模型选择的目录加入可写根。
       temporaryDirectory = realpathSync(this.createTempDirectory())
       const grants = collectGrantOverrides(request.grants)
       const profile = compileSeatbeltProfile(policy, {

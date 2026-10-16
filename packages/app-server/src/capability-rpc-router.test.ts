@@ -63,6 +63,54 @@ async function open(options: { reasoning?: (runtime: AgentRuntimeId, input: Agen
 }
 
 describe('Runtime/模型与宿主环境能力协议', () => {
+  test('创建前按中立模型选择查询，不建立会话或解密；未知/禁用目标不解析 adapter', async () => {
+    const f = await open()
+    const before = f.backend.sessions.list()
+    const selection = { runtimeId: 'pi', channelId: f.channel.id, modelId: 'first' }
+    expect(await f.request(methods.AGENT_GET_REASONING_CAPABILITY, selection)).toEqual({ levels: ['off', 'low', 'high'], defaultLevel: 'high' })
+    expect(f.queries).toEqual([{ runtime: 'pi', input: { provider: 'openai', model: 'first' } }])
+    for (const input of [{ ...selection, modelId: 'unknown' }, { ...selection, channelId: 'missing' }]) {
+      expect(await f.request(methods.AGENT_GET_REASONING_CAPABILITY, input)).toBeNull()
+    }
+    for (const input of [{ ...selection, provider: 'openai' }, { ...selection, runtimeId: 'unknown' },
+      { runtimeId: 'pi' }, { ...selection, modelId: 3 }]) {
+      await expect(f.request(methods.AGENT_GET_REASONING_CAPABILITY, input)).rejects.toMatchObject({ code: -32602 })
+    }
+    await f.backend.channels.update(f.channel.id, { enabled: false })
+    expect(await f.request(methods.AGENT_GET_REASONING_CAPABILITY, selection)).toBeNull()
+    expect(f.queries).toHaveLength(1)
+    expect(f.backend.sessions.list()).toEqual(before)
+  })
+
+  test('创建前查询遇到目录加载中渠道/模型变化时不交付旧能力；取消后 drain 等真实加载', async () => {
+    for (const mode of ['disable', 'provider', 'model', 'cancel']) {
+      const started = Promise.withResolvers<void>(), gate = Promise.withResolvers<AgentReasoningCapability>()
+      const f = await open({ reasoning: () => { started.resolve(); return gate.promise } })
+      const stop = new AbortController()
+      const pending = f.request(methods.AGENT_GET_REASONING_CAPABILITY,
+        { runtimeId: 'pi', channelId: f.channel.id, modelId: 'first' }, f.main, stop.signal).catch((error: unknown) => error)
+      await started.promise
+      if (mode === 'disable') await f.backend.channels.update(f.channel.id, { enabled: false })
+      else if (mode === 'provider') await f.backend.channels.update(f.channel.id, { provider: 'anthropic' })
+      else if (mode === 'model') await f.backend.channels.update(f.channel.id, { models: [{ id: 'second', name: '模型', enabled: true }] })
+      else {
+        stop.abort()
+        expect(await pending).toMatchObject({ code: 'canceled' })
+        f.backend.agentCapabilities.dispose()
+        let drained = false
+        const draining = f.backend.agentCapabilities.drain().then(() => { drained = true })
+        await Promise.resolve()
+        expect(drained).toBe(false)
+        gate.resolve({ levels: ['high'], defaultLevel: 'high' })
+        await draining
+        expect(drained).toBe(true)
+        continue
+      }
+      gate.resolve({ levels: ['high'], defaultLevel: 'high' })
+      expect(await pending).toBeNull()
+    }
+  })
+
   test('能力快照来自可信 bootstrap，不创建 Runtime；拒绝额外字段/外来身份，读操作不持久化', async () => {
     const f = await open()
     const before = [...f.resolves]

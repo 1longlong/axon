@@ -57,6 +57,11 @@ export class AppServerEvents {
     peer.handleNotification(APP_SERVER_NOTIFICATIONS.AGENT_RUN, (params) => this.onRun(params))
     peer.handleNotification(APP_SERVER_NOTIFICATIONS.AGENT_QUEUE, (params) => this.forward(params, 'snapshot', AGENT_IPC_CHANNELS.QUEUE_EVENT))
     peer.handleNotification(APP_SERVER_NOTIFICATIONS.AGENT_METADATA, (params) => this.forward(params, 'event', AGENT_IPC_CHANNELS.EVENT))
+    peer.handleNotification(APP_SERVER_NOTIFICATIONS.AGENT_PAUSE_CHANGED, (params) => {
+      const data = packet(params)
+      if (!object(data.event) || !id(data.event.sessionId)) throw new RpcFault(-32602, '暂停通知无效')
+      if (!this.disposed) this.send(data.clientId as string, AGENT_IPC_CHANNELS.PAUSE_EVENT, { sessionId: data.event.sessionId })
+    })
     peer.handleNotification(APP_SERVER_NOTIFICATIONS.CHAT_GENERATION, (params) => this.forward(params, 'event', CHAT_IPC_CHANNELS.EVENT))
     peer.handleNotification(APP_SERVER_NOTIFICATIONS.CHAT_GENERATION_IDENTITY, (params) => this.forward(params, 'event', CHAT_IPC_CHANNELS.GENERATION_EVENT))
     peer.handleNotification(APP_SERVER_NOTIFICATIONS.SETTINGS_UPDATED, (params) => {

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SDKMessage } from '@axon/shared'
 import { AgentSessionManager, AgentSessionManagerError } from './agent-session-manager'
+import { AgentDelegationManager } from '../collaboration/agent-delegation-manager'
 
 let directory: string
 let indexPath: string
@@ -32,6 +33,20 @@ function manager(): AgentSessionManager {
   })
 }
 
+test('CLI 来源保存在完整根元数据，更新/重载保留；普通会话和子会话不继承来源', () => {
+  const sessions = manager(), ordinary = sessions.create(), root = sessions.create({ creationOrigin: 'exec', creationWorkspacePath: directory })
+  expect(ordinary.creationOrigin).toBeUndefined()
+  const child = sessions.create({ parentSessionId: root.id, rootSessionId: root.id,
+    parentToolUseId: 'tool-child', subagentType: 'coder' })
+  expect(child.creationOrigin).toBeUndefined()
+  expect(sessions.update(root.id, { title: '更新标题', sdkSessionId: 'runtime-id' }).creationOrigin).toBe('exec')
+  expect(manager().get(root.id)).toMatchObject({ creationOrigin: 'exec', sdkSessionId: 'runtime-id' })
+  expect(manager().list().find((item) => item.id === root.id)?.creationOrigin).toBe('exec')
+  expect(() => sessions.create({ creationOrigin: 'desktop' as never })).toThrow()
+  expect(() => sessions.create({ creationOrigin: 'exec', parentSessionId: root.id, rootSessionId: root.id,
+    parentToolUseId: 'tool-other', subagentType: 'coder' })).toThrow()
+})
+
 function assistantMessage(uuid: string, text: string): SDKMessage {
   return {
     type: 'assistant',
@@ -52,6 +67,34 @@ async function expectError(action: () => unknown, code: AgentSessionManagerError
 }
 
 describe('AgentSessionManager 会话索引', () => {
+  test('非交互策略落盘；子会话缺省、显式设置和重置均不能放宽父限制', () => {
+    const sessions = manager()
+    const desktop = sessions.create()
+    expect(desktop).toMatchObject({ approvalPolicy: 'onRequest', userInputPolicy: 'ask' })
+    const root = sessions.create({ approvalPolicy: 'never', userInputPolicy: 'reject' })
+    expect(manager().get(root.id)).toMatchObject({ approvalPolicy: 'never', userInputPolicy: 'reject' })
+    const child = sessions.create({ parentSessionId: root.id, rootSessionId: root.id,
+      parentToolUseId: 'task-1', subagentType: 'coder', approvalPolicy: 'onRequest', userInputPolicy: 'ask' })
+    const other = sessions.create({ parentSessionId: root.id, rootSessionId: root.id,
+      parentToolUseId: 'task-2', subagentType: 'coder' })
+    const tasks = new AgentDelegationManager({ sessionsDir })
+    for (const session of [child, other]) {
+      tasks.create({ rootSessionId: root.id, parentSessionId: root.id, childSessionId: session.id,
+        parentToolUseId: session.parentToolUseId!, title: '子任务', objective: '分析', subagentType: 'coder',
+        runInBackground: false, depth: 1 })
+      expect(session).toMatchObject({ approvalPolicy: 'never', userInputPolicy: 'reject' })
+      expect(sessions.update(session.id, { approvalPolicy: null, userInputPolicy: null }))
+        .toMatchObject({ approvalPolicy: 'never', userInputPolicy: 'reject' })
+      expect(sessions.update(session.id, { approvalPolicy: 'onRequest', userInputPolicy: 'ask' }))
+        .toMatchObject({ approvalPolicy: 'never', userInputPolicy: 'reject' })
+      expect(manager().get(session.id)).toMatchObject({ approvalPolicy: 'never', userInputPolicy: 'reject' })
+    }
+    expect(() => sessions.create({ userInputPolicy: 'autoAnswer' as never })).toThrow()
+    expect(() => sessions.update(root.id, { approvalPolicy: 'alwaysAllow' as never })).toThrow()
+    expect(sessions.update(root.id, { approvalPolicy: null, userInputPolicy: null }))
+      .toMatchObject({ approvalPolicy: 'onRequest', userInputPolicy: 'ask' })
+  })
+
   test('删除落盘后释放主/子会话资源，单独删子会话不影响其他归属；失败监听不影响删除', () => {
     const sessions = manager()
     const root = sessions.create()

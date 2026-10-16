@@ -1,6 +1,6 @@
 {
   "name": "@axon/host-node",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Axon 宿主工具执行、Shell 快照与 macOS Seatbelt",
   "type": "module",
   "main": "./src/index.ts",

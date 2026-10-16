@@ -13,3 +13,5 @@ export type {
 } from './agent-seatbelt-profile'
 export { AgentSandboxCommandService, AgentSandboxExecutionError } from './agent-sandbox-command-service'
 export type { AgentSandboxCommandServiceOptions, AgentSandboxExecutionErrorCode } from './agent-sandbox-command-service'
+export { acquireBackendDirectoryLease, BackendDirectoryLeaseError, BACKEND_DIRECTORY_LOCK_FILE } from './backend-directory-lease'
+export type { BackendDirectoryLease } from './backend-directory-lease'

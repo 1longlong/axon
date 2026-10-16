@@ -324,9 +324,26 @@ describe('AgentSandboxCommandService', () => {
     await expect(service().executeCommand(request(['sh', '-c', 'true']))).rejects.toBeInstanceOf(
       AgentSandboxExecutionError,
     )
-    await expect(service().executeCommand(request(['/bin/true'], { cwd: directory }))).rejects.toMatchObject({
+    await expect(service().executeCommand(request(['/bin/true'], { cwd: fakeSandboxExecutable }))).rejects.toMatchObject({
       code: 'invalidRequest',
     })
+  })
+
+  test('项目外 cwd 只影响进程目录，profile 和可信 sandboxCwd 不随之改变', async () => {
+    const capture = join(directory, 'profile.txt')
+    writeFileSync(fakeSandboxExecutable, '#!/bin/sh\nprintf "%s" "$2" > "$AXON_PROFILE_CAPTURE"\nshift\nshift\nexec "$@"\n')
+    const policy = buildAgentSandboxPolicy({ projectRoot: workspace, mode: 'workspaceWrite' })
+    const original = structuredClone(policy)
+    const result = await service().executeCommand(request(['/bin/pwd'], {
+      cwd: directory, policy, environment: { AXON_PROFILE_CAPTURE: capture },
+    }))
+    expect(result.stdout.trim()).toBe(realpathSync(directory))
+    const profile = readFileSync(capture, 'utf8')
+    expect(profile).toContain(`(allow file-write* (subpath "${realpathSync(workspace)}"))`)
+    expect(profile).toContain(`(deny file-write* (subpath "${realpathSync(workspace)}/.git"))`)
+    expect(profile).not.toContain(`(allow file-write* (subpath "${realpathSync(directory)}"))`)
+    expect(policy).toEqual(original)
+    expect(policy.sandboxCwd).toBe(realpathSync(workspace))
   })
 
   test('Bash 只把可归因的文件或网络 Seatbelt 拒绝提升为精确审批', async () => {

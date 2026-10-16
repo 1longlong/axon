@@ -133,7 +133,7 @@ export interface AgentCompletionPayload {
   error?: AgentTypedError
   completedAt: number
   durationMs: number
-  /** false 表示运行已收束，但终态因存储故障未能写入 JSONL。 */
+  /** false 表示当前完成终态未落盘；包括存储故障或提前 result 后暴露的收束失败。 */
   persisted: boolean
 }
 

@@ -57,11 +57,33 @@ export class AgentRpcRouter {
         ...(client.kind === 'quick' ? { inputOrigin: 'quick' as const } : {}),
       },
     ))
+    // 仅可信非交互入口可创建/控制工作流；桌面白名单没有这些方法，不开放任意 RPC。
+    const external = (client: AppServerClient): void => { if (client.kind !== 'external') throw new RpcFault(-32602, '工作流仅限外部入口') }
+    handle(methods.AGENT_EXECUTE_WORKFLOW, ['input'], ({ backend, client, input }, { signal }) => {
+      external(client); return backend.agentRuns.executeWorkflow(client.clientId, input, signal)
+    })
+    handle(methods.AGENT_GET_WORKFLOW, ['input'], ({ backend, client, input }) => {
+      external(client); return backend.agentRuns.getOwnedWorkflow(client.clientId, input)
+    })
+    handle(methods.AGENT_CANCEL_WORKFLOW, ['input'], ({ backend, client, input }) => {
+      external(client); return backend.agentRuns.cancelWorkflow(client.clientId, input)
+    })
     handle(methods.AGENT_GET_RUN, ['input'], ({ backend, client, input }) => {
       if (typeof input !== 'string' || !input.trim()) throw new RpcFault(-32602, '会话标识无效')
       return backend.agentRuns.getOwnedRun(client.clientId, input.trim()) ?? null
     })
     handle(methods.AGENT_STOP, ['input'], ({ backend, client, input }) => backend.agentRuns.stopRun(client.clientId, input))
+    // 暂停/继续只开放桌面逻辑入口；CLI 的取消/恢复仍走原工作流契约。
+    const desktop = (client: AppServerClient): void => { if (client.kind === 'external') throw new RpcFault(-32602, '暂停与继续仅限桌面入口') }
+    handle(methods.AGENT_PAUSE, ['input'], ({ backend, client, input }) => {
+      desktop(client); return backend.agentRuns.pauseRun(client.clientId, input)
+    })
+    handle(methods.AGENT_GET_PAUSE, ['input'], ({ backend, client, input }) => backend.agentRuns.getPause(client.clientId, input))
+    handle(methods.AGENT_CONTINUE, ['input'], ({ backend, client, input }) => {
+      desktop(client); return backend.agentRuns.continueRun(client.clientId, input, {
+        source: 'renderer', ...(client.kind === 'quick' ? { inputOrigin: 'quick' as const } : {}),
+      })
+    })
     handle(methods.AGENT_LIST_QUEUE, ['input'], ({ backend, client, input }) => backend.agentRuns.listQueuedMessages(client.clientId, input))
     handle(methods.AGENT_CANCEL_QUEUE, ['input'], ({ backend, client, input }) => backend.agentRuns.cancelQueuedMessage(client.clientId, input))
     handle(methods.AGENT_MOVE_QUEUE, ['input'], ({ backend, client, input }) => backend.agentRuns.moveQueuedMessage(client.clientId, input))
@@ -73,11 +95,17 @@ export class AgentRpcRouter {
     this.routes.set(client.clientId, route)
     try {
       route.releases.push(backend.agentRuns.subscribeRunEvents(client.clientId, (event) => this.onRunEvent(route, event)))
+      route.releases.push(backend.agentRuns.subscribeWorkflowEvents(client.clientId, (event) => {
+        this.notify(route, APP_SERVER_NOTIFICATIONS.AGENT_WORKFLOW, { event })
+      }))
       route.releases.push(backend.agentRuns.subscribeClientQueueChanges(client.clientId, (snapshot) => {
         this.notify(route, APP_SERVER_NOTIFICATIONS.AGENT_QUEUE, { snapshot })
       }))
       route.releases.push(backend.agentRuns.subscribeSessionMetadata((event) => {
         this.notify(route, APP_SERVER_NOTIFICATIONS.AGENT_METADATA, { event })
+      }))
+      route.releases.push(backend.agentRuns.subscribePauseChanges((event) => {
+        this.notify(route, APP_SERVER_NOTIFICATIONS.AGENT_PAUSE_CHANGED, { event })
       }))
     } catch (error) { this.detach(client.clientId); throw error }
   }

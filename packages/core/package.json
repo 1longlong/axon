@@ -1,6 +1,6 @@
 {
   "name": "@axon/core",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Axon 通用后端业务、持久化与 Provider 协议",
   "type": "module",
   "main": "./src/index.ts",

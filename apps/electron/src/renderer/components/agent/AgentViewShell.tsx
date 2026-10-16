@@ -5,6 +5,7 @@ import type { AgentEnvironmentCheckResult } from '@axon/shared'
 import { agentStateAtom } from '@/atoms/agent-state'
 import { useAgentController } from './AgentStateProvider'
 import { AgentInput } from './AgentInput'
+import { AgentMessageQueue } from './AgentMessageQueue'
 import { AgentMessages } from './AgentMessages'
 import { PermissionBanner } from './PermissionBanner'
 import { AgentSidePanel } from './AgentSidePanel'
@@ -57,7 +58,10 @@ export function AgentViewShell({ sessionId, isActive = true, compact = false, qu
     && (!environment.directory.available || !environment.directory.writable)
   if (quick) return <QuickConversationLayout
     options={{ ...quick, title: session.title }}
-    context={<AgentMessages sessionId={session.id} />}
+    context={<>
+      <AgentMessages sessionId={session.id} />
+      <AgentMessageQueue sessionId={session.id} messages={state.queuedMessagesBySession[session.id] ?? []} />
+    </>}
     composer={<>
       {quick.expanded && <>
         {state.lastError?.scope === 'run' && state.lastError.sessionId === session.id && <Notice variant="error">{state.lastError.message}</Notice>}

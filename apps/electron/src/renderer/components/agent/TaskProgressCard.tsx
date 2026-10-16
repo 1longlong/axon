@@ -95,7 +95,7 @@ function TaskProgressOverlay({ rootSessionId, task, onClose }: { rootSessionId: 
           {messageStatus === 'error' && messages.length === 0 && <p className="py-10 text-center text-xs text-destructive">读取子 Agent 消息失败</p>}
           {displayGroups.map((group, index) => group.kind === 'user'
             ? <AgentMessageItem key={`user-${index}`} message={group.message} />
-            : <AgentAssistantTurnItem key={`reply-${index}`} messages={group.messages} toolResultsById={toolMessageIndex.resultsByToolUseId} activeToolUseIds={activeToolUseIds} streamingAssistantUuid={streamingAssistantUuid} hideToolResult={(toolUseId) => toolMessageIndex.toolUsesById.has(toolUseId)} />)}
+            : <AgentAssistantTurnItem key={`reply-${index}`} messages={group.messages} running={running && group.resultIndex === undefined} toolResultsById={toolMessageIndex.resultsByToolUseId} activeToolUseIds={activeToolUseIds} streamingAssistantUuid={streamingAssistantUuid} hideToolResult={(toolUseId) => toolMessageIndex.toolUsesById.has(toolUseId)} />)}
           {retry?.phase === 'scheduled'
             ? <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><Loader2 size={13} className="animate-spin" />模型请求暂时失败，正在自动重试（{retry.attempt}/{retry.maxAttempts}）</p>
             : compaction?.phase === 'started'

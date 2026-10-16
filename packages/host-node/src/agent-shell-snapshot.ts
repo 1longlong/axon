@@ -2,7 +2,7 @@
 
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, realpathSync, rmSync } from 'node:fs'
 import { chmod, lstat, mkdir, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AgentShell } from './agent-shell'
@@ -90,7 +90,12 @@ export function prepareAgentShellSnapshotCommand(
   input: AgentShellSnapshotCommandInput,
   snapshot?: AgentShellSnapshot,
 ): AgentPreparedShellCommand {
-  if (!snapshot || input.cwd !== snapshot.cwd || input.argv[0] !== snapshot.shell.path
+  // workdir 使用真实路径；同一目录的系统别名不能导致根目录快照失效，子目录仍不复用。
+  let sameDirectory = false
+  if (snapshot) {
+    try { sameDirectory = realpathSync(input.cwd) === realpathSync(snapshot.cwd) } catch { /* 目录失效时保留登录 Shell 路线。 */ }
+  }
+  if (!snapshot || !sameDirectory || input.argv[0] !== snapshot.shell.path
     || input.argv[1] !== '-lc' || input.argv.length < 3 || !existsSync(snapshot.path)) {
     return { argv: input.argv, environment: {} }
   }
@@ -306,8 +311,10 @@ export class AgentShellSnapshotEnvironment {
       const shell = this.options.shell
       if (!shell) { reason = 'shellUnavailable'; throw new Error(reason) }
       if (!/^[A-Za-z0-9_-]+$/.test(this.options.sessionId)) throw new Error('invalidSessionId')
+      // 捕获时固定真实 cwd，避免工作区别名后来改指向时复用旧目录的环境。
+      const captureOptions = { ...this.options, cwd: realpathSync(this.options.cwd) }
       const marker = randomUUID()
-      const output = await runInitialization(shell, '-lc', captureScript(shell, marker), this.options, this.controller.signal)
+      const output = await runInitialization(shell, '-lc', captureScript(shell, marker), captureOptions, this.controller.signal)
       if (this.disposed) throw new Error('cancelled')
       reason = 'invalidCapture'
       const source = decodeCapture(output, marker)
@@ -321,13 +328,13 @@ export class AgentShellSnapshotEnvironment {
       await writeFile(temporaryPath, source, { mode: 0o600, flag: 'wx' })
       if (this.disposed) throw new Error('cancelled')
       reason = 'validationFailed'
-      await runInitialization(shell, '-c', `set -e; . ${quoteShell(temporaryPath)}`, this.options, this.controller.signal)
+      await runInitialization(shell, '-c', `set -e; . ${quoteShell(temporaryPath)}`, captureOptions, this.controller.signal)
       // 取消可能发生在任意 await 后；已释放引用不得晚到发布一个无人清理的文件。
       if (this.disposed) throw new Error('cancelled')
       reason = 'publishFailed'
       await rename(temporaryPath, publishedPath)
       if (this.disposed) throw new Error('cancelled')
-      this.snapshot = { path: publishedPath, cwd: this.options.cwd, shell }
+      this.snapshot = { path: publishedPath, cwd: captureOptions.cwd, shell }
       return this.snapshot
     } catch {
       if (this.disposed) reason = 'cancelled'

@@ -16,6 +16,12 @@ const BASH_SEARCH_GUIDANCE = `
 const BASH_EXEC_GUIDANCE = `
 - bash 还用于运行测试、构建、Git 命令及其他确实需要 shell 的操作；命令输出或 read 无法处理的特殊内容也可通过 bash 查看。`
 
+const BASH_WORKDIR_GUIDANCE = `
+- 每次调用 bash 都必须显式设置 workdir，填写本次命令实际要运行的目录，而不是固定填写项目根目录。项目根目录使用当前项目工作目录或 "."，子目录通过 workdir 指定；相对路径从项目工作区解析，也可填写项目外的绝对目录。workdir 只改变执行位置，不改变沙箱或审批权限。
+- 例如在 apps/electron/src 列目录时，使用 {"command":"ls main renderer","workdir":"apps/electron/src"}。
+- 除非确有必要，否则不要使用 cd；执行目录通过 workdir 设置。
+- 每次调用使用独立 Shell，上一次调用的 cd 或 export 不会延续。`
+
 const EDIT_GUIDANCE = `
 - 修改已有文件优先用 edit 做精确替换；创建文件或完整替换内容用 write。需要运行脚本、批量生成或验证结果时再使用 bash。`
 
@@ -23,6 +29,6 @@ const EDIT_GUIDANCE = `
 export function buildAgentToolGuidance(subagentType?: AgentSubagentType): string {
   if (subagentType === 'plan') return READ_ONLY_GUIDANCE
   if (subagentType === 'explore') return READ_ONLY_GUIDANCE + `
-- 路径搜索、正文搜索和列目录使用当前提供的 Glob、Grep、LS 工具。只有可用工具列表包含 bash 时，才能用它执行只读检查；不得申请扩大只读角色的权限。`
-  return READ_GUIDANCE + BASH_SEARCH_GUIDANCE + BASH_EXEC_GUIDANCE + EDIT_GUIDANCE
+- 路径搜索、正文搜索和列目录使用当前提供的 Glob、Grep、LS 工具。只有可用工具列表包含 bash 时，才能用它执行只读检查；不得申请扩大只读角色的权限。` + BASH_WORKDIR_GUIDANCE
+  return READ_GUIDANCE + BASH_SEARCH_GUIDANCE + BASH_EXEC_GUIDANCE + BASH_WORKDIR_GUIDANCE + EDIT_GUIDANCE
 }

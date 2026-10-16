@@ -5,7 +5,7 @@ import type { SDKToolUseBlock } from '@axon/shared'
 import { agentStateAtom } from '@/atoms/agent-state'
 import { agentTaskStateAtom } from '@/atoms/agent-task-state'
 import { collectAgentTurnFileChanges } from '@/lib/agent-file-changes'
-import { getResultSkillActivations } from '@/lib/agent-skill-usage'
+import { getTurnSkillActivations } from '@/lib/agent-skill-usage'
 import { indexAgentToolMessages } from '@/lib/agent-tool-messages'
 import { groupAgentTurns, hasActiveAgentTurnOutput } from '@/lib/agent-turn-groups'
 import { useAgentTaskController } from './AgentStateProvider'
@@ -32,15 +32,19 @@ export function AgentMessages({ sessionId }: { sessionId: string }): React.React
   const fileChangesByResult = React.useMemo(() => new Map(
     collectAgentTurnFileChanges(messages).map((summary) => [summary.resultIndex, summary.files]),
   ), [messages])
-  const skillActivationsByResult = React.useMemo(() => new Map(messages.flatMap((message, index) => {
-    const activations = getResultSkillActivations(message)
-    return activations.length > 0 ? [[index, activations] as const] : []
-  })), [messages])
   const toolMessageIndex = React.useMemo(() => indexAgentToolMessages(messages), [messages])
   const displayGroups = React.useMemo(() => groupAgentTurns(messages), [messages])
+  const skillActivationsByResult = React.useMemo(() => new Map(displayGroups.flatMap((group) => {
+    if (group.kind !== 'reply' || group.resultIndex === undefined) return []
+    const activations = getTurnSkillActivations(group.messages)
+    return activations.length > 0 ? [[group.resultIndex, activations] as const] : []
+  })), [displayGroups])
   const waitingForOutput = running && !hasActiveAgentTurnOutput(displayGroups)
   const activeToolUseIds = React.useMemo(() => new Set(state.activeToolUseIdsBySession[sessionId] ?? []), [sessionId, state.activeToolUseIdsBySession])
   const streamingAssistantUuid = state.streamingAssistantUuidBySession[sessionId]
+  const blockedToolUseIds = new Set([
+    ...(state.pendingPermissionsBySession[sessionId] ?? []).map((request) => request.toolUseId),
+  ])
   const attachedTaskToolUseIds = React.useMemo(() => new Set(
     (taskState.tasksByRootSession[sessionId] ?? []).map((task) => task.parentToolUseId),
   ), [sessionId, taskState.tasksByRootSession])
@@ -97,6 +101,8 @@ export function AgentMessages({ sessionId }: { sessionId: string }): React.React
           renderToolUse={renderToolUse}
           toolResultsById={toolMessageIndex.resultsByToolUseId}
           activeToolUseIds={activeToolUseIds}
+          blockedToolUseIds={blockedToolUseIds}
+          running={running && group.resultIndex === undefined}
           streamingAssistantUuid={streamingAssistantUuid}
           hideToolResult={hideToolResult}
           footer={<>

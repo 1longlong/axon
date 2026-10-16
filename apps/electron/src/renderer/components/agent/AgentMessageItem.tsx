@@ -4,7 +4,9 @@ import type { SDKAssistantMessage, SDKContentBlock, SDKMessage, SDKResultMessage
 import { cn } from '@/lib/utils'
 import { MarkdownText } from '@/components/chat/MarkdownText'
 import { ThinkingBlock } from '@/components/chat/ThinkingBlock'
-import { agentMessageText, stringifyAgentContent } from '@/lib/agent-message'
+import { agentMessageText, isAgentUserStoppedResult, stringifyAgentContent } from '@/lib/agent-message'
+import { groupAgentActivities, summarizeAgentActivity } from '@/lib/agent-activity-groups'
+import type { AgentActivityGroup as ActivityGroup, AgentTurnBlock } from '@/lib/agent-activity-groups'
 
 function resolveMessageDate(createdAt: number | undefined): Date | undefined {
   if (createdAt === undefined || !Number.isFinite(createdAt) || createdAt < 0) return undefined
@@ -95,12 +97,14 @@ function ToolCall({ tool, result, running }: { tool: SDKToolUseBlock; result?: S
   return <details className={cn('group/tool min-w-0 rounded-[8px] border border-transparent text-xs open:border-border open:bg-[hsl(var(--content-area))] open:shadow-xs', result?.is_error && 'open:border-destructive/40')}>
     <summary aria-label={`工具调用 ${tool.name}`} className={cn('flex min-w-0 cursor-pointer list-none items-center gap-2 rounded-md px-2 py-1.5 text-muted-foreground hover:bg-muted/40 hover:text-foreground group-open/tool:rounded-b-none group-open/tool:border-b group-open/tool:border-border group-open/tool:bg-muted/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&::-webkit-details-marker]:hidden', result?.is_error && 'hover:bg-destructive/5')}>
       {running ? <Loader2 size={14} className="shrink-0 animate-spin text-muted-foreground" aria-label="执行中" />
-        : result?.is_error ? <span className="flex size-3.5 shrink-0 items-center justify-center" role="img" aria-label="执行失败"><span className="size-1.5 rounded-full bg-destructive" /></span>
+        : result?.execution_status === 'unknown' ? <AlertCircle size={14} className="shrink-0 text-muted-foreground" aria-label="执行结果未知" />
+          : result?.is_error ? <span className="flex size-3.5 shrink-0 items-center justify-center" role="img" aria-label="执行失败"><span className="size-1.5 rounded-full bg-destructive" /></span>
           : result ? <Check size={14} strokeWidth={2.5} className="shrink-0 text-emerald-600 dark:text-emerald-400" aria-label="执行成功" />
             : <Circle size={14} className="shrink-0 text-muted-foreground" aria-label="暂无结果" />}
       <span className="flex min-w-0 flex-1 items-center font-mono" title={label}>
         <span className={cn('max-w-[50%] shrink-0 truncate font-semibold', result?.is_error ? 'text-destructive' : 'text-foreground')}>{name}</span>
         {detail && <><span aria-hidden="true" className="shrink-0 whitespace-pre text-muted-foreground/50">{' · '}</span><span className="min-w-0 truncate">{detail}</span></>}
+        {result?.execution_status === 'unknown' && <span className="ml-2 shrink-0 font-sans text-muted-foreground">结果未知</span>}
       </span>
       <ChevronDown size={12} className="shrink-0 transition-transform group-open/tool:rotate-180 motion-reduce:transition-none" />
     </summary>
@@ -136,7 +140,8 @@ const ERROR_CATEGORY_LABELS = {
   persistence: '存储错误', canceled: '已停止', unknown: '未知错误',
 } as const
 
-function ResultError({ result }: { result: SDKResultMessage }): React.ReactElement {
+function ResultError({ result }: { result: SDKResultMessage }): React.ReactElement | null {
+  if (isAgentUserStoppedResult(result)) return null
   const error = result.error
   const stopped = result.stopped_by_user === true || error?.category === 'canceled' || result.terminal_reason === 'stopped'
   const message = error?.message ?? result.errors?.join('；') ?? result.terminal_reason ?? 'Agent 运行失败'
@@ -144,30 +149,79 @@ function ResultError({ result }: { result: SDKResultMessage }): React.ReactEleme
   return <div className={cn('rounded-md border px-3 py-2 text-xs', stopped ? 'bg-muted/20 text-muted-foreground' : 'border-destructive/40 bg-destructive/5 text-destructive')}><div className="flex items-center gap-1.5 font-medium"><AlertCircle size={13} />{label}</div><p className="mt-1">{message}</p></div>
 }
 
-/** 单轮所有 assistant/tool/result 片段共用无头像回复容器，按原消息顺序展示完整宽度的执行流。 */
-export function AgentAssistantTurnItem({ messages, renderToolUse, hideToolResult, toolResultsById, activeToolUseIds, streamingAssistantUuid, footer }: {
+/** 活动默认展开，正常收束收起；用户中断保留展开选择，异常/待交互工具始终可见。 */
+function AgentActivityGroup({ group, renderItem, toolResultsById, activeToolUseIds, blockedToolUseIds }: {
+  group: ActivityGroup
+  renderItem: (item: AgentTurnBlock) => React.ReactNode
+  toolResultsById?: ReadonlyMap<string, SDKToolResultBlock>
+  activeToolUseIds?: ReadonlySet<string>
+  blockedToolUseIds?: ReadonlySet<string>
+}): React.ReactElement {
+  const contentId = React.useId()
+  const [choice, setChoice] = React.useState<{ closed: boolean; open: boolean }>()
+  const open = choice && (choice.closed === group.closed || group.interrupted)
+    ? choice.open : !group.closed || group.interrupted === true
+  // 普通收束重置摘要，中断沿用手动选择；新增 delta 不反复打开/关闭详情。
+  React.useEffect(() => { if (!group.interrupted) setChoice(undefined) }, [group.closed, group.interrupted])
+  const tools = group.items.filter((item) => item.block.type === 'tool_use').map((item) => item.block as SDKToolUseBlock)
+  const unknownIds = new Set(tools.filter((tool) => toolResultsById?.get(tool.id)?.execution_status === 'unknown').map((tool) => tool.id))
+  const failedIds = new Set(tools.filter((tool) => toolResultsById?.get(tool.id)?.is_error && !unknownIds.has(tool.id)).map((tool) => tool.id))
+  const blocked = tools.some((tool) => blockedToolUseIds?.has(tool.id))
+  const active = !group.closed || tools.some((tool) => activeToolUseIds?.has(tool.id))
+
+  return <section className="min-w-0" aria-label="执行活动组">
+    <button type="button" aria-expanded={open} aria-controls={contentId}
+      onClick={() => setChoice({ closed: group.closed, open: !open })}
+      className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">
+      {active ? <Loader2 size={14} className="shrink-0 animate-spin motion-reduce:animate-none" />
+        : failedIds.size ? <AlertCircle size={14} className="shrink-0 text-destructive" />
+          : <Wrench size={14} className="shrink-0" />}
+      <span className="min-w-0 flex-1">{active ? '进行中 · ' : ''}{summarizeAgentActivity(group)}</span>
+      {blocked && <span className="shrink-0 text-amber-600 dark:text-amber-400">等待交互</span>}
+      {failedIds.size > 0 && <span className="shrink-0 text-destructive">{failedIds.size} 项失败</span>}
+      {unknownIds.size > 0 && <span className="shrink-0">{unknownIds.size} 项结果未知</span>}
+      <ChevronDown size={12} className={cn('shrink-0 transition-transform motion-reduce:transition-none', open && 'rotate-180')} />
+    </button>
+    <div id={contentId} className="ml-3 space-y-1 border-l border-border-subtle pl-2">
+      {group.items.map((item) => {
+        const tool = item.block.type === 'tool_use' ? item.block as SDKToolUseBlock : undefined
+        // 收起只隐藏普通记录；失败、审批/追问和带独立状态的子任务卡片不能埋进摘要。
+        const attention = tool && (failedIds.has(tool.id) || unknownIds.has(tool.id) || blockedToolUseIds?.has(tool.id)
+          || activeToolUseIds?.has(tool.id) || tool.name === 'Agent' || tool.name === 'AskUserQuestion')
+        return <div key={item.key} hidden={!open && !attention}>{renderItem(item)}</div>
+      })}
+    </div>
+  </section>
+}
+
+/** 单轮按真实顺序投影正文与连续活动组，工具回传仍关联原调用，历史本身不重排。 */
+export function AgentAssistantTurnItem({ messages, renderToolUse, hideToolResult, toolResultsById, activeToolUseIds, blockedToolUseIds, streamingAssistantUuid, running = false, footer }: {
   messages: readonly SDKMessage[]
   renderToolUse?: (block: SDKToolUseBlock) => React.ReactNode
   hideToolResult?: (toolUseId: string) => boolean
   toolResultsById?: ReadonlyMap<string, SDKToolResultBlock>
   activeToolUseIds?: ReadonlySet<string>
+  blockedToolUseIds?: ReadonlySet<string>
   streamingAssistantUuid?: string
+  running?: boolean
   footer?: React.ReactNode
 }): React.ReactElement {
   const assistants = messages.filter((message): message is SDKAssistantMessage => message.type === 'assistant')
   const copyText = assistants.map(agentMessageText).filter(Boolean).join('\n\n')
   const last = assistants.at(-1) ?? messages.at(-1)
+  const parts = groupAgentActivities(messages, { running, streamingAssistantUuid, hideToolResult })
+  const renderItem = (item: AgentTurnBlock): React.ReactNode => <AssistantBlock block={item.block}
+    renderToolUse={renderToolUse} toolResultsById={toolResultsById} activeToolUseIds={activeToolUseIds} isStreaming={item.isStreaming} />
 
   return <article className="group/message min-w-0">
     <div className="min-w-0 w-full space-y-1">
-      {messages.map((message, messageIndex) => {
-        if (message.type === 'assistant') return (message as SDKAssistantMessage).message.content.map((block, blockIndex) => <AssistantBlock key={`${message.uuid ?? messageIndex}-${blockIndex}`} block={block} renderToolUse={renderToolUse} toolResultsById={toolResultsById} activeToolUseIds={activeToolUseIds} isStreaming={message.uuid === streamingAssistantUuid && blockIndex === (message as SDKAssistantMessage).message.content.length - 1} />)
-        if (message.type === 'user') return ((message as SDKUserMessage).message?.content ?? []).filter((block): block is SDKToolResultBlock => block.type === 'tool_result' && typeof block.tool_use_id === 'string' && !hideToolResult?.(block.tool_use_id)).map((block) => <ToolResult key={`result-${block.tool_use_id}`} block={block} />)
-        if (message.type === 'result') return (message as SDKResultMessage).subtype === 'success' ? null : <ResultError key={`run-result-${messageIndex}`} result={message as SDKResultMessage} />
-        if (message.type === 'system' && message.subtype === 'permission_denied') return <p key={`permission-${messageIndex}`} className="text-xs text-muted-foreground">工具权限已拒绝：{String((message as SDKSystemMessage).message ?? '未执行')}</p>
-        return null
-      })}
-      {last && copyText && <MessageMeta message={last} align="left" copyText={copyText} />}
+      {parts.map((part) => part.kind === 'activity'
+        ? <AgentActivityGroup key={part.key} group={part} renderItem={renderItem} toolResultsById={toolResultsById}
+            activeToolUseIds={activeToolUseIds} blockedToolUseIds={blockedToolUseIds} />
+        : part.kind === 'block'
+          ? <React.Fragment key={part.key}>{renderItem(part)}</React.Fragment>
+          : <AgentMessageItem key={part.key} message={part.message} />)}
+      {!running && last && copyText && <MessageMeta message={last} align="left" copyText={copyText} />}
       {footer}
     </div>
   </article>

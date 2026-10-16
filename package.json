@@ -1,6 +1,6 @@
 {
   "name": "axon",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "本地优先的 Electron AI 桌面 Agent（可插拔 Agent Runtime）",
   "type": "module",
   "private": true,
@@ -11,6 +11,8 @@
   "scripts": {
     "dev": "bun run --filter='@axon/electron' dev",
     "app-server:dev": "bun run apps/app-server/src/main.ts",
+    "exec:dev": "bun run --no-env-file --config=apps/exec/resources/bun-runtime.toml apps/exec/src/main.ts",
+    "exec:build": "bun run apps/exec/scripts/build.ts",
     "electron:build": "bun run --filter='@axon/electron' build",
     "build": "bun run --filter='*' build",
     "package": "bun run --filter='@axon/electron' package",

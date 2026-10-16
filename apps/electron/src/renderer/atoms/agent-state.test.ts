@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createStore } from 'jotai/vanilla'
-import type { AgentGenerationEvent, AgentProject, AgentSessionMeta, AgentRunIdentityEvent, BackendRunControlInput, BackendOwnedRun, SDKMessage } from '@axon/shared'
+import type { AgentGenerationEvent, AgentProject, AgentSessionMeta, AgentRunIdentityEvent, AgentPauseSnapshot, AgentPauseChangedEvent, BackendRunControlInput, BackendOwnedRun, SDKMessage } from '@axon/shared'
 import {
   AgentRendererController,
   agentStateAtom,
@@ -31,6 +31,27 @@ const completion = {
   usage: { input_tokens: 0, output_tokens: 0 }, completedAt: 11, durationMs: 1, persisted: true,
 }
 
+test('中断检查点以相同 uuid 替换流式草稿，移除半截工具块；终态后保留部分内容', () => {
+  let state = reduceAgentGenerationEvent(createInitialAgentRendererState(), event({ type: 'run_started' }))
+  state = reduceAgentGenerationEvent(state, event({ type: 'stream', payload: { kind: 'sdk_delta', delta: {
+    uuid: 'partial', deltas: [
+      { type: 'text_delta', contentIndex: 0, delta: '部分正文' },
+      { type: 'toolcall_delta', contentIndex: 1, delta: '{"command":"', toolCall: { id: 'half', name: 'Bash' } },
+    ],
+  } } }))
+  const checkpoint: SDKMessage = {
+    type: 'assistant', uuid: 'partial', isPartial: true, parent_tool_use_id: null,
+    message: { content: [{ type: 'text', text: '部分正文' }], stop_reason: 'interrupted' },
+  }
+  state = reduceAgentGenerationEvent(state, event({ type: 'stream', payload: { kind: 'sdk_message', message: checkpoint } }))
+  state = reduceAgentGenerationEvent(state, event({ type: 'run_finished', completion: {
+    ...completion, terminalReason: 'stopped', resultSubtype: 'error', stoppedByUser: true,
+  } }))
+  expect(state.messagesBySession['session-1']).toEqual([checkpoint])
+  expect(state.streamingAssistantUuidBySession['session-1']).toBeUndefined()
+  expect(state.activeToolUseIdsBySession['session-1']).toBeUndefined()
+})
+
 type WithoutRunIdentity<T> = T extends AgentGenerationEvent
   ? Omit<T, 'sessionId' | 'runStartedAt' | 'source'>
   : never
@@ -53,6 +74,10 @@ function createApi(overrides: Partial<AgentRendererApi> = {}): AgentRendererApi 
     getMessages: async () => [],
     send: async () => ({ success: true, disposition: 'started' }),
     stop: async () => false,
+    pause: async (target) => ({ ...target, turnId: 'turn-1', runStartedAt: 10, pauseId: 'pause-1', state: 'paused' }),
+    getPause: async () => null,
+    continue: async () => ({ success: true, disposition: 'started' }),
+    onPauseChanged: () => () => {},
     respondAskUser: async () => false,
     listQueuedMessages: async () => [],
     cancelQueuedMessage: async () => false,
@@ -91,14 +116,130 @@ function createApi(overrides: Partial<AgentRendererApi> = {}): AgentRendererApi 
 function controlHarness(overrides: Partial<AgentRendererApi> = {}) {
   let messageListener!: (event: AgentGenerationEvent) => void
   let runListener!: (event: AgentRunIdentityEvent) => void
+  let pauseListener!: (event: AgentPauseChangedEvent) => void
   const store = createStore()
   const controller = new AgentRendererController(createApi({ ...overrides,
     onEvent: (callback) => { messageListener = callback; return () => {} },
     onRunChanged: (callback) => { runListener = callback; return () => {} },
+    onPauseChanged: (callback) => { pauseListener = callback; return () => {} },
   }), store)
   return { store, controller, emit: (value: AgentGenerationEvent) => messageListener(value),
-    identify: (value: AgentRunIdentityEvent) => runListener(value) }
+    identify: (value: AgentRunIdentityEvent) => runListener(value), pauseChanged: (sessionId: string) => pauseListener({ sessionId }) }
 }
+
+test('暂停同步防重复并捕获原轮，终态事件不提前形成继续入口，响应后仍重读快照', async () => {
+  const gate = deferred<AgentPauseSnapshot>()
+  const pause: AgentPauseSnapshot = { sessionId: 'session-1', turnId: 'turn-1', runId: 'run-1', runStartedAt: 10, pauseId: 'pause-1', state: 'paused' }
+  let stored: AgentPauseSnapshot | null = null
+  const calls: BackendRunControlInput[] = []
+  const f = controlHarness({ pause: async (target) => { calls.push(target); return gate.promise }, getPause: async () => stored })
+  const cleanup = f.controller.start()
+  f.identify({ phase: 'started', run: pause }); f.emit(event({ type: 'run_started' }))
+  const pausing = f.controller.pause('session-1')
+  expect(f.store.get(agentStateAtom).pauseOperationsBySession['session-1']).toBe('pausing')
+  expect(await f.controller.pause('session-1')).toBe(false)
+  f.emit(event({ type: 'run_finished', completion: { ...completion, stoppedByUser: true, terminalReason: 'stopped' } }))
+  f.identify({ phase: 'finished', run: pause })
+  expect(await f.controller.continue('session-1')).toMatchObject({ success: false })
+  stored = pause; gate.resolve(pause)
+  expect(await pausing).toBe(true)
+  expect(calls).toEqual([{ sessionId: 'session-1', runId: 'run-1' }])
+  expect(f.store.get(agentStateAtom).pausesBySession['session-1']).toEqual(pause)
+  expect(f.store.get(agentStateAtom).pauseOperationsBySession['session-1']).toBeUndefined()
+  cleanup()
+})
+
+test('继续只发送一次确切 pauseId，真实新轮开始解除提交锁，可以再暂停新轮', async () => {
+  const gate = deferred<Awaited<ReturnType<AgentRendererApi['continue']>>>()
+  const pause: AgentPauseSnapshot = { sessionId: 'session-1', turnId: 'turn-1', runId: 'old', runStartedAt: 10, pauseId: 'pause-1', state: 'paused' }
+  const continued: string[] = [], paused: string[] = []
+  const f = controlHarness({ getPause: async () => pause, continue: async (input) => { continued.push(input.pauseId); return gate.promise },
+    pause: async (target) => { paused.push(target.runId); return { ...pause, runId: target.runId } } })
+  const cleanup = f.controller.start()
+  await f.controller.loadPause('session-1')
+  const continuing = f.controller.continue('session-1')
+  expect(await f.controller.continue('session-1')).toMatchObject({ success: false })
+  f.identify({ phase: 'started', run: { sessionId: 'session-1', runId: 'new', runStartedAt: 20 } })
+  f.emit(event({ type: 'run_started' }, 20))
+  expect(f.store.get(agentStateAtom).pauseOperationsBySession['session-1']).toBeUndefined()
+  expect(await f.controller.pause('session-1')).toBe(true)
+  expect(continued).toEqual(['pause-1']); expect(paused).toEqual(['new'])
+  gate.resolve({ success: true, disposition: 'started' }); await continuing
+  cleanup()
+})
+
+test('另一入口暂停通知只触发快照/历史读取，观察运行不获得 owner；乱序或释放后不复活旧凭据', async () => {
+  const old = deferred<AgentPauseSnapshot | null>()
+  const pause: AgentPauseSnapshot = { sessionId: 'session-1', turnId: 'turn-1', runId: 'old', runStartedAt: 10, pauseId: 'pause-1', state: 'paused' }
+  let reads = 0
+  const f = controlHarness({ getPause: async () => ++reads === 1 ? old.promise : null })
+  const cleanup = f.controller.start()
+  const loading = f.controller.loadPause('session-1')
+  f.pauseChanged('session-1')
+  await f.controller.loadPause('session-1')
+  old.resolve(pause); await loading
+  expect(f.store.get(agentStateAtom).pausesBySession['session-1']).toBeUndefined()
+  expect(f.store.get(agentStateAtom).ownedRunsBySession).toEqual({})
+  expect(await f.controller.pause('session-1')).toBe(false)
+  cleanup()
+  f.pauseChanged('session-1')
+  expect(f.store.get(agentStateAtom).pausesBySession).toEqual({})
+})
+
+test('暂停应答后的重读期间页面释放，旧 finally 不能清理新页面的操作锁', async () => {
+  const read = deferred<AgentPauseSnapshot | null>(), entered = deferred<void>()
+  const pause: AgentPauseSnapshot = { sessionId: 'session-1', turnId: 'turn-1', runId: 'run-1', runStartedAt: 10, pauseId: 'pause-1', state: 'paused' }
+  const f = controlHarness({ getPause: async () => { entered.resolve(); return read.promise } })
+  const cleanup = f.controller.start()
+  f.identify({ phase: 'started', run: pause }); f.emit(event({ type: 'run_started' }))
+  const pausing = f.controller.pause('session-1')
+  await entered.promise
+  cleanup()
+  const restarted = f.controller.start()
+  f.store.set(agentStateAtom, (state) => ({ ...state, pauseOperationsBySession: { 'session-1': 'pausing' } }))
+  read.resolve(pause); await pausing
+  expect(f.store.get(agentStateAtom).pauseOperationsBySession['session-1']).toBe('pausing')
+  expect(f.store.get(agentStateAtom).pausesBySession['session-1']).toBeUndefined()
+  restarted()
+})
+
+test('原入口的状态失效通知不重复读取完整历史，避免与终态校准争抢分页快照', async () => {
+  let historyReads = 0
+  const f = controlHarness({ getMessages: async () => { historyReads++; return [] } })
+  const cleanup = f.controller.start()
+  f.identify({ phase: 'started', run: { sessionId: 'session-1', runId: 'run-1', runStartedAt: 10 } })
+  f.emit(event({ type: 'run_started' }))
+  f.pauseChanged('session-1')
+  await f.controller.loadPause('session-1')
+  expect(historyReads).toBe(0)
+  f.emit(event({ type: 'run_finished', completion }))
+  f.pauseChanged('session-1')
+  await f.controller.loadPause('session-1')
+  expect(historyReads).toBe(1)
+  cleanup()
+})
+
+test('传输未知交付不重发，失败复读权威暂停状态；跨入口继续运行只恢复观察状态', async () => {
+  let attempts = 0
+  const pause: AgentPauseSnapshot = { sessionId: 'session-1', turnId: 'turn-1', runId: 'old', runStartedAt: 10, pauseId: 'pause-1', state: 'paused' }
+  let snapshot: AgentPauseSnapshot | null = pause
+  let runs: Awaited<ReturnType<AgentRendererApi['listActiveRuns']>> = []
+  const f = controlHarness({ getPause: async () => snapshot, continue: async () => { attempts++; throw new Error('PRIVATE_TRANSPORT') }, listActiveRuns: async () => runs })
+  const cleanup = f.controller.start()
+  await f.controller.loadPause('session-1')
+  expect(await f.controller.continue('session-1')).toMatchObject({ success: false })
+  expect(attempts).toBe(1)
+  expect(f.store.get(agentStateAtom).lastError?.message).not.toContain('PRIVATE')
+  snapshot = null; runs = [{ sessionId: 'session-1', runStartedAt: 20, source: 'renderer' }]
+  await f.controller.loadPause('session-1', true)
+  expect(f.store.get(agentStateAtom).activeRunsBySession['session-1']).toBe(20)
+  expect(f.store.get(agentStateAtom).ownedRunsBySession['session-1']).toBeUndefined()
+  expect(await f.controller.pause('session-1')).toBe(false)
+  snapshot = pause; runs = []
+  await f.controller.loadPause('session-1', true)
+  expect(f.store.get(agentStateAtom).activeRunsBySession['session-1']).toBeUndefined()
+  cleanup()
+})
 
 interface Deferred<T> { promise: Promise<T>; resolve(value: T): void }
 
@@ -431,6 +572,95 @@ describe('AgentRendererController preload 编排', () => {
 })
 
 describe('Agent 精确轮次与在途历史合并', () => {
+  test('重新读取前已有的活动草稿保留全部块；读取期间无新 delta 也不丢失，可继续累计', async () => {
+    const gate = deferred<SDKMessage[]>(), f = controlHarness({ getMessages: () => gate.promise })
+    const cleanup = f.controller.start()
+    f.emit(event({ type: 'run_started' }))
+    f.emit(event({ type: 'stream', payload: { kind: 'sdk_message', message: assistant('旧缓存', 'old-cache') } }))
+    f.emit(event({ type: 'stream', payload: { kind: 'sdk_delta', delta: { uuid: 'draft', deltas: [
+      { type: 'thinking_delta', contentIndex: 0, delta: '正在分析' },
+      { type: 'text_delta', contentIndex: 1, delta: '已显示的正文\n' },
+      { type: 'toolcall_start', contentIndex: 2, toolCall: { id: 'half', name: 'Read' } },
+      { type: 'toolcall_delta', contentIndex: 2, delta: '{"path":"' },
+    ] } } }))
+    const draft = f.store.get(agentStateAtom).messagesBySession['session-1']!.at(-1)!
+    const loading = f.controller.loadMessages('session-1')
+    gate.resolve([assistant('历史', 'history')])
+    await loading
+    expect(f.store.get(agentStateAtom).messagesBySession['session-1']).toEqual([assistant('历史', 'history'), draft])
+    await f.controller.loadMessages('session-1')
+    expect(f.store.get(agentStateAtom).messagesBySession['session-1']).toEqual([assistant('历史', 'history'), draft])
+    f.emit(event({ type: 'stream', payload: { kind: 'sdk_delta', delta: { uuid: 'draft', deltas: [
+      { type: 'text_delta', contentIndex: 1, delta: '后续' },
+    ] } } }))
+    expect(f.store.get(agentStateAtom).messagesBySession['session-1']!.at(-1)).toMatchObject({ message: { content: [
+      { type: 'thinking', thinking: '正在分析' }, { type: 'text', text: '已显示的正文\n后续' },
+      expect.objectContaining({ type: 'tool_use', argumentsText: '{"path":"' }),
+    ] } })
+    cleanup()
+  })
+
+  for (const removal of ['discard', 'retry'] as const) {
+    test(`读取前已有草稿在读取中被 ${removal} 撤回时，不被旧快照复活`, async () => {
+      const gate = deferred<SDKMessage[]>(), f = controlHarness({ getMessages: () => gate.promise })
+      const cleanup = f.controller.start()
+      f.emit(event({ type: 'run_started' }))
+      f.emit(event({ type: 'stream', payload: { kind: 'sdk_delta', delta: { uuid: 'draft', deltas: [
+        { type: 'text_delta', contentIndex: 0, delta: '待撤回' },
+      ] } } }))
+      const loading = f.controller.loadMessages('session-1')
+      f.emit(event({ type: 'stream', payload: removal === 'discard'
+        ? { kind: 'discard_assistant', uuid: 'draft' }
+        : { kind: 'retry_status', status: { phase: 'scheduled', attempt: 1, maxAttempts: 3, delayMs: 100, discardedAssistantUuid: 'draft' } } }))
+      gate.resolve([assistant('历史', 'history'), assistant('旧快照', 'draft')])
+      await loading
+      expect(f.store.get(agentStateAtom).messagesBySession['session-1']).toEqual([assistant('历史', 'history')])
+      cleanup()
+    })
+  }
+
+  test('读取前草稿不能覆盖磁盘同 UUID 完整值；读取中完整回传原位替换草稿', async () => {
+    for (const completeDuringRead of [false, true]) {
+      const gate = deferred<SDKMessage[]>(), f = controlHarness({ getMessages: () => gate.promise })
+      const cleanup = f.controller.start()
+      f.emit(event({ type: 'run_started' }))
+      f.emit(event({ type: 'stream', payload: { kind: 'sdk_delta', delta: { uuid: 'draft', deltas: [
+        { type: 'text_delta', contentIndex: 0, delta: '只有前半段' },
+      ] } } }))
+      const loading = f.controller.loadMessages('session-1')
+      if (completeDuringRead) f.emit(event({ type: 'stream', payload: { kind: 'sdk_message', message: assistant('实时完整回复', 'draft') } }))
+      gate.resolve([assistant('磁盘完整回复', 'draft')])
+      await loading
+      expect(f.store.get(agentStateAtom).messagesBySession['session-1']).toEqual([
+        assistant(completeDuringRead ? '实时完整回复' : '磁盘完整回复', 'draft'),
+      ])
+      cleanup()
+    }
+  })
+
+  test('只保留当前活跃轮草稿，过期草稿和读取期间换轮的旧草稿不残留', async () => {
+    const gate = deferred<SDKMessage[]>(), f = controlHarness({ getMessages: () => gate.promise })
+    const cleanup = f.controller.start()
+    f.emit(event({ type: 'run_started' }))
+    f.emit(event({ type: 'stream', payload: { kind: 'sdk_delta', delta: { uuid: 'old-draft', deltas: [
+      { type: 'text_delta', contentIndex: 0, delta: '旧轮片段' },
+    ] } } }))
+    const loading = f.controller.loadMessages('session-1')
+    f.emit(event({ type: 'run_started' }, 20))
+    f.emit(event({ type: 'stream', payload: { kind: 'sdk_delta', delta: { uuid: 'new-draft', deltas: [
+      { type: 'text_delta', contentIndex: 0, delta: '新轮片段' },
+    ] } } }, 20))
+    gate.resolve([assistant('历史', 'history')])
+    await loading
+    expect(f.store.get(agentStateAtom).messagesBySession['session-1']).toEqual([assistant('历史', 'history'), assistant('新轮片段', 'new-draft')])
+    cleanup()
+    // 无活跃轮时，残留的流 UUID 本身不能授予保留旧草稿的资格。
+    f.store.set(agentStateAtom, { ...createInitialAgentRendererState(),
+      streamingAssistantUuidBySession: { 'session-1': 'old-draft' }, messagesBySession: { 'session-1': [assistant('旧片段', 'old-draft')] } })
+    await f.controller.loadMessages('session-1')
+    expect(f.store.get(agentStateAtom).messagesBySession['session-1']).toEqual([assistant('历史', 'history')])
+  })
+
   test('停止同步捕获真实 ID；旧终态不撤销新目标，无目标时不查询当前轮', async () => {
     const calls: BackendRunControlInput[] = [], gate = deferred<boolean>()
     let queries = 0

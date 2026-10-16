@@ -6,9 +6,9 @@ import { PassThrough } from 'node:stream'
 import { createBackend, createBackendPaths, createCredentialCodec } from '@axon/core'
 import type { AxonBackend } from '@axon/core'
 import { APP_SERVER_METHODS as methods, APP_SERVER_CLIENT_METHODS as reverse, APP_SERVER_NOTIFICATIONS as notices } from '@axon/shared'
-import type { AgentProviderAdapter, AgentQueryInput, AgentStreamPayload, AgentSessionMeta,
-  AppServerClient, AppServerAgentRunEvent, AppServerAgentQueueEvent, AppServerAgentMetadataEvent,
-  AgentToolPermissionResult, RpcJsonObject, RpcJsonValue } from '@axon/shared'
+import type { AgentContinueQueryInput, AgentProviderAdapter, AgentQueryInput, AgentStreamPayload, AgentSessionMeta,
+  AppServerClient, AppServerAgentRunEvent, AppServerAgentQueueEvent, AppServerAgentMetadataEvent, AppServerAgentPauseChangedEvent,
+  AgentToolPermissionResult, RpcJsonObject, RpcJsonValue, SDKUserMessage } from '@axon/shared'
 import { AppServerConnection, JsonRpcPeer } from './index'
 import { toWireValue } from './wire-value'
 
@@ -16,8 +16,13 @@ const cleanups: Array<() => void> = []
 afterEach(() => { for (const cleanup of cleanups.splice(0).reverse()) cleanup() })
 
 class Adapter implements AgentProviderAdapter {
+  readonly continuations: AgentContinueQueryInput[] = []
   handler: (input: AgentQueryInput) => AsyncIterable<AgentStreamPayload> = async function* () { yield* success() }
   query(input: AgentQueryInput) { return this.handler(input) }
+  async *continueQuery(input: AgentContinueQueryInput): AsyncIterable<AgentStreamPayload> {
+    this.continuations.push(input)
+    yield* success()
+  }
   abort(): void {}
   dispose(): void {}
   async drain(): Promise<void> {}
@@ -69,6 +74,7 @@ async function open(options: { validateCreate?: () => Promise<void>; titleGate?:
   const persisted: boolean[] = []
   const queues: AppServerAgentQueueEvent[] = []
   const metadata: AppServerAgentMetadataEvent[] = []
+  const pauseChanges: AppServerAgentPauseChangedEvent[] = []
   parent.handleNotification(notices.AGENT_RUN, (params) => {
     const packet = params as unknown as AppServerAgentRunEvent
     const event = packet.event.event
@@ -83,15 +89,103 @@ async function open(options: { validateCreate?: () => Promise<void>; titleGate?:
   })
   parent.handleNotification(notices.AGENT_QUEUE, (params) => { queues.push(params as unknown as AppServerAgentQueueEvent) })
   parent.handleNotification(notices.AGENT_METADATA, (params) => { metadata.push(params as unknown as AppServerAgentMetadataEvent) })
+  parent.handleNotification(notices.AGENT_PAUSE_CHANGED, (params) => { pauseChanges.push(params as unknown as AppServerAgentPauseChangedEvent) })
   const request = (method: string, input?: RpcJsonValue, client = main, signal?: AbortSignal) => parent.request(method,
     { clientId: client.clientId, ...(input === undefined ? {} : { input }) }, { timeoutMs: 0, signal })
   const create = async (title?: string) => await request(methods.AGENT_CREATE_SESSION, {
     projectId: project.id, channelId: channel.id, modelId: 'fixture-model', ...(title ? { title } : {}),
   }) as unknown as AgentSessionMeta
-  return { parent, child, backend: backend!, adapter, main, quick, request, create, events, queues, metadata, persisted }
+  return { parent, child, backend: backend!, adapter, main, quick, request, create, events, queues, metadata, pauseChanges, persisted }
 }
 
 describe('Agent 应用命令与原始轮次路由', () => {
+  test('暂停/快照/继续通过真实 RPC，跨入口暂停和旧身份拒绝；继续是新轮且保留快捷来源', async () => {
+    const f = await open()
+    const session = await f.create('暂停控制')
+    const started = Promise.withResolvers<void>(), canceled = Promise.withResolvers<void>(), tail = Promise.withResolvers<void>()
+    f.adapter.handler = async function* (input) {
+      started.resolve()
+      await waitForAbort(input.abortSignal!)
+      canceled.resolve()
+      await tail.promise
+      yield* success()
+    }
+    const sending = f.request(methods.AGENT_SEND, { sessionId: session.id, text: '原任务' })
+    await started.promise
+    const run = await f.request(methods.AGENT_GET_RUN, session.id) as RpcJsonObject
+    const target = { sessionId: session.id, runId: run.runId! }
+    await expect(f.request(methods.AGENT_PAUSE, target, f.quick)).rejects.toMatchObject({ code: -32020 })
+    const pausing = f.request(methods.AGENT_PAUSE, target)
+    await canceled.promise
+    const pending = await f.request(methods.AGENT_GET_PAUSE, session.id, f.quick) as RpcJsonObject
+    expect(pending.state).toBe('pausing')
+    expect(await f.request(methods.AGENT_CONTINUE, { sessionId: session.id, pauseId: pending.pauseId! }, f.quick))
+      .toMatchObject({ success: false })
+    tail.resolve()
+    const paused = await pausing as RpcJsonObject
+    await sending
+    expect(paused.state).toBe('paused')
+    expect(await f.request(methods.AGENT_GET_PAUSE, session.id, f.quick)).toEqual(paused)
+    expect(f.pauseChanges.some((notice) => notice.clientId === f.main.clientId && notice.event.sessionId === session.id)).toBe(true)
+    expect(f.pauseChanges.some((notice) => notice.clientId === f.quick.clientId && notice.event.sessionId === session.id)).toBe(true)
+    expect(f.pauseChanges.every((notice) => Object.keys(notice.event).length === 1)).toBe(true)
+    const external = await f.parent.request(methods.REGISTER_CLIENT, { kind: 'external' }) as unknown as AppServerClient
+    await expect(f.request(methods.AGENT_CONTINUE, { sessionId: session.id, pauseId: paused.pauseId! }, external))
+      .rejects.toMatchObject({ code: -32602 })
+    f.adapter.handler = async function* () { yield* success() }
+    expect(await f.request(methods.AGENT_CONTINUE, { sessionId: session.id, pauseId: paused.pauseId! }, f.quick))
+      .toMatchObject({ success: true })
+    expect(await f.request(methods.AGENT_CONTINUE, { sessionId: session.id, pauseId: paused.pauseId! }, f.quick))
+      .toMatchObject({ success: false })
+    expect(await f.request(methods.AGENT_GET_PAUSE, session.id)).toBeNull()
+    const users = f.backend.sessions.getMessages(session.id).filter((message) => message.type === 'user')
+    expect(users).toHaveLength(1)
+    expect(f.adapter.continuations).toHaveLength(1)
+    expect(f.adapter.continuations[0]).not.toHaveProperty('prompt')
+    expect(f.backend.sessions.getMessages(session.id).find((message) => message.type === 'system' && message.subtype === 'axon_continued'))
+      .toMatchObject({ input_origin: 'quick', turn_id: paused.turnId, resumed_pause_id: paused.pauseId })
+    expect(users.filter((message) => (message as SDKUserMessage).isSynthetic !== true)).toHaveLength(1)
+    const starts = f.events.filter((packet) => packet.event.event.type === 'run_started')
+    expect(starts).toHaveLength(2)
+    expect(starts[1]!.event.run.runId).not.toBe(starts[0]!.event.run.runId)
+  })
+
+  test('external 通过标准会话命令设置非交互策略；执行无需反向审批或追问 RPC', async () => {
+    const f = await open()
+    const template = await f.create('交互模板')
+    expect(template).toMatchObject({ approvalPolicy: 'onRequest', userInputPolicy: 'ask' })
+    const external = await f.parent.request(methods.REGISTER_CLIENT, { kind: 'external' }) as unknown as AppServerClient
+    const session = await f.request(methods.AGENT_CREATE_SESSION, {
+      title: '非交互会话', projectId: template.projectId!, channelId: template.channelId!, modelId: template.modelId!,
+      approvalPolicy: 'never', userInputPolicy: 'reject', sandboxMode: 'readOnly',
+    }, external) as unknown as AgentSessionMeta
+    expect(session).toMatchObject({ approvalPolicy: 'never', userInputPolicy: 'reject', sandboxMode: 'readOnly' })
+    const reverseCalls: string[] = []
+    f.parent.handle(reverse.AGENT_PERMISSION, () => { reverseCalls.push('permission'); throw new Error('不应发起审批 RPC') })
+    f.parent.handle(reverse.AGENT_ASK_USER, () => { reverseCalls.push('ask'); throw new Error('不应发起追问 RPC') })
+    f.adapter.handler = async function* (input) {
+      expect(input.executionPolicy).toMatchObject({ approvalPolicy: 'never', userInputPolicy: 'reject' })
+      expect(await input.canUseTool!('Write', {}, { toolUseId: 'write',
+        executionPolicy: input.executionPolicy!, toolExecution: { kind: 'runtime' } }))
+        .toMatchObject({ behavior: 'deny' })
+      const ask = input.customTools!.find((tool) => tool.name === 'AskUserQuestion')!
+      expect(await ask.execute({ questions: [{ question: '选项？', options: [] }] }, { toolUseId: 'ask' }))
+        .toMatchObject({ isError: true })
+      yield* success()
+    }
+    expect(await f.request(methods.AGENT_SEND, { sessionId: session.id, text: '分析任务' }, external))
+      .toMatchObject({ success: true })
+    expect(reverseCalls).toEqual([])
+    expect(f.events.filter((packet) => packet.clientId === external.clientId)
+      .some((packet) => ['permission_request', 'ask_user_request'].includes(packet.event.event.type))).toBe(false)
+    expect(await f.request(methods.AGENT_UPDATE_SESSION, {
+      sessionId: session.id, update: { approvalPolicy: null, userInputPolicy: null },
+    }, external)).toMatchObject({ approvalPolicy: 'onRequest', userInputPolicy: 'ask' })
+    await expect(f.request(methods.AGENT_UPDATE_SESSION, {
+      sessionId: session.id, update: { userInputPolicy: 'autoAnswer' },
+    }, external)).rejects.toMatchObject({ code: -32020, data: { code: 'invalid_input' } })
+  })
+
   test('会话 CRUD 通过协议；拒绝自报 owner、恢复 artifact 和运行上下文，失败不改持久化', async () => {
     const f = await open()
     const session = await f.create('协议会话')
@@ -106,7 +200,7 @@ describe('Agent 应用命令与原始轮次路由', () => {
       .rejects.toMatchObject({ code: -32020, data: { code: 'invalid_input' } })
     expect(await f.request(methods.AGENT_SEND, { sessionId: session.id, text: '伪造', synthetic: true }))
       .toMatchObject({ success: false, code: 'invalid_input' })
-    for (const field of ['owner', 'source', 'inputOrigin']) {
+    for (const field of ['owner', 'source', 'inputOrigin', 'synthetic', 'continuationPauseId']) {
       expect(await f.request(methods.AGENT_SEND, { sessionId: session.id, text: '伪造来源', [field]: f.quick.clientId }))
         .toMatchObject({ success: false, code: 'invalid_input' })
     }

@@ -1,11 +1,12 @@
 /** Agent UI 专用独立测试入口；中立事件为夹具，业务工厂/协议/持久化使用实际实现。 */
 import { writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { AppServerConnection, JsonRpcPeer, createPrivateHostPorts } from '@axon/app-server'
 import { createBackend, createBackendPaths } from '@axon/core'
 import { checkAgentEnvironment } from '@axon/host-node'
 import { AGENT_RUNTIME_CAPABILITIES, APP_SERVER_RPC_OPTIONS } from '@axon/shared'
-import type { AgentProviderAdapter, AgentQueryInput, AgentStreamPayload } from '@axon/shared'
+import type { AgentContinueQueryInput, AgentProviderAdapter, AgentQueryInput, AgentStreamPayload } from '@axon/shared'
 import { ZimaAgentAdapter, assertZimaConnection } from '@axon/runtime-adapters'
 import type { AgentSessionCreateInput } from '@axon/shared'
 import { isolateAppServerStdio } from '../../app-server/src/stdio-isolation'
@@ -38,8 +39,35 @@ const adapter: AgentProviderAdapter = {
     sandboxedTools: ['bash', 'read', 'write', 'edit', 'grep', 'glob', 'ls'],
   }),
   getReasoningCapability: () => ({ levels: ['off', 'low', 'medium', 'high'], defaultLevel: 'medium' }),
+  async *continueQuery(input: AgentContinueQueryInput): AsyncIterable<AgentStreamPayload> {
+    if (!input.abortSignal || !input.interruptionContext.includes('明确允许继续原任务')) throw new Error('继续缺少停止信号或宿主背景')
+    const uuid = randomUUID()
+    yield { kind: 'sdk_delta', delta: { uuid, deltas: [
+      { type: 'text_delta', contentIndex: 0, delta: '继续阶段正在等待' },
+      { type: 'thinking_delta', contentIndex: 1, delta: '继续阶段思考' },
+    ] } }
+    await waitForReadingCheck(input.abortSignal)
+    yield { kind: 'sdk_message', message: { type: 'assistant', uuid, parent_tool_use_id: null,
+      message: { content: [{ type: 'text', text: '已在原轮次继续完成任务。' }] } } }
+    yield { kind: 'sdk_message', message: { type: 'result', subtype: 'success', usage: { input_tokens: 1, output_tokens: 1 } } }
+  },
   async *query(input: AgentQueryInput): AsyncIterable<AgentStreamPayload> {
     if (!input.abortSignal || !input.executionPolicy || !input.cwd) throw new Error('查询缺少停止信号、执行策略或工作区')
+    if (input.prompt === '验证消息排队') {
+      const uuid = randomUUID()
+      yield { kind: 'sdk_delta', delta: { uuid, deltas: [{ type: 'text_delta', contentIndex: 0, delta: '排队验证正在等待' }] } }
+      await waitForReadingCheck(input.abortSignal)
+      yield { kind: 'sdk_message', message: { type: 'assistant', uuid, parent_tool_use_id: null,
+        message: { content: [{ type: 'text', text: '排队验证本轮完成' }] } } }
+      yield { kind: 'sdk_message', message: { type: 'result', subtype: 'success', terminal_reason: 'completed' } }
+      return
+    }
+    if (['验证排队消息一', '验证排队消息二'].includes(input.prompt)) {
+      yield { kind: 'sdk_message', message: { type: 'assistant', uuid: randomUUID(), parent_tool_use_id: null,
+        message: { content: [{ type: 'text', text: `队列回复：${input.prompt}` }] } } }
+      yield { kind: 'sdk_message', message: { type: 'result', subtype: 'success', terminal_reason: 'completed' } }
+      return
+    }
     // 追问使用工厂注入的真实工具；回答回到同一轮，而不是伪造下一条用户输入。
     if (input.prompt === '验证追问链路') {
       const tool = input.customTools?.find((item) => item.name === 'AskUserQuestion')
@@ -58,7 +86,10 @@ const adapter: AgentProviderAdapter = {
     }
     // 没有成功终态；core 消费停止信号后负责写唯一取消终态。
     if (input.prompt === '验证停止链路') {
-      yield { kind: 'sdk_delta', delta: { uuid: 'stop-check', deltas: [{ type: 'text_delta', contentIndex: 0, delta: '停止验证正在等待' }] } }
+      yield { kind: 'sdk_delta', delta: { uuid: 'stop-check', deltas: [
+        { type: 'text_delta', contentIndex: 0, delta: '停止验证正在等待' },
+        { type: 'thinking_delta', contentIndex: 1, delta: '停止前思考' },
+      ] } }
       await waitForReadingCheck(input.abortSignal)
       throw new Error('停止验证不应被恢复')
     }

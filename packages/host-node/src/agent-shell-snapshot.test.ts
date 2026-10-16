@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentShellSnapshotEnvironment, prepareAgentShellSnapshotCommand, pruneAgentShellSnapshots } from './agent-shell-snapshot'
@@ -256,6 +256,40 @@ describe('Shell 快照命令准备', () => {
       } finally { setup.cleanup() }
     })
   }
+
+  test('捕获固定真实 cwd，工作区别名改指向后不复用旧目录快照', async () => {
+    const setup = fixture('zsh', '')
+    const child = join(setup.directory, 'child')
+    mkdirSync(child)
+    const alias = join(setup.directory, 'alias')
+    symlinkSync(setup.directory, alias)
+    const environment = new AgentShellSnapshotEnvironment({ ...setup.options, cwd: alias })
+    try {
+      const snapshot = await environment.ready
+      expect(snapshot?.cwd).toBe(realpathSync(setup.directory))
+      const argv = ['/bin/zsh', '-lc', 'pwd']
+      expect(prepareAgentShellSnapshotCommand({ argv, cwd: alias }, snapshot).argv[1]).toBe('-c')
+      unlinkSync(alias)
+      symlinkSync(child, alias)
+      expect(prepareAgentShellSnapshotCommand({ argv, cwd: alias }, snapshot).argv).toBe(argv)
+    } finally { environment.dispose(); await environment.drain(); setup.cleanup() }
+  })
+
+  test('同一实际目录的别名可复用快照，真实子目录仍不复用', () => {
+    const setup = fixture('zsh', '')
+    const path = join(setup.directory, 'snapshot.sh')
+    writeFileSync(path, 'export PATH=/snapshot/bin\n')
+    const alias = join(setup.directory, 'alias')
+    symlinkSync(setup.directory, alias)
+    const child = join(setup.directory, 'child')
+    mkdirSync(child)
+    const snapshot = { path, shell: setup.options.shell!, cwd: alias }
+    const argv = ['/bin/zsh', '-lc', 'pwd']
+    try {
+      expect(prepareAgentShellSnapshotCommand({ argv, cwd: setup.directory }, snapshot).argv[1]).toBe('-c')
+      expect(prepareAgentShellSnapshotCommand({ argv, cwd: child }, snapshot).argv).toBe(argv)
+    } finally { setup.cleanup() }
+  })
 
   test('未就绪、cwd/解释器/参数不匹配、文件丢失均保留原始 argv，不临时创建快照', () => {
     const setup = fixture('zsh', '')

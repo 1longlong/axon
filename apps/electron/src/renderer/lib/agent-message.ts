@@ -1,4 +1,12 @@
-import type { SDKMessage } from '@axon/shared'
+import type { SDKMessage, SDKResultMessage } from '@axon/shared'
+
+/** 用户主动停止属于执行状态；真正的清理/持久化等失败仍需展示错误。 */
+export function isAgentUserStoppedResult(message: SDKMessage): boolean {
+  if (message.type !== 'result') return false
+  const result = message as SDKResultMessage
+  return result.terminal_reason === 'stopped' && result.stopped_by_user === true
+    && (!result.error || result.error.category === 'canceled')
+}
 
 /** 将未知工具结果安全转换为可复制文本，避免把对象直接交给 JSX。 */
 export function stringifyAgentContent(content: unknown): string {

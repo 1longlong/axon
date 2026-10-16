@@ -79,6 +79,20 @@ function interaction(type: 'permission_request' | 'ask_user_request', requestId 
 }
 
 describe('独立后端的固定事件和反向交互', () => {
+  test('暂停通知仅投递原登记页面的会话失效标识，旧身份/释放后不转投', async () => {
+    const f = await open()
+    f.child.notify(notifications.AGENT_PAUSE_CHANGED, { clientId: f.mainId, event: { sessionId: 'session', pauseId: '不向页面提供凭据' } })
+    await f.parent.request('axon/unknown').catch(() => {})
+    expect(f.main.deliveries).toContainEqual({ channel: AGENT_IPC_CHANNELS.PAUSE_EVENT, value: { sessionId: 'session' } })
+    expect(f.quick.deliveries).toHaveLength(0)
+    f.main.emit('did-start-loading')
+    f.child.notify(notifications.AGENT_PAUSE_CHANGED, { clientId: f.mainId, event: { sessionId: 'old' } })
+    f.bridge.dispose()
+    f.child.notify(notifications.AGENT_PAUSE_CHANGED, { clientId: f.quickId, event: { sessionId: 'late' } })
+    await Promise.resolve(); await Promise.resolve()
+    expect(f.main.deliveries).toHaveLength(1)
+    expect(f.quick.deliveries).toHaveLength(0)
+  })
   test('原生投影保留真实子轮次，原生异常不阻断 UI；旧页面不驱动 Dock', async () => {
     const received: Array<{ clientId: string; sessionId: string }> = []
     const f = await open({

@@ -153,7 +153,7 @@ export class AgentPermissionService {
     this.cancelSession(sessionId, 'owner_gone', '权限请求所属客户端已断开')
   }
 
-  /** 为一轮 Agent 创建权限回调；角色硬边界先于沙箱升级和普通用户审批。 */
+  /** 为本轮创建权限回调：硬边界优先，基础执行按来源判断，never 即时拒绝需审批操作。 */
   createCanUseTool(
     sessionId: string,
     runStartedAt: number,
@@ -167,6 +167,7 @@ export class AgentPermissionService {
         ? evaluateAgentCommandRule(commandFrom(input))
         : undefined
       const execution = options.toolExecution
+      const never = options.executionPolicy.approvalPolicy === 'never'
       const sandboxed = execution?.kind === 'sandbox' && execution.mode === options.executionPolicy.sandboxMode
       const nativeRead = READ_TOOLS.has(toolName) && (sandboxed || execution?.kind === 'runtime')
       const managedHost = execution?.kind === 'host' && execution.permissionMode === 'managed'
@@ -193,6 +194,8 @@ export class AgentPermissionService {
       }
       if (options.sandboxEscalation) {
         if (!sandboxed) return { behavior: 'deny', message: '该工具没有宿主沙箱，不能申请沙箱升级权限' }
+        // never 不能借交互轮留下的 Grant 升级，也不能进入等待或授权后重跑。
+        if (never) return { behavior: 'deny', message: '审批策略为 never，不能申请额外沙箱权限' }
         const existingGrant = this.sessionSandboxGrants.get(sessionId)
           ?.get(permissionKey(toolName, input, options.sandboxEscalation))
         if (existingGrant) return { ...allow(), sandboxGrants: [existingGrant] }
@@ -213,15 +216,18 @@ export class AgentPermissionService {
           options.sandboxEscalation,
         )
       }
-      if (this.isWhitelisted(sessionId, toolName, input, execution)) return allow()
+      if (!never && this.isWhitelisted(sessionId, toolName, input, execution)) return allow()
       if (nativeRead || managedHost) return allow()
       if (sandboxed && commandRule?.decision === 'allow') return allow()
       // 只有真实宿主文件工具可直接尝试；同名自定义工具或 runtime 原生写入必须普通审批。
       if (sandboxed && SANDBOX_ATTEMPT_TOOLS.has(toolName)) {
+        if (never) return allow()
         const grants = [...(this.sessionSandboxGrants.get(sessionId)?.values() ?? [])]
           .filter((grant) => grant.permission.type === 'filesystemWrite')
         return { ...allow(), ...(grants.length > 0 ? { sandboxGrants: grants } : {}) }
       }
+      // 已由基础沙箱/可信工具自行管理的操作先放行，其余需审批的来源即时拒绝。
+      if (never) return { behavior: 'deny', message: '审批策略为 never，此操作需要人工批准，无法执行' }
       const owner = this.owners.get(sessionId)
       if (owner === undefined || runSignal.aborted || options.signal?.aborted) {
         return { behavior: 'deny', message: '权限确认不可用或运行已停止' }

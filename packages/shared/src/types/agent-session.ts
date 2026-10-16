@@ -2,6 +2,9 @@
 
 import type { AgentApprovalPolicy, AgentApprovalReviewer, AgentSandboxMode } from './agent-sandbox'
 
+/** 用户追问与工具审批独立；reject 表示没有人工输入，不代表可以替用户回答。 */
+export type AgentUserInputPolicy = 'ask' | 'reject'
+
 /** 中立思考等级；具体 runtime 负责按当前模型能力映射或收窄。 */
 export type AgentThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
@@ -10,6 +13,16 @@ export interface AgentReasoningCapability {
   levels: AgentThinkingLevel[]
   defaultLevel: AgentThinkingLevel
 }
+
+/** 创建会话前查询已配置模型；provider/地址仍由后端渠道解析，不接受客户端自报。 */
+export interface AgentReasoningSelection {
+  runtimeId: AgentRuntimeId
+  channelId: string
+  modelId: string
+}
+
+/** 桌面按现有会话查询，可信入口可在新会话落盘前按中立选择查询。 */
+export type AgentReasoningQueryInput = string | AgentReasoningSelection
 
 export const DEFAULT_AGENT_SESSION_TITLE = '新任务'
 export const MAX_AGENT_SESSION_TITLE_LENGTH = 120
@@ -45,6 +58,10 @@ export const AGENT_RUNTIME_CAPABILITIES: Record<AgentRuntimeId, AgentRuntimeCapa
  */
 export interface AgentSessionMeta {
   id: string
+  /** 仅可信宿主在创建根会话时标记；缺失为普通会话，不能据 external 消息推断。 */
+  creationOrigin?: 'exec'
+  /** CLI 根创建时的真实工作区；项目改绑后不能无提示在新目录恢复。 */
+  creationWorkspacePath?: string
   runtimeId: AgentRuntimeId
   title: string
   channelId?: string
@@ -58,6 +75,7 @@ export interface AgentSessionMeta {
   sandboxMode?: AgentSandboxMode
   approvalPolicy?: AgentApprovalPolicy
   approvalReviewer?: AgentApprovalReviewer
+  userInputPolicy?: AgentUserInputPolicy
   /** 会话级思考等级；缺失时按 medium 处理。 */
   thinkingLevel?: AgentThinkingLevel
   /** 缺失表示尚未建立首轮基线；空对象表示上一轮确认 memory/ 为空。 */
@@ -75,6 +93,9 @@ export interface AgentSessionMeta {
 }
 
 export interface AgentSessionCreateInput {
+  /** 只供可信装配写入；普通创建/更新 RPC 不接受该字段。 */
+  creationOrigin?: 'exec'
+  creationWorkspacePath?: string
   title?: string
   runtimeId?: AgentRuntimeId
   channelId?: string
@@ -83,6 +104,7 @@ export interface AgentSessionCreateInput {
   sandboxMode?: AgentSandboxMode
   approvalPolicy?: AgentApprovalPolicy
   approvalReviewer?: AgentApprovalReviewer
+  userInputPolicy?: AgentUserInputPolicy
   thinkingLevel?: AgentThinkingLevel
   /** 以下字段只供主进程协作编排层写入，renderer IPC 明确拒绝。 */
   parentSessionId?: string
@@ -100,6 +122,7 @@ export interface AgentSessionUpdateInput {
   sandboxMode?: AgentSandboxMode | null
   approvalPolicy?: AgentApprovalPolicy | null
   approvalReviewer?: AgentApprovalReviewer | null
+  userInputPolicy?: AgentUserInputPolicy | null
   thinkingLevel?: AgentThinkingLevel | null
   sdkSessionId?: string
   runtimeSessionFile?: string

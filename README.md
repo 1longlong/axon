@@ -50,6 +50,7 @@ Electron 负责窗口、托盘/Dock、快捷键、原生选择器和 safeStorage
 apps/
   electron/          main（桌面与 IPC）、preload、renderer（React UI）
   app-server/        独立后端入口：装配 core、Runtime、宿主与 stdio 服务
+  exec/              非交互 CLI：新任务/恢复、正文/JSONL、文件/Schema 输出与取消退出
 packages/
   shared/            中立 DTO、消息、能力与 IPC/RPC 契约
   core/              Agent/Chat、渠道、项目、Skills、MCP、记忆和存储
@@ -141,6 +142,8 @@ Agent 记忆由项目级开关控制。启用后，Agent 可以保存项目约�
 
 Pi 在 macOS 上首次运行会话时异步捕获账户默认 Shell 的环境，后续匹配工作目录的 Bash 调用可恢复 PATH 等导出变量，再进入既有命令执行链。模型命令和子进程仍受 Seatbelt 限制；宿主环境初始化不套该工具沙箱，会读取用户启动配置。
 
+Bash 通过 `workdir` 指定单次执行目录，可选择项目内或项目外的真实目录；省略时默认项目根，相对路径从项目根解析。Pi 将执行 `cwd` 与可信 `policy.sandboxCwd` 分开：换目录不扩大可写根、不解除保护目录或网络限制，额外写入仍需精确审批。Zima 同样支持单次目录，但仍仅有普通人工审批，没有 OS 沙箱；会话工作区和文件工具边界不随 Bash 目录改变。
+
 首条命令不等待快照；预热未完成或条件不匹配时仍走原登录路线。不保证终端 alias/函数跨 Shell 保留，也不会把单次工具的 export/cd 写回快照。Zima 不使用这条宿主快照链。
 
 ## 本地数据与隐私
@@ -185,7 +188,7 @@ const executor = new AgentSandboxCommandService({ shellSnapshotDirectory: paths.
 const pi = new PiAgentAdapter(undefined, executor)
 const backend = createBackend({
   paths,
-  applicationVersion: '0.1.4',
+  applicationVersion: '0.1.5',
   credentialCodec: createCredentialCodec(), // 无安全后端：拒绝非空凭据，不保存明文。
   resolveAdapter: (runtimeId) => {
     if (runtimeId !== 'pi') throw new Error('本示例只装配 Pi')
@@ -212,7 +215,7 @@ try {
 bun run app-server:dev \
   --data-dir /absolute/axon-data \
   --home-dir /absolute/axon-home \
-  --application-version 0.1.4
+  --application-version 0.1.5
 ```
 
 这是等待父端协议请求的 stdio 服务，不是交互式聊天 CLI。父端应以子进程管道启动它，先握手再登记客户端，之后携带 `clientId` 调用固定业务方法。下面的最小父端示例保存在 `apps/app-server/example-client.ts`，从仓库根目录执行 `bun run apps/app-server/example-client.ts`；不读写桌面正式数据，也不请求模型。
@@ -229,7 +232,7 @@ import type { AppServerClient } from '@axon/shared'
 const directory = mkdtempSync(join(tmpdir(), 'axon-server-example-'))
 const child = spawn(process.execPath, ['run', 'apps/app-server/src/main.ts',
   '--data-dir', join(directory, 'data'), '--home-dir', directory,
-  '--application-version', '0.1.4'], { stdio: ['pipe', 'pipe', 'pipe'] })
+  '--application-version', '0.1.5'], { stdio: ['pipe', 'pipe', 'pipe'] })
 const closed = new Promise<number | null>((resolve, reject) => {
   child.once('close', resolve)
   child.once('error', reject)
@@ -239,7 +242,7 @@ const peer = new JsonRpcPeer(child.stdout, child.stdin, APP_SERVER_RPC_OPTIONS)
 try {
   await peer.request(methods.INITIALIZE, {
     protocolVersion: APP_SERVER_PROTOCOL_VERSION,
-    client: { name: 'axon-example', version: '0.1.4' },
+    client: { name: 'axon-example', version: '0.1.5' },
     hostCapabilities: { credentialStorage: 'unavailable', channelTargetConfirmation: false },
   })
   const client = await peer.request(methods.REGISTER_CLIENT, { kind: 'external' }) as unknown as AppServerClient
@@ -255,7 +258,79 @@ try {
 
 需要安全存储和渠道目标确认时，父端在握手前安装 `registerPrivateHostBridge`，只声明实际能力；需要 Agent 时另处理运行通知及反向审批/追问。完整历史用 `AppServerHistoryClient` 分页汇聚，不直接读取 Runtime 文件。长发送请求需设置合适的取消/超时，生产宿主还应管理异常退出及有界强制回收。
 
-两个示例都在退出后删除自己创建的临时数据；实际接入应换成宿主指定的持久目录。一个目录只由一个后端写入，不能让独立示例和桌面共享正式目录。服务没有 HTTP/WebSocket 入口，不支持接管已有桌面后端，也不会在父连接断开后变成常驻 daemon。TUI、exec 和无头调度仍未实现。
+两个示例都在退出后删除自己创建的临时数据；实际接入应换成宿主指定的持久目录。一个目录只由一个后端写入，不能让独立示例和桌面共享正式目录。macOS app-server 在装配前取得数据目录内核独占锁，直到真实退出才释放；不要手动删除 `.axon-backend.lock`。进程内复用 core 的宿主仍须自己落实唯一写入者。服务没有 HTTP/WebSocket 入口，不支持接管已有桌面后端，也不会在父连接断开后变成常驻 daemon。TUI 和无人值守调度仍未实现。
+
+### 通用非交互入口（源码与独立 CLI 可运行）
+
+已完成[迭代 25](docs/axon-project-design.md#迭代-25通用非交互-agent-入口已完成)。当前 macOS/Pi 新任务与显式恢复已接通真实独立后端：严格参数/stdin/配置 → 沙箱握手 → 工作区项目/非交互根会话 → 完整工作流 → 历史落盘与实际 child 退出 → 最终校验/输出。默认只读，`never/reject` 不申请额外批准、不伪造追问答案；桌面默认行为不变。每次新任务创建新会话，仅复用真实工作区项目，不隐式续跑。显式 thinking 在发送前验证能力；提示词和功能开关为本次装配上限，不修改永久设置。
+
+普通 stdout 仅在工作流成功、终态落盘且后端实际正常退出后输出最终主回复，保留空白和换行；失败/取消不输出局部回复。`--json` 输出版本化有序 JSONL，包含 `exec_started`、主/子中立事件、`workflow_started/workflow_finished` 与清理后的唯一 `exec_finished`，不重复输出纯文本正文。通知/RPC/最后主轮不一致、输出断管或溢出均失败，不重发。管道故障可能使最后事件无法交付，调用方仍必须检查进程退出码。
+
+`exec resume ID` 只恢复可信 CLI 根；`--last` 选当前真实工作区最新根，`--last --all` 跨目录选择但仍在原项目执行。创建来源和真实工作区由后端保存，普通/子会话或项目改绑会拒绝。默认保留原渠道/模型，profile、`-c` 或专用参数可明确覆盖，但必须在本次可信配置中启用、凭据可用，不能切换 Runtime。artifact 优先精确续跑；artifact/引用丢失时从最近成功摘要及有界可见历史语义恢复，JSONL 和 stderr 明确提示。只发送新的任务，不自动重放旧请求或工具；文件参数仍相对 `-C`/调用工作区。
+
+`--ephemeral` 在所选数据目录下创建随机私有 `.axon-ephemeral-*` 业务根；数据目录此时只作容器，默认配置仍按原路径读取，不复用或覆盖已有项目/会话。运行中历史、artifact、锁和快照仍可落盘，正常后端实际退出后删除此根，再交付输出；模型失败、格式失败和可处理的信号/期限也清理。工作区修改、指定输出、用户配置和已有业务数据保留，容器目录不删除。拒绝与 resume 同用。后端强制/异常退出、目录身份变化或删除失败时非零并保留临时目录；SIGKILL/父进程崩溃不能保证清理，不自动扫删遗留目录。
+
+`-o` 在成功后原子保存完整最终正文，父目录必须已存在；不能覆盖业务数据、已加载配置或 Schema，拒绝链接/非普通文件。`--output-schema` 在创建任务前编译 JSON Schema（默认 draft-07，支持 2019-09/2020-12），仅向主 Agent 加入中立格式要求，不假造协议级结构化输出支持。完成后严格校验整个 JSON，不提取代码围栏、不修补、不重跑；不合格保留旧输出，持久会话保留历史、临时会话仍清理，退出 3。Schema 不加载外部引用，编译/校验可取消且各限五秒。文件已成功保存后若 stdout 断管或取消，文件仍保留，整体退出非零。
+
+后端 `workflowId` 覆盖全部子任务、结果交付和合成续跑，不用首次 idle 判断结束。`--timeout` 覆盖输入读取、初始化、模型/工具/后台工作、校验与输出；SIGINT/SIGTERM 取消原请求并关闭自有资源，仍等实际清理。退出码：0 正常交付/清理；1 运行/协议/存储/输出/清理故障；2 输入/配置/能力错误；3 最终 JSON 不满足 Schema；124 总期限；130 SIGINT；143 SIGTERM。工具拒绝后模型正常结束可以为 0，不代表业务目标已验证成功。
+
+```bash
+bun run exec:dev --help
+bun run exec:dev --version
+# 先按核心设计配置独立 CLI 渠道；my-channel/my-model 是占位值。
+bun run exec:dev exec -C /absolute/project --channel my-channel -m my-model "说明目录结构"
+bun run exec:dev exec -C /absolute/project --json --timeout 600 - < /absolute/input/task.txt
+# schema.json 相对项目目录解析；输出目录须已存在，成功时替换 result.json。
+bun run exec:dev exec -C /absolute/project --output-schema schema.json -o result.json "生成符合 Schema 的结果"
+bun run exec:dev exec -C /absolute/project --ephemeral -o answer.txt "完成一次不保留会话的任务"
+bun run exec:dev exec resume SESSION_ID -C /absolute/project "检查刚才的修改"
+bun run exec:dev exec resume --last -C /absolute/project "继续处理下一项"
+bun run exec:dev exec resume --last --all "检查最近会话的工作"
+```
+
+默认配置为 `~/.axon-exec/config.json`（不是桌面渠道文件），数据目录独立且不得位于工作区内。每个 `channels` 条目可设置自己的 `apiKey`，仅使用本次最终选中渠道的密钥；不读取 `AXON_API_KEY` 或桌面密钥，不接受 argv/-c 密钥。CLI 父端通过私有管道交付凭据，启动渠道 DTO、工具继承环境和自动保存的历史不携带它。配置密钥为明文，请将文件权限设为 `0600`，放在工作区之外，勿提交仓库；这不阻止同一用户或有读取权限的工具主动读取该文件。配置示例和完整参数契约见核心设计。入口不内置评测或调度。
+
+独立 CLI 在本机 macOS arm64/x64 构建；构建需要已安装的 Bun/仓库依赖，运行产物不需要 Electron、系统 Bun/Node 或源码仓库。
+
+源码请通过上述 `exec:dev` 命令启动：父入口及配套 Bun child 显式禁 dotenv、固定 Axon 的空 Bun 配置，不让任务目录的 preload 在沙箱前执行。不要直接用裸 Bun 执行入口 `.ts`；调用方提前执行的 preload/启动脚本不在此边界内。源码仍依赖已安装的仓库依赖，不能只复制一个 `.ts` 文件使用。
+
+```bash
+bun run exec:build
+./apps/exec/dist/axon --help
+./apps/exec/dist/axon exec -C /absolute/project "说明目录结构"
+# 可选构建输出目录；拒绝覆盖陌生目录，不要在正在使用的产物目录上重建。
+bun run exec:build --outdir /absolute/axon-cli
+```
+
+```text
+apps/exec/dist/
+├─ axon                    CLI 执行文件，内嵌 Schema Worker 与执行环境
+├─ axon-cli-build.json      版本、平台、依赖资源清单（不是用户配置）
+└─ backend/
+   ├─ axon-app-server      自带执行环境的独立后端启动器
+   ├─ app-server.mjs       core / adapter / host 的正式业务装配
+   └─ node_modules/        外部依赖及资源，各包版本通过相对链接保留
+```
+
+请复制/移动整个产物目录，不能只拿 `axon`。CLI 按自身真实位置启动配套后端，再走相同 stdio/工作流链；不搜索 PATH、不回退源码。父端及后端启动器禁止自动加载工作区 `.env`、bunfig 和 tsconfig；后端允许读取 package.json 以解析配套外部包的 exports，不执行 npm scripts。Shell 快照仍可能执行用户 Shell 启动配置。产物缺失/资源加载失败明确非零；构建暂存成功才替换已标识的自有产物，失败不删旧构建，根目录/用户目录/源码祖先或陌生目录拒绝覆盖。当前本机测试为 macOS arm64；未验证 macOS x64，也未提供其他平台运行、签名、公证或安装包发布。
+
+第三方应用可直接启动 CLI 子进程，不必加载 core 或 Runtime SDK。例如 Bun 调用方通过 stdin 交付任务、读取 JSONL，再检查真实退出码：
+
+```ts
+const child = Bun.spawn([
+  '/absolute/axon-cli/axon', 'exec', '-C', '/absolute/project',
+  '--json', '--timeout', '600', '-',
+], { stdin: 'pipe', stdout: 'pipe', stderr: 'inherit' })
+child.stdin.write('检查目录结构，不修改文件')
+child.stdin.end()
+const jsonl = await new Response(child.stdout).text()
+const exitCode = await child.exited
+// 局部成功事件不代表整次执行成功；还要检查实际退出码。
+if (exitCode !== 0) throw new Error(`Axon 执行失败：${exitCode}`)
+const events = jsonl.trim().split('\n').map((line) => JSON.parse(line))
+```
+
+凭据由调用方可信环境提供，示例不保存密钥。长会话应逐行消费事件；取消时向此自有进程发送 SIGINT/SIGTERM 并等待退出，不只停止读取 stdout。并行调用必须使用不同业务目录，不能共写默认目录。
 
 ## 更多文档
 

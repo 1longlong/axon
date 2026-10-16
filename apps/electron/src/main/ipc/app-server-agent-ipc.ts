@@ -91,6 +91,20 @@ export function registerAppServerAgentIpcHandlers(ipc: AppServerAgentIpcRegistra
       return call(sender, methods.AGENT_SEND, input, true)
     })
     handle(channels.STOP, 1, 1, (sender, value) => call(sender, methods.AGENT_STOP, stopTarget(value)))
+    handle(channels.PAUSE, 1, 1, (sender, value) => {
+      const target = stopTarget(value)
+      isQuickChatSend(sender.id, 'agent', (target as { sessionId: string }).sessionId)
+      return call(sender, methods.AGENT_PAUSE, target, true)
+    })
+    handle(channels.GET_PAUSE, 1, 1, (sender, value) => call(sender, methods.AGENT_GET_PAUSE, parseId(value)))
+    handle(channels.CONTINUE, 1, 1, (sender, value) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)
+        || Object.keys(value).some((key) => key !== 'sessionId' && key !== 'pauseId')) throw new Error('继续目标无效')
+      const input = value as { sessionId?: unknown; pauseId?: unknown }
+      const target = { sessionId: parseId(input.sessionId), pauseId: parseId(input.pauseId) }
+      isQuickChatSend(sender.id, 'agent', target.sessionId)
+      return call(sender, methods.AGENT_CONTINUE, target, true)
+    })
     handle(channels.LIST_QUEUED_MESSAGES, 1, 1, (sender, value) => call(sender, methods.AGENT_LIST_QUEUE, parseId(value)))
     handle(channels.CANCEL_QUEUED_MESSAGE, 1, 1, (sender, input) => call(sender, methods.AGENT_CANCEL_QUEUE, input))
     handle(channels.MOVE_QUEUED_MESSAGE, 1, 1, (sender, input) => call(sender, methods.AGENT_MOVE_QUEUE, input))

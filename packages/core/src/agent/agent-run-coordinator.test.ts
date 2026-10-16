@@ -48,6 +48,16 @@ function passiveAgent(
 }
 
 describe('AgentRunCoordinator CRUD 与输入边界', () => {
+  test('CLI 来源只由可信装配写入，普通创建/更新不能自报或清除', async () => {
+    const common = { clients, sessions, agent: passiveAgent(), events: new AgentEventBus() }
+    const desktop = new AgentRunCoordinator(common), exec = new AgentRunCoordinator({ ...common, sessionCreationOrigin: 'exec', resolveCreationWorkspace: () => directory })
+    expect((await desktop.createSession({})).creationOrigin).toBeUndefined()
+    const root = await exec.createSession({ projectId: 'project', approvalPolicy: 'never', userInputPolicy: 'reject' })
+    expect(root.creationOrigin).toBe('exec')
+    await expect(exec.createSession({ creationOrigin: 'exec' })).rejects.toThrow()
+    expect(() => exec.updateSession(root.id, { creationOrigin: null })).toThrow()
+    expect(exec.updateSession(root.id, { title: '恢复标题' }).creationOrigin).toBe('exec')
+  })
   test('创建校验未完成前不写索引，异步失败仍不留下会话', async () => {
     let finish: (value: void) => void = () => { throw new Error('校验未启动') }
     const delayed = new Promise<void>((resolve) => { finish = resolve })
@@ -114,7 +124,8 @@ describe('AgentRunCoordinator CRUD 与输入边界', () => {
       { hidden: true },
       { sdkSessionId: 'injected' },
       { sandboxMode: 'dangerFullAccess' },
-      { approvalPolicy: 'never' },
+      { approvalPolicy: 'alwaysAllow' },
+      { userInputPolicy: 'autoAnswer' },
       { approvalReviewer: 'autoReview' },
       { thinkingLevel: 'extreme' },
     ]) {

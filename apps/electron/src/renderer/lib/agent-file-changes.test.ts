@@ -15,6 +15,20 @@ function result(extra: Record<string, unknown> = {}): SDKMessage {
 }
 
 describe('Agent 每轮文件变更汇总', () => {
+  test('原轮继续后合并中断前后的成功变更，不丢失或重复显示旧汇总', () => {
+    const messages: SDKMessage[] = [
+      { type: 'user', uuid: 'turn-1', message: { content: [{ type: 'text', text: '任务' }] } },
+      assistantCalls({ type: 'tool_use', id: 'old', name: 'Write', input: { path: 'old.ts' } }),
+      toolResults({ type: 'tool_result', tool_use_id: 'old' }),
+      result({ uuid: 'stop-1', subtype: 'error', terminal_reason: 'stopped', stopped_by_user: true }),
+      { type: 'system', subtype: 'axon_continued', turn_id: 'turn-1', stopped_result_uuid: 'stop-1' },
+      assistantCalls({ type: 'tool_use', id: 'new', name: 'Edit', input: { path: 'new.ts' } }),
+      toolResults({ type: 'tool_result', tool_use_id: 'new' }), result(),
+    ]
+    expect(collectAgentTurnFileChanges(messages)).toEqual([{ resultIndex: 7, files: [
+      { path: 'old.ts', operations: ['write'] }, { path: 'new.ts', operations: ['edit'] },
+    ] }])
+  })
   test('只收集有成功结果的 write/edit，并按路径合并操作', () => {
     const messages: SDKMessage[] = [
       assistantCalls(

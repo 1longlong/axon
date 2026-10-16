@@ -10,7 +10,7 @@
  * - `session_id` 是 runtime 侧会话 ID，与应用侧 sessionId 是两个概念。
  * - `parent_tool_use_id` 为 null 表示顶层消息；非 null 表示挂在某个工具调用
  *   （如子 Agent）之下，UI 据此做树状折叠。
- * - Delta 只存在于运行时事件流，绝不写入 JSONL；JSONL 只存完整消息。
+ * - Delta 不逐片段写入 JSONL；停止收束时可冻结为 isPartial 部分消息检查点。
  */
 
 // ===== 内容块 =====
@@ -44,6 +44,8 @@ export interface SDKToolResultBlock {
   tool_use_id: string
   content?: unknown
   is_error?: boolean
+  /** 应用中断检查点：未收到实际结果，不代表失败、未执行或成功。 */
+  execution_status?: 'unknown'
 }
 
 /** user 内容块联合：工具结果回传与文本。 */
@@ -97,6 +99,8 @@ export interface SDKAssistantMessage {
   uuid?: string
   /** assistant 级错误说明；adapter 已将 runtime 原始异常转换为中立安全错误。 */
   error?: AgentTypedError
+  /** 停止前已收到的部分正文/思考；不包含未完整提交的工具参数。 */
+  isPartial?: boolean
 }
 
 export interface SDKUserMessage {
@@ -158,6 +162,11 @@ export interface SDKSystemMessage {
   type: 'system'
   createdAt?: number
   subtype?: string
+  /** 宿主暂停/继续标记所属的原始输入消息 UUID。 */
+  turn_id?: string
+  /** axon_continued：本次消费的暂停凭据与对应已保存停止结果。 */
+  resumed_pause_id?: string
+  stopped_result_uuid?: string
   session_id?: string
   /** init：确认的模型 */
   model?: string

@@ -1,7 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import { agentMessageText, stringifyAgentContent } from './agent-message'
+import { agentMessageText, isAgentUserStoppedResult, stringifyAgentContent } from './agent-message'
 
 describe('Agent 消息可见文本', () => {
+  test('主动停止是状态而非错误；清理失败或非用户取消不能被隐藏', () => {
+    const stopped = { type: 'result' as const, subtype: 'error' as const, terminal_reason: 'stopped' as const, stopped_by_user: true }
+    expect(isAgentUserStoppedResult(stopped)).toBe(true)
+    expect(isAgentUserStoppedResult({ ...stopped, stopped_by_user: false })).toBe(false)
+    expect(isAgentUserStoppedResult({ ...stopped, terminal_reason: 'failed' })).toBe(false)
+    expect(isAgentUserStoppedResult({ ...stopped, error: { code: 'runtime_cleanup_failed', category: 'runtime', message: '清理失败', retryable: false } })).toBe(false)
+  })
   test('复制时保留用户/assistant/工具结果文本，不包含思考块和工具参数', () => {
     expect(agentMessageText({
       type: 'assistant',

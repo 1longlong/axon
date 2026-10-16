@@ -13,6 +13,14 @@ function request(overrides: Partial<AgentPermissionRequest> = {}): AgentPermissi
 }
 
 describe('Agent 权限横幅文案', () => {
+  test('Bash 普通审批和权限升级均展示真实工作目录', () => {
+    expect(buildPermissionBannerContent(request({ toolInput: { command: 'pwd', workdir: '/project/child' } })))
+      .toMatchObject({ workingDirectory: '/project/child' })
+    expect(buildPermissionBannerContent(request({
+      toolInput: { command: 'curl https://example.com', workdir: '/project/child' },
+      sandboxEscalation: { reason: 'networkAccess', permission: { type: 'network' }, message: '需要网络' },
+    }))).toMatchObject({ workingDirectory: '/project/child' })
+  })
   test('普通工具确认不伪装成沙箱升级', () => {
     expect(buildPermissionBannerContent(request())).toEqual({
       title: 'Agent 请求执行：Bash', description: '执行命令',

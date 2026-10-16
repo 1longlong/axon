@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AgentQueryInput, AgentStreamPayload, SDKAssistantMessage } from '@axon/shared'
+import type { AgentContinueQueryInput, AgentQueryInput, AgentStreamPayload, SDKAssistantMessage } from '@axon/shared'
+import { AgentRuntimeCleanupError } from '@axon/shared'
 import { ZimaAgentAdapter, ZimaRuntimeTransport } from './zima-agent-adapter'
 import { AgentPermissionService } from '@axon/core'
 
@@ -42,7 +43,106 @@ function messages(events: AgentStreamPayload[], type: string): AgentStreamPayloa
   return events.filter((event) => event.kind === 'sdk_message' && event.message.type === type)
 }
 
+/** 从已知语义背景构造继续配置；刻意移除 prompt，防止协议退回普通用户发送。 */
+function continuation(overrides: Partial<AgentContinueQueryInput> = {}): AgentContinueQueryInput {
+  const { prompt: _prompt, ...common } = input('不应进入继续协议')
+  return { ...common, interruptionId: 'pause-1', interruptionContext: '<system-reminder>允许继续原任务，先核实副作用。</system-reminder>',
+    recoveryPrompt: '此前原用户任务与已完成部分', ...overrides }
+}
+
 describe('Zima adapter 离线协议契约', () => {
+  test('无 prompt 继续使用独立协议和原工具/模型装配，保持思考与唯一终态', async () => {
+    let stateFile = ''
+    const events: AgentStreamPayload[] = []
+    for await (const event of adapter.continueQuery(continuation({
+      onRuntimeSession: (_id, file) => { stateFile = file ?? '' },
+    }))) events.push(event)
+    const record = JSON.parse(readFileSync(stateFile, 'utf8')) as { method: string; params: Record<string, unknown> }
+    expect(record.method).toBe('session.continue')
+    expect(record.params).not.toHaveProperty('prompt')
+    expect(record.params).toMatchObject({ interruption_id: 'pause-1', model: { name: 'fake-model' },
+      tools: { approval_mode: 'host' }, runtime: { recovery_prompt: '此前原用户任务与已完成部分' } })
+    expect(events.some((event) => event.kind === 'sdk_delta' && event.delta.deltas.some((delta) => delta.type === 'thinking_delta'))).toBe(true)
+    expect(messages(events, 'result')).toHaveLength(1)
+    expect(events.at(-1)).toMatchObject({ message: { terminal_reason: 'completed' } })
+  })
+
+  test('继续拒绝空身份/背景、缺少恢复来源和混入 prompt，不启动进程', async () => {
+    for (const value of [continuation({ interruptionId: ' ' }), continuation({ interruptionContext: '' }),
+      continuation({ recoveryPrompt: undefined }), { ...continuation(), prompt: '伪装新用户输入' }]) {
+      const events = adapter.continueQuery(value)
+      await expect(events.next()).rejects.toThrow('继续缺少')
+    }
+    expect(existsSync(join(directory, 'runtime'))).toBe(false)
+  })
+
+  test('Runtime 未公布继续能力时明确失败，不降级发送普通 prompt', async () => {
+    adapter.dispose(); await adapter.drain()
+    const executable = join(directory, 'no-continue-python')
+    const fixture = join(import.meta.dir, 'fixtures', 'fake-zima-runtime.mjs')
+    writeFileSync(executable, `#!/bin/sh\nexport AXON_ZIMA_TEST_MODE=no-continue\nexec "${process.execPath}" "${fixture}" "$@"\n`)
+    chmodSync(executable, 0o755)
+    adapter = new ZimaAgentAdapter(executable, '1.0-test')
+    const stream = adapter.continueQuery(continuation())
+    await expect(stream.next()).rejects.toThrow('尚未支持无用户消息继续')
+    expect(existsSync(join(directory, 'runtime'))).toBe(false)
+  })
+
+  test('继续仍通过人工审批，取消后等待清理且不回传迟到调用', async () => {
+    let approvals = 0
+    for await (const _event of adapter.continueQuery(continuation({ interruptionId: 'continue-approval',
+      canUseTool: async (name) => { expect(name).toBe('Write'); approvals++; return { behavior: 'deny', message: '本次仍需重新批准' } },
+    }))) { /* 拒绝结果沿原工具回调通道交给 Runtime。 */ }
+    expect(approvals).toBe(1)
+    const controller = new AbortController()
+    const events: AgentStreamPayload[] = []
+    for await (const event of adapter.continueQuery(continuation({ interruptionId: 'continue-abort', abortSignal: controller.signal }))) {
+      events.push(event)
+      if (event.kind === 'sdk_message' && event.message.type === 'system') controller.abort()
+    }
+    expect(messages(events, 'result')).toHaveLength(1)
+    expect(events.at(-1)).toMatchObject({ message: { stopped_by_user: true } })
+  })
+
+  test('停止期间真实工具回传保持原结果并先于终态，仍等待进程清理', async () => {
+    const events: AgentStreamPayload[] = []
+    for await (const payload of adapter.query(input('abort-tool'))) {
+      events.push(payload)
+      if (payload.kind === 'sdk_message' && payload.message.type === 'assistant') adapter.abort('app-session')
+    }
+    expect(messages(events, 'user')).toHaveLength(1)
+    expect(messages(events, 'user')[0]).toMatchObject({ kind: 'sdk_message', message: {
+      message: { content: [{ type: 'tool_result', content: '取消期间真实回传', is_error: false }] },
+    } })
+    expect(events.at(-1)).toMatchObject({ kind: 'sdk_message', message: { type: 'result', terminal_reason: 'canceled', stopped_by_user: true } })
+    expect(messages(events, 'result')).toHaveLength(1)
+  })
+  test('Bash 审批接收真实目录并回传，非法目录不请求批准', async () => {
+    mkdirSync(join(directory, 'child'))
+    let approvals = 0
+    const events = await collect(input('bash-workdir', {
+      canUseTool: async (name, args) => {
+        expect(name).toBe('Bash')
+        expect(args).toEqual({ command: 'pwd', workdir: realpathSync(join(directory, 'child')) })
+        approvals += 1
+        return { behavior: 'allow' }
+      },
+    }))
+    const result = messages(events, 'user')[0]
+    expect(JSON.stringify(result)).toContain(realpathSync(join(directory, 'child')))
+    await collect(input('bash-workdir-outside', {
+      canUseTool: async (name, args) => {
+        expect(name).toBe('Bash')
+        expect(args.workdir).toBe(realpathSync(join(directory, '..')))
+        approvals += 1
+        return { behavior: 'deny', message: '拒绝外部目录命令' }
+      },
+    }))
+    await collect(input('bash-workdir-invalid', {
+      canUseTool: async () => { approvals += 1; return { behavior: 'allow' } },
+    }))
+    expect(approvals).toBe(2)
+  })
   test('未委托全部内置工具时明确报告不支持宿主 OS 沙箱', () => {
     expect(adapter.getSandboxCapability({ platform: 'macos' })).toEqual({
       supported: false,
@@ -272,6 +372,60 @@ function gate(): { promise: Promise<void>; release: () => void } {
 }
 
 describe('Zima 真实资源等待', () => {
+  test('普通停止确认失败时终止并等待自有进程，不能发布正常停止结果', async () => {
+    const request = ZimaRuntimeTransport.prototype.request
+    ZimaRuntimeTransport.prototype.request = function (method, params, timeoutMs) {
+      if (method === 'session.abort') return Promise.reject(new Error('PRIVATE_ABORT_SECRET'))
+      return request.call(this, method, params, timeoutMs)
+    }
+    const payloads: AgentStreamPayload[] = []
+    const querying = (async () => {
+      for await (const payload of adapter.query(input('abort', { onRuntimeSession: () => adapter.abort('app-session') }))) payloads.push(payload)
+    })()
+    try {
+      const error = await querying.catch((reason: unknown) => reason)
+      expect(error).toBeInstanceOf(AgentRuntimeCleanupError)
+      expect(String(error)).not.toContain('PRIVATE_ABORT_SECRET')
+      expect(messages(payloads, 'result')).toHaveLength(0)
+    } finally {
+      ZimaRuntimeTransport.prototype.request = request
+      await querying.catch(() => {})
+      adapter.dispose()
+      await expect(adapter.drain()).rejects.toBeInstanceOf(AggregateError)
+      adapter = new ZimaAgentAdapter(join(directory, 'fake-python'), '1.0-test')
+    }
+  })
+
+  test('result 延迟到实际 close；传输清理异常不发布正常终态，诊断不包含私有原因', async () => {
+    const close = ZimaRuntimeTransport.prototype.close
+    const closing = gate(), releaseClose = gate()
+    const payloads: AgentStreamPayload[] = []
+    ZimaRuntimeTransport.prototype.close = async function () {
+      await close.call(this)
+      closing.release()
+      await releaseClose.promise
+      throw new Error('ZIMA_PRIVATE_SECRET')
+    }
+    const querying = (async () => { for await (const payload of adapter.query(input('success'))) payloads.push(payload) })()
+    const failure = querying.catch((reason: unknown) => reason)
+    try {
+      await closing.promise
+      expect(messages(payloads, 'result')).toHaveLength(0)
+      releaseClose.release()
+      const error = await failure
+      expect(error).toBeInstanceOf(AgentRuntimeCleanupError)
+      expect(String(error)).not.toContain('ZIMA_PRIVATE_SECRET')
+      expect(messages(payloads, 'result')).toHaveLength(0)
+    } finally {
+      releaseClose.release(); ZimaRuntimeTransport.prototype.close = close
+      await failure
+      adapter.dispose()
+      await expect(adapter.drain()).rejects.toBeInstanceOf(AggregateError)
+      // 失败 adapter 已真实收束；afterEach 只释放新的空闲 adapter，不吞掉其意外清理失败。
+      adapter = new ZimaAgentAdapter(join(directory, 'fake-python'), '1.0-test')
+    }
+  })
+
   for (const mode of ['handshake', 'accept'] as const) {
     test(`退出发生在 ${mode}：终止忽略 TERM 的进程，迟到初始化不发布 artifact`, async () => {
       const trace = traceRuntime(mode)

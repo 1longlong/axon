@@ -45,7 +45,7 @@ export function buildAgentSandboxPolicy(input: BuildAgentSandboxPolicyInput): Ag
   return {
     platform: 'macos',
     mode: input.mode,
-    workingDirectory: projectRoot,
+    sandboxCwd: projectRoot,
     readAccess: { type: 'fullAccess' },
     writableRoots: input.mode === 'workspaceWrite' ? [projectRoot] : [],
     protectedReadOnlyRoots: protectedRoots,

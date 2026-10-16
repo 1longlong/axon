@@ -5,7 +5,9 @@ import { createServer } from 'node:http'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
-import type { AgentSessionMeta, AgentProject, Channel, SDKMessage, AgentDelegation, McpProjectConfig } from '@axon/shared'
+import { QuickChatWindowManager } from '../src/main/lib/desktop/quick-chat-window-manager'
+import { isQuickChatWindowOwner } from '../src/main/lib/desktop/quick-chat-window-owner'
+import type { AgentSessionMeta, AgentProject, Channel, SDKMessage, SDKUserMessage, AgentDelegation, McpProjectConfig } from '@axon/shared'
 import type { JsonRpcPeer } from '@axon/app-server'
 import { startDesktopSmokeBackend } from '../test-support/desktop-smoke-backend'
 import type { DesktopSmokeBackend } from '../test-support/desktop-smoke-backend'
@@ -24,10 +26,14 @@ const directory = mkdtempSync(join(tmpdir(), 'axon-agent-smoke-'))
 app.setPath('userData', join(directory, 'electron'))
 app.on('window-all-closed', () => {})
 let bridge: DesktopSmokeBackend | undefined, win: BrowserWindow | undefined
+let quickWindows: QuickChatWindowManager | undefined
 let modelServer: ReturnType<typeof createServer> | undefined
 let testPeer: JsonRpcPeer | undefined
 let finishing: Promise<void> | undefined
+let acceptanceStep = '初始化'
 const timeout = setTimeout(() => { void finish(1, 'Agent 冒烟验证超时') }, 120_000)
+// 冒烟主进程异常也走失败清理，避免默认原生错误弹窗阻塞诊断和退出。
+process.on('uncaughtException', (error) => { void finish(1, error) })
 
 /** 页面先销毁，后撤固定入口并等待自有后端退出；不影响正式实例或测试目录外的数据。 */
 function finish(code: number, error?: unknown): Promise<void> {
@@ -35,13 +41,22 @@ function finish(code: number, error?: unknown): Promise<void> {
     clearTimeout(timeout)
     if (error) {
       console.error(error)
+      console.error('Agent 冒烟阶段', acceptanceStep, '证据目录', directory)
       if (win && !win.isDestroyed()) {
         console.error('Agent 冒烟页面诊断', await win.webContents.executeJavaScript('document.body.textContent.slice(-1400)').catch(() => '页面不可读'))
         console.error('Agent 冒烟对话框诊断', await win.webContents.executeJavaScript("[...document.querySelectorAll('[role=dialog]')].map(item => ({label: item.getAttribute('aria-label'), text: item.textContent}))").catch(() => '对话框不可读'))
-        try { writeFileSync(join(directory, 'agent-failed.png'), (await win.webContents.capturePage()).toPNG()) }
-        catch { console.error('Agent 冒烟失败截图不可用，继续清理') }
+        let captureDeadline: ReturnType<typeof setTimeout> | undefined
+        try {
+          // 图形诊断不是资源清理前提；原生截图无回应时仍销毁窗口并等待自有后端退出。
+          const screenshot = await Promise.race([win.webContents.capturePage(), new Promise<never>((_resolve, reject) => {
+            captureDeadline = setTimeout(() => reject(new Error('失败截图超时')), 2000)
+          })])
+          writeFileSync(join(directory, 'agent-failed.png'), screenshot.toPNG())
+        } catch { console.error('Agent 冒烟失败截图不可用，继续清理') }
+        finally { clearTimeout(captureDeadline) }
       }
     }
+    quickWindows?.dispose()
     win?.destroy()
     try { await bridge?.close() } catch (cleanupError) { console.error('Agent 冒烟清理失败', cleanupError); code = 1 }
     modelServer?.closeAllConnections()
@@ -102,6 +117,7 @@ void app.whenReady().then(async () => {
   const page = win
   const startBridge = () => startDesktopSmokeBackend({
     directory, mainWindow: page, entry: resolve('dist/agent-smoke-backend.mjs'), zimaPython,
+    quickWindowKind: (sender) => isQuickChatWindowOwner(sender.id),
     configurePeer: (peer) => { testPeer = peer },
     pickLocalWorkspace: async () => ({ canceled: false, path: directory, suggestedName: 'Agent 本地项目' }),
   })
@@ -157,6 +173,17 @@ void app.whenReady().then(async () => {
   }
   const assert = async (expression: string): Promise<void> => {
     if (!(await run(expression))) throw new Error(`Agent 冒烟断言失败：${expression}`)
+  }
+
+  /** 先展开所属活动组，再操作原工具详情，避免对隐藏 DOM 的点击伪装成真实交互。 */
+  const expandToolActivity = async (name: string): Promise<void> => {
+    await run(`(() => {
+      const tool = document.querySelector(${JSON.stringify(`summary[aria-label="工具调用 ${name}"]`)});
+      const toggle = tool?.closest('section[aria-label="执行活动组"]')?.querySelector('button[aria-expanded]');
+      if (!toggle) throw new Error('缺少工具活动组');
+      if (toggle.getAttribute('aria-expanded') === 'false') toggle.click();
+    })()`)
+    await waitFor(`!!document.querySelector('summary[aria-label=${JSON.stringify(`工具调用 ${name}`)}]')?.offsetParent`)
   }
 
   await page.loadFile(resolve('dist/renderer/index.html'))
@@ -318,17 +345,22 @@ void app.whenReady().then(async () => {
   await assert("!document.querySelector('button[aria-label=\"粗体\"]') && !document.querySelector('button[aria-label=\"无序列表\"]')")
   await typeEditor('执行本地 Agent 冒烟任务')
   await clickAria('发送消息')
-  await waitFor("document.body.textContent.includes('正在处理') && [...document.querySelectorAll('button')].some(item => item.offsetParent && item.textContent.trim() === '停止')")
+  await waitFor("document.body.textContent.includes('正在处理') && [...document.querySelectorAll('button[aria-label=\"暂停 Agent\"]')].some(item => item.offsetParent)")
+  await assert("[...document.querySelectorAll('button[aria-label=\"发送消息\"], button[aria-label=\"暂停 Agent\"], button[aria-label=\"继续 Agent\"]')].filter(item => item.offsetParent).length === 1")
+  await assert("document.querySelector('button[aria-label=\"暂停 Agent\"]')?.textContent === ''")
   await waitFor("document.body.textContent.includes('Agent 请求扩展沙箱权限：Bash') && document.body.textContent.includes('网络访问')")
   await assert("document.body.textContent.includes('命令可能已产生部分本地副作用') && document.body.textContent.includes('批准后只携带本项权限重试当前工具一次')")
   await assert("[...document.querySelectorAll('button')].some(item => item.offsetParent && item.textContent.trim() === '当前会话允许')")
   await clickText('本次允许')
-  await waitFor("document.querySelector('summary[aria-label=\"工具调用 Bash\"] svg.animate-spin') !== null")
+  await waitFor("document.querySelector('summary[aria-label=\"工具调用 Bash\"] svg.animate-spin') !== null && document.querySelector('summary[aria-label=\"工具调用 Bash\"]')?.closest('section[aria-label=\"执行活动组\"]')?.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded') === 'true'")
   await assert("document.querySelectorAll('summary[aria-label=\"工具调用 Bash\"]').length === 1")
   await waitFor("document.body.textContent.includes('Agent 正常回答') && !document.body.textContent.includes('Agent 运行中')")
+  await waitFor("document.querySelector('summary[aria-label=\"工具调用 Bash\"]')?.closest('section[aria-label=\"执行活动组\"]')?.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded') === 'false'")
+  writeFileSync(join(directory, 'agent-activity-collapsed.png'), (await page.webContents.capturePage()).toPNG())
   await assert("document.querySelector('summary[aria-label=\"工具调用 Bash\"]')?.textContent.includes('Bash · bun test')")
   await assert("document.querySelectorAll('summary[aria-label=\"工具调用 Bash\"]').length === 1")
   await assert("[...document.querySelectorAll('summary')].some(item => item.textContent.includes('思考过程'))")
+  await expandToolActivity('Bash')
   await run("document.querySelector('summary[aria-label=\"工具调用 Bash\"]').click()")
   await waitFor("document.body.textContent.includes('测试通过')")
   await assert("document.querySelector('summary[aria-label=\"工具调用 Bash\"]').nextElementSibling.getBoundingClientRect().height < 224")
@@ -444,9 +476,43 @@ void app.whenReady().then(async () => {
   await testPeer!.request('axon/test/reading/resume')
   await waitFor("document.body.textContent.includes('阅读验证新增输出二') && !document.body.textContent.includes('Agent 运行中')")
   await assert(`(() => { const element = ${readingScroller}; return element.scrollHeight - element.scrollTop - element.clientHeight < 2 })()`)
+  await expandToolActivity('Read')
   await run("document.querySelector('summary[aria-label=\"工具调用 Read\"]').click()")
   await assert("(() => { const detail = document.querySelector('summary[aria-label=\"工具调用 Read\"]').nextElementSibling; return detail.clientHeight <= 224 && detail.scrollHeight > detail.clientHeight })()")
   writeFileSync(join(directory, 'agent-reading-long-output.png'), (await page.webContents.capturePage()).toPNG())
+
+  // 单独保持队列验证轮，不把窗口聚焦/输入手势混入只观察输出的阅读位置测试。
+  await typeEditor('验证消息排队')
+  await clickAria('发送消息')
+  await waitFor("document.body.textContent.includes('排队验证正在等待')")
+  // 原轮仍等待时从真实编辑器提交；只出现队列胶囊，不提前写作下一轮用户历史。
+  acceptanceStep = '运行中 Enter 排队与胶囊'
+  page.show(); page.focus()
+  await waitFor('document.hasFocus()')
+  for (const text of ['验证排队消息一', '验证排队消息二']) {
+    await typeEditor(text)
+    // 等输入状态提交后使用原生键事件，不能用缺 keyCode 的合成事件代替编辑器输入链。
+    await run('new Promise(resolve => requestAnimationFrame(() => resolve(true)))')
+    page.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' })
+    page.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' })
+    await waitFor(`document.querySelector('[aria-label="等待发送的消息"]')?.textContent.includes(${JSON.stringify(text)})`)
+  }
+  await assert("document.querySelectorAll('[data-queued-message]').length === 2 && ![...document.querySelectorAll('button')].some(item => item.textContent.trim() === '排队')")
+  await assert("(() => { const items = [...document.querySelectorAll('[data-queued-message]')].filter(item => item.offsetParent); const editor = [...document.querySelectorAll('.ProseMirror')].find(item => item.offsetParent); return items[0].getBoundingClientRect().top === items[1].getBoundingClientRect().top && items[0].getBoundingClientRect().bottom < editor.getBoundingClientRect().top })()")
+  await assert(`window.axon.agent.getMessages(${JSON.stringify(session.id)}).then(messages => !messages.some(message => message.type === 'user' && message.message.content.some(block => block.type === 'text' && block.text.startsWith('验证排队消息'))))`)
+  // 模型没有再发 delta；真实主窗聚焦重读后，读取前的正文仍必须在 UI 中。
+  await waitFor("document.body.textContent.includes('排队验证正在等待')")
+  await run("window.dispatchEvent(new Event('focus')); true")
+  await assert(`window.axon.agent.getMessages(${JSON.stringify(session.id)}).then(messages => !JSON.stringify(messages).includes('排队验证正在等待'))`)
+  await waitFor("document.body.textContent.includes('排队验证正在等待')")
+  writeFileSync(join(directory, 'agent-queued-pills.png'), (await page.webContents.capturePage()).toPNG())
+  acceptanceStep = '队列自动进入下一轮'
+  await testPeer!.request('axon/test/reading/resume')
+  await waitFor("document.body.textContent.includes('队列回复：验证排队消息一') && document.body.textContent.includes('队列回复：验证排队消息二') && !document.querySelector('[data-queued-message]')")
+  await waitFor("window.axon.agent.listActiveRuns().then(runs => runs.length === 0)")
+  const queueHistory = await run(`window.axon.agent.getMessages(${JSON.stringify(session.id)})`) as SDKMessage[]
+  const queuedInputs = queueHistory.filter((message) => message.type === 'user' && (message as SDKUserMessage).message?.content?.some((block) => block.type === 'text' && typeof block.text === 'string' && block.text.startsWith('验证排队消息')))
+  if (queuedInputs.length !== 2 || !JSON.stringify(queuedInputs[0]).includes('验证排队消息一') || !JSON.stringify(queuedInputs[1]).includes('验证排队消息二')) throw new Error('排队消息未按顺序作为独立用户轮落盘')
 
   // 同一轮工具追问经子进程反向请求回到原窗口，答复不生成新用户轮次。
   await waitFor("window.axon.agent.listActiveRuns().then(runs => runs.length === 0)")
@@ -461,15 +527,87 @@ void app.whenReady().then(async () => {
   const questionMessages = (await run(`window.axon.agent.getMessages(${JSON.stringify(session.id)})`) as SDKMessage[]).slice(beforeQuestion.length)
   if (questionMessages.map((message) => message.type).join(',') !== 'user,assistant,user,assistant,result') throw new Error('追问未在原轮中交付，或历史重复')
 
-  // 精确停止只控制当前真实 runId；迟到的夹具不允许追加成功终态。
+  // 暂停等实际收束/检查点落盘后才开放继续；继续启动新轮，不重投旧任务。
   await typeEditor('验证停止链路')
   await clickAria('发送消息')
   await waitFor("document.body.textContent.includes('停止验证正在等待')")
-  await clickText('停止')
+  await clickAria('暂停 Agent')
   await waitFor("window.axon.agent.listActiveRuns().then(runs => runs.length === 0)")
   const stoppedMessages = (await run(`window.axon.agent.getMessages(${JSON.stringify(session.id)})`) as SDKMessage[]).slice(beforeQuestion.length + questionMessages.length)
   const stoppedResults = stoppedMessages.filter((message) => message.type === 'result')
   if (stoppedResults.length !== 1 || stoppedResults[0]?.type !== 'result' || stoppedResults[0].terminal_reason !== 'stopped' || !stoppedResults[0].stopped_by_user) throw new Error('停止轮次缺失唯一取消终态')
+  await waitFor("[...document.querySelectorAll('button[aria-label=\"继续 Agent\"]')].some(item => item.offsetParent && !item.disabled)")
+  await assert("[...document.querySelectorAll('button[aria-label=\"发送消息\"], button[aria-label=\"暂停 Agent\"], button[aria-label=\"继续 Agent\"]')].filter(item => item.offsetParent).length === 1")
+  await assert("document.querySelector('button[aria-label=\"继续 Agent\"]')?.textContent === ''")
+  const paused = await run(`window.axon.agent.getPause(${JSON.stringify(session.id)})`) as { state?: string; pauseId?: string; turnId?: string }
+  if (paused.state !== 'paused' || !paused.pauseId) throw new Error('暂停按钮没有后端继续凭据')
+  if (paused.turnId !== (stoppedMessages.find((message) => message.type === 'user') as SDKUserMessage | undefined)?.uuid) throw new Error('暂停没有保存原用户轮次身份')
+  if (!stoppedMessages.some((message) => message.type === 'assistant' && message.isPartial === true)) throw new Error('暂停未保存停止前部分输出')
+  await assert("!document.body.textContent.includes('Agent 执行已停止') && document.body.textContent.includes('停止验证正在等待')")
+  await assert("[...document.querySelectorAll('section[aria-label=\"执行活动组\"]')].find(item => item.textContent.includes('停止前思考'))?.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded') === 'true'")
+  // 卸载页面并等待旧后端退出；新身份只能从磁盘 marker 恢复暂停，不继承旧 owner。
+  acceptanceStep = '暂停后重启后端及页面'
+  const pausedPid = bridge.backend.pid
+  await page.loadURL('about:blank')
+  await bridge.close()
+  bridge = await startBridge()
+  if (bridge.backend.pid === pausedPid) throw new Error('暂停恢复没有实际重启后端')
+  await page.loadFile(resolve('dist/renderer/index.html'))
+  await waitFor("!!document.querySelector('button[aria-label=\"继续 Agent\"]:not(:disabled)') && document.body.textContent.includes('停止验证正在等待')")
+  await assert(`window.axon.agent.getPause(${JSON.stringify(session.id)}).then(value => value?.pauseId === ${JSON.stringify(paused.pauseId)} && value.state === 'paused')`)
+  await assert(`window.axon.agent.getOwnedRun(${JSON.stringify(session.id)}).then(value => value === null)`)
+  writeFileSync(join(directory, 'agent-paused.png'), (await page.webContents.capturePage()).toPNG())
+  // 第二页面只能显式接管已暂停会话；运行观察不授予旧入口控制权。
+  quickWindows = new QuickChatWindowManager({ rendererFilePath: resolve('dist/renderer/index.html') })
+  acceptanceStep = '快捷浮窗读取暂停凭据'
+  quickWindows.show({ id: 'pause-smoke', accelerator: 'CommandOrControl+Shift+8', sessionType: 'agent', sessionId: session.id }, session.title)
+  let quickPage: BrowserWindow | undefined
+  const quickWait = async (expression: string): Promise<void> => {
+    const start = Date.now()
+    while (!quickPage || !(await quickPage.webContents.executeJavaScript(expression))) {
+      quickPage = BrowserWindow.getAllWindows().find((item) => item !== page && item.webContents.getURL().includes('quick=1'))
+      if (Date.now() - start > 8000) throw new Error(`快捷 Agent 暂停验收未就绪：${expression}`)
+      await new Promise<void>((done) => setTimeout(done, 30))
+    }
+  }
+  await quickWait("!!document.querySelector('button[aria-label=\"继续 Agent\"]:not(:disabled)')")
+  acceptanceStep = '快捷浮窗启动继续'
+  await quickPage!.webContents.executeJavaScript("document.querySelector('button[aria-label=\"继续 Agent\"]').click()")
+  await quickWait("document.body.textContent.includes('继续阶段正在等待') && !!document.querySelector('button[aria-label=\"暂停 Agent\"]')")
+  // 浮窗使用同一控制器；其 focus 重读也不能覆盖只有首段 delta 的回复。
+  await quickPage!.webContents.executeJavaScript("window.dispatchEvent(new Event('focus')); true")
+  await quickPage!.webContents.executeJavaScript(`window.axon.agent.getMessages(${JSON.stringify(session.id)})`)
+  await quickWait("document.body.textContent.includes('继续阶段正在等待')")
+  await quickWait("!document.body.textContent.includes('继续刚才被暂停的任务；先确认中断处的实际状态，再推进剩余工作。') && !document.body.textContent.includes('Agent 执行已停止')")
+  acceptanceStep = '主窗口观察快捷运行'
+  await waitFor("document.body.textContent.includes('其他入口运行中') && !document.querySelector('button[aria-label=\"暂停 Agent\"]')")
+  await assert(`window.axon.agent.getOwnedRun(${JSON.stringify(session.id)}).then(value => value === null)`)
+  acceptanceStep = '快捷运行截图'
+  writeFileSync(join(directory, 'agent-quick-running.png'), (await quickPage!.webContents.capturePage()).toPNG())
+  acceptanceStep = '快捷浮窗再次暂停'
+  await quickPage!.webContents.executeJavaScript("[...document.querySelectorAll('section[aria-label=\"执行活动组\"]')].find(item => item.textContent.includes('继续阶段思考')).querySelector('button[aria-expanded]').click()")
+  await quickPage!.webContents.executeJavaScript("document.querySelector('button[aria-label=\"暂停 Agent\"]').click()")
+  await quickWait("!!document.querySelector('button[aria-label=\"继续 Agent\"]:not(:disabled)')")
+  await quickWait("[...document.querySelectorAll('section[aria-label=\"执行活动组\"]')].find(item => item.textContent.includes('继续阶段思考'))?.querySelector('button[aria-expanded]')?.getAttribute('aria-expanded') === 'false'")
+  await waitFor("!!document.querySelector('button[aria-label=\"继续 Agent\"]:not(:disabled)')")
+  acceptanceStep = '主窗口再次继续'
+  await clickAria('继续 Agent')
+  await waitFor("!!document.querySelector('button[aria-label=\"暂停 Agent\"]')")
+  await testPeer!.request('axon/test/reading/resume')
+  acceptanceStep = '主窗口继续终态'
+  await waitFor("document.body.textContent.includes('已在原轮次继续完成任务。')")
+  await assert("!document.body.textContent.includes('继续刚才被暂停的任务；先确认中断处的实际状态，再推进剩余工作。') && !document.body.textContent.includes('Agent 执行已停止')")
+  await waitFor(`window.axon.agent.getPause(${JSON.stringify(session.id)}).then(value => value === null)`)
+  writeFileSync(join(directory, 'agent-continued.png'), (await page.webContents.capturePage()).toPNG())
+  const sharedHistory = await run(`window.axon.agent.getMessages(${JSON.stringify(session.id)})`) as SDKMessage[]
+  if (!sharedHistory.some((message) => message.type === 'system' && message.subtype === 'axon_continued'
+    && message.input_origin === 'quick' && message.turn_id === paused.turnId)) throw new Error('快捷继续没有保存原轮次及内部入口')
+  if (sharedHistory.some((message) => message.type === 'user' && message.isSynthetic === true
+    && (message as SDKUserMessage).message?.content?.some((block) => block.type === 'text' && String(block.text).includes('继续刚才')))) throw new Error('继续仍新增隐藏用户消息')
+  await assert("[...document.querySelectorAll('article')].some(item => item.textContent.includes('停止验证正在等待') && item.textContent.includes('已在原轮次继续完成任务。') && item.querySelectorAll('time').length === 1)")
+  const quickWebContentsId = quickPage!.webContents.id
+  quickWindows.dispose(); quickWindows = undefined
+  if (!quickPage!.isDestroyed() || isQuickChatWindowOwner(quickWebContentsId)) throw new Error('快捷浮窗销毁未完成或未注销原身份')
   await waitFor("!!document.querySelector('button[aria-label=\"发送消息\"]')")
 
   if (zimaPython) {
@@ -495,6 +633,6 @@ void app.whenReady().then(async () => {
     if (!(await run('window.axon.agent.listSessions()') as AgentSessionMeta[]).some((item) => item.runtimeId === 'pi')) throw new Error('Pi 会话在 Zima 创建后丢失')
   }
 
-  console.log(`Agent 独立后端冒烟通过：项目工作区、思考等级、项目指令、Skills、MCP 配置、记忆刷新与草稿保护、精确 Grant 交付、子任务卡与详情、双侧栏/文件监听、用量、变更/Diff、完整 JSONL/新 PID 恢复、阅读与工具长结果、同轮追问和唯一停止终态${zimaPython ? '、Zima 创建/发送/恢复及 Pi 并存' : ''}。模型/工具事件为中立夹具，不代表真实 Pi SDK 或 Seatbelt 执行验收。截图目录：${directory}`)
+  console.log(`Agent 独立后端冒烟通过：项目工作区、思考等级、项目指令、Skills、MCP 配置、记忆刷新与草稿保护、精确 Grant 交付、子任务卡与详情、双侧栏/文件监听、用量、变更/Diff、完整 JSONL/新 PID 恢复、阅读与工具长结果、同轮追问、部分历史/暂停凭据重启恢复、主窗与浮窗交替继续及来源标记${zimaPython ? '、Zima 创建/发送/恢复及 Pi 并存' : ''}。模型/工具事件为中立夹具，不代表真实 Pi SDK 或 Seatbelt 执行验收。截图目录：${directory}`)
   await finish(0)
 }).catch((error: unknown) => { void finish(1, error) })

@@ -89,7 +89,7 @@ function open() {
 describe('独立后端 Agent IPC 固定代理', () => {
   test('只注册现行 Agent 命令；逐项固定编码方法、参数和长请求期限，不开放通用/私有 RPC', async () => {
     const f = open()
-    expect([...f.ipc.handlers.keys()].sort()).toEqual(Object.values(channels).filter((channel) => channel !== channels.EVENT && channel !== channels.QUEUE_EVENT && channel !== channels.RUN_EVENT).sort())
+    expect([...f.ipc.handlers.keys()].sort()).toEqual(Object.values(channels).filter((channel) => channel !== channels.EVENT && channel !== channels.QUEUE_EVENT && channel !== channels.RUN_EVENT && channel !== channels.PAUSE_EVENT).sort())
     expect(f.ipc.handlers.has('axon/host/credential/decrypt')).toBe(false)
     const cases: Array<{ channel: string; args: unknown[]; method: Method; input?: RpcJsonValue; long?: boolean }> = [
       { channel: channels.LIST_SESSIONS, args: [], method: methods.AGENT_LIST_SESSIONS },
@@ -104,6 +104,9 @@ describe('独立后端 Agent IPC 固定代理', () => {
       { channel: channels.IS_ACTIVE, args: ['session'], method: methods.AGENT_IS_ACTIVE, input: 'session' },
       { channel: channels.SEND, args: [{ sessionId: 'session', text: 'hi' }], method: methods.AGENT_SEND, input: { sessionId: 'session', text: 'hi' }, long: true },
       { channel: channels.STOP, args: [{ sessionId: 'session', runId: 'actual-run' }], method: methods.AGENT_STOP, input: { sessionId: 'session', runId: 'actual-run' } },
+      { channel: channels.PAUSE, args: [{ sessionId: 'session', runId: 'actual-run' }], method: methods.AGENT_PAUSE, input: { sessionId: 'session', runId: 'actual-run' }, long: true },
+      { channel: channels.GET_PAUSE, args: ['session'], method: methods.AGENT_GET_PAUSE, input: 'session' },
+      { channel: channels.CONTINUE, args: [{ sessionId: 'session', pauseId: 'pause-1' }], method: methods.AGENT_CONTINUE, input: { sessionId: 'session', pauseId: 'pause-1' }, long: true },
       { channel: channels.LIST_QUEUED_MESSAGES, args: ['session'], method: methods.AGENT_LIST_QUEUE, input: 'session' },
       { channel: channels.CANCEL_QUEUED_MESSAGE, args: [{ sessionId: 'session', messageId: 'message' }], method: methods.AGENT_CANCEL_QUEUE, input: { sessionId: 'session', messageId: 'message' } },
       { channel: channels.MOVE_QUEUED_MESSAGE, args: [{ sessionId: 'session', sourceId: 'a', targetId: 'b', placement: 'before' }], method: methods.AGENT_MOVE_QUEUE, input: { sessionId: 'session', sourceId: 'a', targetId: 'b', placement: 'before' } },
@@ -154,6 +157,19 @@ describe('独立后端 Agent IPC 固定代理', () => {
     await f.ipc.invoke(channels.STOP, f.main.event(), { sessionId: 'session', runId: 'captured-old-run' })
     expect(f.calls.map((call) => call.method)).toEqual([methods.AGENT_STOP])
     expect(f.calls[0]?.input).toEqual({ sessionId: 'session', runId: 'captured-old-run' })
+  })
+
+  test('暂停/继续守固定字段和浮窗绑定；长请求不使用普通超时，不自动查询或重发', async () => {
+    const f = open()
+    for (const value of [{ sessionId: 'session', pauseId: 'pause', clientId: 'fake' }, { sessionId: 'session' }]) {
+      await expect(f.ipc.invoke(channels.CONTINUE, f.main.event(), value)).rejects.toThrow()
+    }
+    await expect(f.ipc.invoke(channels.PAUSE, f.quick.event(), { sessionId: 'other', runId: 'run' })).rejects.toThrow()
+    await expect(f.ipc.invoke(channels.CONTINUE, f.quick.event(), { sessionId: 'other', pauseId: 'pause' })).rejects.toThrow()
+    expect(f.calls).toEqual([])
+    await f.ipc.invoke(channels.CONTINUE, f.quick.event(), { sessionId: 'bound-session', pauseId: 'pause' })
+    expect(f.calls).toHaveLength(1)
+    expect(f.calls[0]).toMatchObject({ method: methods.AGENT_CONTINUE, input: { sessionId: 'bound-session', pauseId: 'pause' }, options: { timeoutMs: 0 } })
   })
 
   test('审批/追问答复仅进反向桥，不临时登记 owner 或走通用业务请求', async () => {

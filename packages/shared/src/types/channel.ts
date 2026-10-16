@@ -53,6 +53,9 @@ export interface Channel {
   updatedAt: number
 }
 
+/** 可信入口提供的无密钥渠道；稳定 ID 可被会话引用，运行凭据另由宿主解析。 */
+export interface RuntimeChannelDefinition extends Pick<Channel, 'id' | 'name' | 'provider' | 'baseUrl' | 'models' | 'enabled'> {}
+
 export interface ChannelCreateInput {
   name: string
   provider: ProviderType

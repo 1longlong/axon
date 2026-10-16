@@ -1,6 +1,7 @@
 /** Agent 输入校验、客户端所有权、队列与业务运行协调。 */
 
 import { waitWithSignal } from '../async/wait-with-signal'
+import { randomUUID } from 'node:crypto'
 import { AsyncWorkTracker } from '../async/async-work-tracker'
 import type { BackendClientRegistry } from '../backend-client-registry'
 import type {
@@ -18,31 +19,46 @@ import type {
   AgentSessionUpdateInput,
   AgentSandboxMode,
   AgentThinkingLevel,
+  AgentUserInputPolicy,
   BackendOwnedRun,
   BackendClientId,
   BackendAgentRunEvent,
   BackendRunControlInput,
   AgentDelegation,
+  AgentWorkflowResult,
+  BackendAgentWorkflowEvent,
+  AgentPauseSnapshot,
+  AgentPauseChangedEvent,
+  AgentCompletionPayload,
+  SDKResultMessage,
+  SDKMessage,
+  SDKUserMessage,
 } from '@axon/shared'
 import type { AgentEventBus } from './agent-event-bus'
 import type { AgentPermissionService } from '../security/agent-permission-service'
 import { AgentServiceError } from './agent-service'
-import type { AgentRunContext, AgentService } from './agent-service'
+import type { AgentContinueExecutionInput, AgentRunContext, AgentService } from './agent-service'
 import type { AgentSessionManager } from './agent-session-manager'
 import { AgentQueueCoordinator } from './agent-queue-coordinator'
 import type { AgentAskUserService } from '../security/agent-ask-user-service'
 import { buildBackgroundTaskNotificationPrompt } from '../collaboration/agent-collaboration-tools'
+import { AgentWorkflowCoordinator } from './agent-workflow-coordinator'
+
+/** 工作流令牌只由可信协调层附加，不属于用户输入或 Runtime 上下文。 */
+interface CoordinatorRunContext extends AgentRunContext {
+  workflowId?: string
+}
 
 export interface AgentRunCoordinatorOptions {
   clients: Pick<BackendClientRegistry, 'has' | 'getSignal' | 'subscribeDetached'>
   sessions: Pick<
     AgentSessionManager,
-    'list' | 'get' | 'create' | 'update' | 'delete' | 'getMessages'
+    'list' | 'get' | 'create' | 'update' | 'delete' | 'getMessages' | 'appendMessage'
   >
   agent: Pick<
     AgentService,
     'stop' | 'isActive' | 'listActiveRuns' | 'getActiveRun'
-  > & Partial<Pick<AgentService, 'waitUntilIdle'>> & {
+  > & Partial<Pick<AgentService, 'waitUntilIdle' | 'continueMessage' | 'getActiveTurnId'>> & {
     /** 协调层只关心执行是否结束；结构化 outcome 由协作编排层消费。 */
     sendMessage: (
       input: AgentSendInput,
@@ -57,14 +73,21 @@ export interface AgentRunCoordinatorOptions {
   askUsers?: Pick<AgentAskUserService, 'subscribe' | 'bindOwner' | 'unbindOwner' | 'respond' | 'matchesRequest' | 'cancelSession' | 'cancelOwner'>
   /** 创建前检查目标 runtime 可用性，不修改已有会话归属。 */
   validateCreate?: (input: AgentSessionCreateInput) => void | Promise<void>
+  /** 可信装配标记新根会话来源；普通 RPC 输入仍不能自报。 */
+  sessionCreationOrigin?: 'exec'
+  resolveCreationWorkspace?: (projectId: string) => string
   /** 断开时收束具体子任务，不能借父会话停止误伤另一个入口新建的任务。 */
   cancelChild?: (childSessionId: string) => void
+  cancelWorkflowDescendants?: (rootSessionId: string) => void
+  waitForWorkflowDescendants?: (rootSessionId: string) => Promise<void>
+  isWorkflowRootBusy?: (rootSessionId: string) => boolean
 }
 
 interface RunOwner {
   owner: BackendClientId
   emit: (event: AgentGenerationEvent) => void
   stopRequested: boolean
+  workflowId?: string
   /** 根会话运行令牌；子交互上浮时替换子 run token，供 renderer 防迟到。 */
   runStartedAt?: number
 }
@@ -80,7 +103,8 @@ interface RunDeliveryRoute {
 }
 
 const SANDBOX_MODES: readonly AgentSandboxMode[] = ['readOnly', 'workspaceWrite']
-const APPROVAL_POLICIES: readonly AgentApprovalPolicy[] = ['onRequest']
+const APPROVAL_POLICIES: readonly AgentApprovalPolicy[] = ['onRequest', 'never']
+const USER_INPUT_POLICIES: readonly AgentUserInputPolicy[] = ['ask', 'reject']
 // autoReview 进入中立契约，但在独立审查 Agent 落地前不接受 renderer 开启。
 const APPROVAL_REVIEWERS: readonly AgentApprovalReviewer[] = ['user']
 const THINKING_LEVELS: readonly AgentThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
@@ -92,6 +116,13 @@ function invalid(): never {
 function parseId(value: unknown): string {
   if (typeof value !== 'string' || !value.trim()) return invalid()
   return value.trim()
+}
+
+/** 原轮次跟随最近实际输入的消息 UUID；工具回传与继续标记不创建新轮次。 */
+function currentTurnId(messages: readonly SDKMessage[]): string | undefined {
+  const user = messages.findLast((message) => message.type === 'user'
+    && (message as SDKUserMessage).message?.content?.some((block) => block.type === 'text')) as SDKUserMessage | undefined
+  return typeof user?.uuid === 'string' ? user.uuid : undefined
 }
 
 /** 停止与交互答复必须显式携带轮次；额外字段不能自报身份或执行上下文。 */
@@ -114,7 +145,7 @@ function parseSessionInput(
   const input = value as Record<string, unknown>
   const allowed = [
     'title', 'channelId', 'modelId', 'projectId', 'cwd',
-    'sandboxMode', 'approvalPolicy', 'approvalReviewer', 'thinkingLevel',
+    'sandboxMode', 'approvalPolicy', 'approvalReviewer', 'thinkingLevel', 'userInputPolicy',
     ...(!allowNull ? ['runtimeId'] : []),
   ]
   if (Object.keys(input).some((key) => !allowed.includes(key))) return invalid()
@@ -142,6 +173,11 @@ function parseSessionInput(
     && !APPROVAL_REVIEWERS.includes(input.approvalReviewer as AgentApprovalReviewer)
   ) return invalid()
   if (
+    input.userInputPolicy !== undefined
+    && !(allowNull && input.userInputPolicy === null)
+    && !USER_INPUT_POLICIES.includes(input.userInputPolicy as AgentUserInputPolicy)
+  ) return invalid()
+  if (
     input.thinkingLevel !== undefined
     && !(allowNull && input.thinkingLevel === null)
     && !THINKING_LEVELS.includes(input.thinkingLevel as AgentThinkingLevel)
@@ -150,14 +186,15 @@ function parseSessionInput(
   return input as AgentSessionCreateInput | AgentSessionUpdateInput
 }
 
+/** 输入边界不修剪正文；队列、AgentService 和 JSONL 均消费同一份原始用户任务。 */
 function parseSendInput(value: unknown): AgentSendInput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
   const input = value as Record<string, unknown>
   if (Object.keys(input).some((key) => !['sessionId', 'text'].includes(key))) return invalid()
   if (typeof input.sessionId !== 'string' || typeof input.text !== 'string') return invalid()
   const sessionId = input.sessionId.trim()
-  const text = input.text.trim()
-  if (!sessionId || !text || text.length > 100_000) return invalid()
+  const text = input.text
+  if (!sessionId || !text.trim() || text.includes('\0') || text.length > 100_000) return invalid()
   return { sessionId, text }
 }
 
@@ -219,6 +256,7 @@ function failed(error: unknown): AgentSendResult {
 
 export class AgentRunCoordinator {
   private readonly work = new AsyncWorkTracker()
+  private readonly workflows: AgentWorkflowCoordinator
   private readonly owners = new Map<string, RunOwner>()
   private readonly childRoutes = new Map<string, ChildRoute>()
   private readonly interactionSubscriptions: (() => void)[]
@@ -226,15 +264,23 @@ export class AgentRunCoordinator {
   private readonly runRoutes = new Map<string, RunDeliveryRoute>()
   private readonly unsubscribeRuns: () => void
   private readonly queue = new AgentQueueCoordinator()
-  private readonly queuedContexts = new Map<string, AgentRunContext>()
+  private readonly queuedContexts = new Map<string, CoordinatorRunContext>()
   private readonly queueListeners = new Set<(snapshot: AgentQueueSnapshot) => void>()
   private readonly ownershipReleaseWaiters = new Map<string, Set<() => void>>()
+  private readonly pauses = new Map<string, AgentPauseSnapshot>()
+  private readonly pauseListeners = new Set<(event: AgentPauseChangedEvent) => void>()
   private readonly unsubscribeClients: () => void
   private readonly disposeController = new AbortController()
   private disposed = false
 
   /** 将客户端断开接到运行停止和交互收束；transport 只需注销身份，不执行业务清理。 */
   constructor(private readonly options: AgentRunCoordinatorOptions) {
+    this.workflows = new AgentWorkflowCoordinator({ clients: options.clients, getSession: (id) => options.sessions.get(id),
+      busy: (id) => this.pauses.has(id) || this.owners.has(id) || options.agent.isActive(id) || Boolean(options.isWorkflowRootBusy?.(id)),
+      send: (owner, input, workflowId) => this.send(owner, input, () => {}, { source: 'external', workflowId }),
+      stop: (owner, id) => { this.stopOwnedChain(owner, id) },
+      cancelDescendants: options.cancelWorkflowDescendants, waitForDescendants: options.waitForWorkflowDescendants,
+    })
     this.unsubscribeClients = options.clients.subscribeDetached((id) => this.cancelOwner(id))
     this.unsubscribeRuns = options.events.subscribe((event, run) => this.emitIdentifiedEvent(event, run))
     const route = (event: AgentGenerationEvent): void => {
@@ -275,11 +321,16 @@ export class AgentRunCoordinator {
   async notifyBackgroundCompletion(delegation: AgentDelegation): Promise<void> {
     const route = this.childRoutes.get(delegation.childSessionId)
     if (!route || !this.options.clients.has(route.origin.owner)) return
+    // 暂停保留子结果，但不允许交付器替用户立即启动主轮；根等待仍收束真实交付 Promise。
+    if (this.pauseBlocksBackground(delegation.parentSessionId)) return
     const result = await this.sendBackgroundNotification(route.origin.owner, {
       sessionId: delegation.parentSessionId, text: buildBackgroundTaskNotificationPrompt(delegation),
-    }, route.origin.emit)
+    }, route.origin.emit, route.origin.workflowId)
+    if (this.pauseBlocksBackground(delegation.parentSessionId)) return
     if (!result.success && this.options.clients.has(route.origin.owner)) {
       console.warn(`[Agent 协作] 后台续跑未启动: ${delegation.id}`, result.message)
+      // 交付器记录根失败；打印日志不能把未启动的续跑变成已完成工作。
+      throw new AgentServiceError(result.code === 'internal_error' ? 'runtime_error' : result.code, '后台结果续跑未启动')
     }
   }
 
@@ -304,6 +355,21 @@ export class AgentRunCoordinator {
     }
   }
 
+  /** 非交互应用入口保留整个工作流归属，既有 send 仍是普通桌面单轮命令。 */
+  executeWorkflow(owner: BackendClientId, value: unknown, signal?: AbortSignal): Promise<AgentWorkflowResult> {
+    return this.workflows.execute(owner, parseSendInput(value), signal)
+  }
+  getOwnedWorkflow(owner: BackendClientId, value: unknown) { return this.workflows.getOwned(owner, parseId(value)) ?? null }
+  subscribeWorkflowEvents(owner: BackendClientId, listener: (event: BackendAgentWorkflowEvent) => void): () => void {
+    return this.workflows.subscribe(owner, listener)
+  }
+  cancelWorkflow(owner: BackendClientId, value: unknown): boolean {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
+    const input = value as Record<string, unknown>
+    if (Object.keys(input).some((key) => !['sessionId', 'workflowId'].includes(key))) return invalid()
+    return this.workflows.cancel(owner, { sessionId: parseId(input.sessionId), workflowId: parseId(input.workflowId) })
+  }
+
   /** 精确停止当前主/子轮；旧轮或页面父 ID 不能停止实际子执行。 */
   stopRun(owner: BackendClientId, value: unknown): boolean {
     try {
@@ -316,6 +382,163 @@ export class AgentRunCoordinator {
       }
       return this.stop(owner, target.sessionId)
     } catch { return false }
+  }
+
+  /** 读取公开暂停快照；在途状态不冒充已落盘且已收束的暂停凭据。 */
+  getPause(owner: BackendClientId, value: unknown): AgentPauseSnapshot | null {
+    if (this.disposed || !this.options.clients.has(owner)) return null
+    const sessionId = parseId(value)
+    const pending = this.pauses.get(sessionId)
+    if (pending) return { ...pending }
+    if (this.workflows.active(sessionId) || this.owners.has(sessionId) || this.options.agent.isActive(sessionId)
+      || this.options.isWorkflowRootBusy?.(sessionId)) return null
+    return this.readStoredPause(sessionId)
+  }
+
+  /** 已登记观察入口只收到会话失效通知；实际暂停状态/继续凭据仍由 getPause 核验。 */
+  subscribePauseChanges(listener: (event: AgentPauseChangedEvent) => void): () => void {
+    if (this.disposed) throw new AgentServiceError('invalid_input', '运行协调服务已释放')
+    this.pauseListeners.add(listener)
+    return () => { this.pauseListeners.delete(listener) }
+  }
+
+  private emitPauseChanged(sessionId: string): void {
+    if (this.disposed) return
+    for (const listener of this.pauseListeners) {
+      try { listener({ sessionId }) } catch { console.warn('[Agent 暂停] 状态通知失败') }
+    }
+  }
+
+  /** 精确暂停原 owner 的根轮；封口后等待主发送 finally 和本根子任务/交付，不全局 drain。 */
+  pauseRun(owner: BackendClientId, value: unknown): Promise<AgentPauseSnapshot> {
+    return this.work.run(() => this.executePause(owner, value))
+  }
+
+  /** 先封口，再取消和等待；只有原轮终态及本根交付均确认后才落盘暂停 marker。 */
+  private async executePause(owner: BackendClientId, value: unknown): Promise<AgentPauseSnapshot> {
+    const { target } = parseRunTarget(value)
+    const run = this.getOwnedRun(owner, target.sessionId)
+    const session = this.options.sessions.get(target.sessionId)
+    if (!run || run.runId !== target.runId || !session || session.parentSessionId
+      || session.creationOrigin === 'exec' || this.workflows.active(target.sessionId)) {
+      throw new AgentServiceError('invalid_input', '只能暂停当前客户端的普通根会话轮次')
+    }
+    if (this.pauses.has(target.sessionId)) throw new AgentServiceError('already_active', '会话正在暂停')
+    let workspacePath: string | undefined
+    let workspaceUnavailable = false
+    try { workspacePath = session.projectId ? this.options.resolveCreationWorkspace?.(session.projectId) : undefined }
+    catch { workspaceUnavailable = true }
+    const turnId = this.options.agent.getActiveTurnId?.(run.sessionId)
+      ?? currentTurnId(this.options.sessions.getMessages(run.sessionId))
+    if (!turnId) throw new AgentServiceError('invalid_input', '当前执行缺少原轮次输入记录')
+    const pause: AgentPauseSnapshot = { ...run, turnId, pauseId: randomUUID(), state: 'pausing' }
+    this.pauses.set(target.sessionId, pause)
+    this.emitPauseChanged(target.sessionId)
+    let completion: AgentCompletionPayload | undefined
+    const unsubscribe = this.options.events.subscribe((event) => {
+      if (event.type === 'run_finished' && event.sessionId === run.sessionId && event.runStartedAt === run.runStartedAt) {
+        completion = event.completion
+      }
+    })
+    try {
+      // 两个取消动作都尝试；某个失败不跳过实际等待，且不能发布可继续状态。
+      const failures: unknown[] = []
+      for (const stop of [() => this.stopOwnedChain(owner, run.sessionId),
+        () => this.options.cancelWorkflowDescendants?.(run.sessionId)]) {
+        try { stop() } catch (error) { failures.push(error) }
+      }
+      await this.waitUntilAvailable(run.sessionId, this.disposeController.signal)
+      try { await this.options.waitForWorkflowDescendants?.(run.sessionId) } catch (error) { failures.push(error) }
+      if (failures.length) throw new AgentServiceError('runtime_error', '暂停执行清理失败，未生成继续凭据')
+      if (this.disposed || !this.options.clients.has(owner)) {
+        throw new AgentServiceError('invalid_input', '暂停客户端已断开')
+      }
+      if (this.options.isWorkflowRootBusy?.(run.sessionId)) {
+        throw new AgentServiceError('runtime_error', '本根子任务尚未收束，无法继续')
+      }
+      // 工作区失效不能阻止取消旧执行，但不能继续使用无法确认的原目录。
+      try {
+        if (workspaceUnavailable || (workspacePath && this.options.resolveCreationWorkspace?.(session.projectId!) !== workspacePath)) {
+          throw new Error('工作区已改变')
+        }
+      } catch { throw new AgentServiceError('workspace_unavailable', '暂停期间项目工作区不可用或已改变') }
+      if (!completion?.persisted || !completion.stoppedByUser || completion.terminalReason !== 'stopped') {
+        throw new AgentServiceError('runtime_error', '原轮未形成已保存的停止终态，无法继续')
+      }
+      const result = this.options.sessions.getMessages(run.sessionId).findLast((message) => message.type === 'result'
+        && !(message as SDKResultMessage).isSyntheticCompactionResult) as SDKResultMessage | undefined
+      if (!result?.uuid || result.stopped_by_user !== true || result.terminal_reason !== 'stopped') {
+        throw new AgentServiceError('persistence_error', '暂停终态无法确认')
+      }
+      // 只在真实主/子清理完成后追加 marker；重启不会把未完成的 pausing 当作 paused。
+      try {
+        this.options.sessions.appendMessage(run.sessionId, {
+          type: 'system', subtype: 'axon_paused', uuid: pause.pauseId, pause_id: pause.pauseId,
+          turn_id: pause.turnId,
+          run_id: run.runId, run_started_at: run.runStartedAt, stopped_result_uuid: result.uuid,
+          project_id: session.projectId ?? null, workspace_path: workspacePath ?? null,
+        })
+      } catch { throw new AgentServiceError('persistence_error', '暂停状态无法保存') }
+      return { ...pause, state: 'paused' }
+    } finally {
+      unsubscribe()
+      if (this.pauses.get(run.sessionId) === pause) this.pauses.delete(run.sessionId)
+      this.emitPauseChanged(run.sessionId)
+    }
+  }
+
+  /** 明确继续已落盘暂停；跨入口仅接收这次显式命令，旧事件不改投新客户端。 */
+  continueRun(owner: BackendClientId, value: unknown, context: CoordinatorRunContext = {}): Promise<AgentSendResult> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return Promise.resolve(failed(new AgentServiceError('invalid_input', '继续请求无效')))
+    const input = value as Record<string, unknown>
+    if (Object.keys(input).some((key) => !['sessionId', 'pauseId'].includes(key))) return Promise.resolve(failed(new AgentServiceError('invalid_input', '继续请求无效')))
+    try {
+      const sessionId = parseId(input.sessionId), pauseId = parseId(input.pauseId)
+      const pause = this.getPause(owner, sessionId)
+      if (!pause || pause.state !== 'paused' || pause.pauseId !== pauseId) {
+        return Promise.resolve(failed(new AgentServiceError('invalid_input', '暂停凭据已失效或尚未收束')))
+      }
+      if (!this.options.agent.continueMessage) throw new AgentServiceError('runtime_error', '当前执行入口不支持继续')
+      // 单独的可信参数启动继续，普通发送无法自报；同步占有 owner 阻止重复消费。
+      return this.work.run(() => this.executeSend(owner, undefined, () => {}, context,
+        { sessionId, pauseId, turnId: pause.turnId }))
+    } catch (error) { return Promise.resolve(failed(error)) }
+  }
+
+  /** 只有最近真实停止终态后的宿主 marker 有效；新输入/终态和项目改绑使旧凭据失效。 */
+  private readStoredPause(sessionId: string): AgentPauseSnapshot | null {
+    const session = this.options.sessions.get(sessionId)
+    if (!session || session.parentSessionId || session.creationOrigin === 'exec') return null
+    const messages = this.options.sessions.getMessages(sessionId)
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index]!
+      if (message.type === 'system' && message.subtype === 'axon_paused') {
+        const prior = messages.slice(0, index).findLast((item) => item.type === 'result'
+          && !(item as SDKResultMessage).isSyntheticCompactionResult) as SDKResultMessage | undefined
+        if (typeof message.pause_id !== 'string' || message.pause_id !== message.uuid
+          || typeof message.run_id !== 'string' || typeof message.run_started_at !== 'number'
+          || typeof message.turn_id !== 'string' || message.turn_id !== currentTurnId(messages.slice(0, index))
+          || !Number.isFinite(message.run_started_at) || (message.project_id ?? null) !== (session.projectId ?? null)
+          || !prior?.uuid || prior.uuid !== message.stopped_result_uuid
+          || prior.stopped_by_user !== true || prior.terminal_reason !== 'stopped') return null
+        if (message.workspace_path !== null && message.workspace_path !== undefined) {
+          try {
+            if (!session.projectId || typeof message.workspace_path !== 'string'
+              || this.options.resolveCreationWorkspace?.(session.projectId) !== message.workspace_path) return null
+          } catch { return null }
+        }
+        return { sessionId, turnId: message.turn_id, pauseId: message.pause_id, runId: message.run_id,
+          runStartedAt: message.run_started_at, state: 'paused' }
+      }
+      if (message.type === 'system' && message.subtype === 'axon_continued') return null
+      if (message.type === 'result' && !(message as SDKResultMessage).isSyntheticCompactionResult) return null
+      if (message.type === 'user' || message.type === 'assistant') return null
+    }
+    return null
+  }
+
+  private pauseBlocksBackground(sessionId: string): boolean {
+    return this.pauses.has(sessionId) || this.readStoredPause(sessionId) !== null
   }
 
   /** 同时核对客户端、真实会话/轮次和 pending request，再交给审批服务授予权限。 */
@@ -374,22 +597,30 @@ export class AgentRunCoordinator {
     // 异步凭据/runtime 预检返回后复核入口取消，不能创建迟到的会话记录。
     signal?.throwIfAborted()
     if (this.disposed) throw new AgentServiceError('invalid_input', '运行协调服务已释放')
-    return this.options.sessions.create(input)
+    const origin = this.options.sessionCreationOrigin
+    if (origin && (!input.projectId || !this.options.resolveCreationWorkspace)) return invalid()
+    return this.options.sessions.create({ ...input,
+      ...(origin ? { creationOrigin: origin, creationWorkspacePath: this.options.resolveCreationWorkspace!(input.projectId!) } : {}) })
   }
 
   updateSession(id: unknown, value: unknown) {
-    return this.options.sessions.update(
+    if (this.pauses.has(parseId(id))) throw new AgentServiceError('already_active', '会话正在暂停')
+    if (this.workflows.active(parseId(id))) throw new AgentServiceError('already_active', '工作流期间不能修改会话配置')
+    const session = this.options.sessions.update(
       parseId(id),
       parseSessionInput(value, true) as AgentSessionUpdateInput,
     )
+    this.emitPauseChanged(session.id)
+    return session
   }
 
   deleteSession(value: unknown) {
     const sessionId = parseId(value)
-    if (this.options.agent.isActive(sessionId)) {
+    if (this.pauses.has(sessionId) || this.options.agent.isActive(sessionId) || this.workflows.active(sessionId)) {
       throw new AgentServiceError('already_active', '运行期间不能删除 Agent 会话')
     }
     const removed = this.options.sessions.delete(sessionId)
+    this.emitPauseChanged(sessionId)
     this.options.permissions?.clearSessionWhitelist(sessionId)
     this.options.askUsers?.cancelSession(sessionId)
     return removed
@@ -409,7 +640,7 @@ export class AgentRunCoordinator {
     owner: BackendClientId,
     value: unknown,
     emit: (event: AgentGenerationEvent) => void,
-    context: AgentRunContext = {},
+    context: CoordinatorRunContext = {},
   ): Promise<AgentSendResult> {
     return this.work.run(() => this.executeSend(owner, value, emit, context))
   }
@@ -419,16 +650,27 @@ export class AgentRunCoordinator {
     owner: BackendClientId,
     value: unknown,
     emit: (event: AgentGenerationEvent) => void,
-    context: AgentRunContext,
+    context: CoordinatorRunContext,
+    continuation?: AgentContinueExecutionInput,
   ): Promise<AgentSendResult> {
     let input: AgentSendInput
-    try { input = parseSendInput(value) } catch (error) { return failed(error) }
+    try { input = continuation ? { sessionId: parseId(continuation.sessionId), text: '' } : parseSendInput(value) }
+    catch (error) { return failed(error) }
     if (this.disposed || !this.options.clients.has(owner)) {
       return failed(new AgentServiceError('invalid_input', '运行客户端未登记或已断开'))
     }
     const sessionId = input.sessionId
+    const storedPause = context.synthetic || continuation ? this.readStoredPause(sessionId) : null
+    if (this.pauses.has(sessionId) || (context.synthetic && storedPause)
+      || (continuation && (!storedPause || storedPause.pauseId !== continuation.pauseId || storedPause.turnId !== continuation.turnId))) {
+      return failed(new AgentServiceError('already_active', '会话正在暂停或等待用户继续'))
+    }
+    if (!this.workflows.permitsSend(owner, sessionId, context.workflowId)) {
+      return failed(new AgentServiceError('already_active', '会话由非交互工作流占用或已停止'))
+    }
     const currentOwnership = this.owners.get(sessionId)
     if (currentOwnership) {
+      if (continuation) return failed(new AgentServiceError('already_active', '该会话已接纳继续请求'))
       if (currentOwnership.owner !== owner || currentOwnership.stopRequested) {
         return failed(new AgentServiceError('already_active', '该 Agent 会话正在其他客户端运行或正在停止'))
       }
@@ -442,7 +684,7 @@ export class AgentRunCoordinator {
       return failed(new AgentServiceError('already_active', '该 Agent 会话正在运行'))
     }
 
-    const ownership: RunOwner = { owner, emit, stopRequested: false }
+    const ownership: RunOwner = { owner, emit, stopRequested: false, workflowId: context.workflowId }
     this.owners.set(sessionId, ownership)
     if (this.options.permissions && !this.options.permissions.bindOwner(sessionId, owner)) {
       this.owners.delete(sessionId)
@@ -462,6 +704,8 @@ export class AgentRunCoordinator {
       }
       emit(event)
     })
+    // 新发送已占有 owner，旧暂停快照立即失效；失败释放后再让入口重读。
+    this.emitPauseChanged(sessionId)
     const unsubscribePermission = this.options.permissions?.subscribe((event) => {
       this.emitInteractionToOwner(sessionId, ownership, event, emit)
     }) ?? (() => {})
@@ -471,8 +715,11 @@ export class AgentRunCoordinator {
     try {
       let nextInput: AgentSendInput | undefined = input
       let nextContext = context
+      let nextContinuation = continuation
       while (nextInput) {
-        await this.options.agent.sendMessage(nextInput, nextContext)
+        if (nextContinuation) await this.options.agent.continueMessage!(nextContinuation, nextContext)
+        else await this.options.agent.sendMessage(nextInput, nextContext)
+        nextContinuation = undefined
         // 用户停止表示放弃当前发送链；等待消息不能在停止后意外继续执行。
         if (ownership.stopRequested) {
           this.clearQueue(sessionId)
@@ -501,6 +748,7 @@ export class AgentRunCoordinator {
       if (this.owners.get(sessionId) === ownership) {
         this.owners.delete(sessionId)
         this.resolveOwnershipRelease(sessionId)
+        this.emitPauseChanged(sessionId)
       }
     }
   }
@@ -510,8 +758,9 @@ export class AgentRunCoordinator {
     owner: BackendClientId,
     input: AgentSendInput,
     emit: (event: AgentGenerationEvent) => void,
+    workflowId?: string,
   ): Promise<AgentSendResult> {
-    return this.work.run(() => this.executeBackgroundNotification(owner, input, emit))
+    return this.work.run(() => this.executeBackgroundNotification(owner, input, emit, workflowId))
   }
 
   /** 记录后台空闲等待直到取消清理结束，退出后不会迟到启动合成续跑。 */
@@ -519,6 +768,7 @@ export class AgentRunCoordinator {
     owner: BackendClientId,
     input: AgentSendInput,
     emit: (event: AgentGenerationEvent) => void,
+    workflowId?: string,
   ): Promise<AgentSendResult> {
     const clientSignal = this.options.clients.getSignal(owner)
     if (!clientSignal || this.disposed) return failed(new AgentServiceError('invalid_input', '运行客户端未登记或已断开'))
@@ -530,6 +780,7 @@ export class AgentRunCoordinator {
     return await this.send(owner, input, emit, {
       source: 'background_notification',
       synthetic: true,
+      workflowId,
     })
   }
 
@@ -617,6 +868,13 @@ export class AgentRunCoordinator {
     if (!this.options.clients.has(owner)) return false
     let sessionId: string
     try { sessionId = parseId(value) } catch { return false }
+    const workflow = this.workflows.getOwned(owner, sessionId)
+    if (workflow) return this.workflows.cancel(owner, workflow)
+    return this.stopOwnedChain(owner, sessionId)
+  }
+
+  /** 工作流取消已先封口并停子树；这里只停止原 owner 的实际主链，避免递归取消。 */
+  private stopOwnedChain(owner: BackendClientId, sessionId: string): boolean {
     const ownership = this.owners.get(sessionId)
     if (ownership?.owner !== owner) return false
     ownership.stopRequested = true
@@ -626,6 +884,7 @@ export class AgentRunCoordinator {
 
   /** 客户端断开时，取消它拥有的全部运行。 */
   cancelOwner(owner: BackendClientId): number {
+    this.workflows.cancelOwner(owner)
     this.runListeners.delete(owner)
     for (const [runId, route] of this.runRoutes) {
       if (route.owner === owner) this.runRoutes.delete(runId)
@@ -661,11 +920,13 @@ export class AgentRunCoordinator {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.workflows.dispose()
     this.disposeController.abort()
     this.unsubscribeClients()
     this.unsubscribeRuns()
     for (const release of this.interactionSubscriptions) release()
     this.runListeners.clear()
+    this.pauseListeners.clear()
     this.runRoutes.clear()
     const failures: unknown[] = []
     for (const owner of new Set([...this.owners.values(), ...[...this.childRoutes.values()].map((route) => route.origin)]
@@ -676,7 +937,7 @@ export class AgentRunCoordinator {
   }
 
   /** 入口释放后等待发送、建会话预检和后台等待完成；真实 adapter 清理由下层负责。 */
-  drain(): Promise<void> { return this.work.drain() }
+  async drain(): Promise<void> { await Promise.all([this.work.drain(), this.workflows.drain()]) }
 
   private emitQueueSnapshot(sessionId: string): void {
     const snapshot = { sessionId, messages: this.queue.list(sessionId) }
@@ -708,6 +969,7 @@ export class AgentRunCoordinator {
     const envelope: BackendAgentRunEvent = {
       run: { ...run }, visibleSessionId: route.visibleSessionId, event,
     }
+    this.workflows.observe(route.owner, envelope)
     for (const listener of this.runListeners.get(route.owner) ?? []) {
       try { listener(envelope) } catch { console.warn('[Agent 运行] 客户端事件处理失败') }
     }

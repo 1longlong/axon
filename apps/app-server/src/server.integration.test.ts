@@ -663,7 +663,11 @@ describe('真正独立 app-server 启动与装配', () => {
         await restarted.initialize()
         const observer = await restarted.register('quick')
         const history = await new AppServerHistoryClient(restarted.peer, observer.clientId).read({ kind: 'agent', sessionId: session.id })
-        expect(history.filter((message) => message.type === 'user')).toHaveLength(1)
+        // 中断诊断/真实工具回传同属 user；只有 text 才是原人类任务，不能误判为重投。
+        expect(history.filter((message) => message.type === 'user'
+          && (message as SDKUserMessage).message?.content?.some((block) => block.type === 'text'))).toHaveLength(1)
+        expect(history.filter((message) => message.type === 'user'
+          && (message as SDKUserMessage).message?.content?.some((block) => block.type === 'tool_result'))).toHaveLength(1)
         expect(history.filter((message) => message.type === 'result')).toHaveLength(1)
         expect(history.filter((message) => message.type === 'result')).toMatchObject([{ terminal_reason: 'stopped', stopped_by_user: true }])
         if (runtime === 'pi') expect(JSON.stringify(history)).toContain('held-mcp-tool')
@@ -1110,7 +1114,10 @@ describe('真正独立 app-server 启动与装配', () => {
         await restarted.initialize()
         const observer = await restarted.register('quick')
         const restored = await new AppServerHistoryClient(restarted.peer, observer.clientId).read({ kind: 'agent', sessionId: session.id })
-        expect(restored.filter((message) => message.type === 'user')).toHaveLength(1)
+        expect(restored.filter((message) => message.type === 'user'
+          && (message as SDKUserMessage).message?.content?.some((block) => block.type === 'text'))).toHaveLength(1)
+        if (stage === 'approval') expect(restored.filter((message) => message.type === 'user'
+          && (message as SDKUserMessage).message?.content?.some((block) => block.type === 'tool_result'))).toHaveLength(1)
         expect(restored.filter((message) => message.type === 'result'))
           .toMatchObject([{ terminal_reason: 'stopped', stopped_by_user: true }])
         expect(restored.filter((message) => message.type === 'system' && message.subtype === 'init')).toHaveLength(accepted ? 1 : 0)

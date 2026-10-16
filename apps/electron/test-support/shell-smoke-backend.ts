@@ -71,6 +71,8 @@ void (async () => {
   assert.equal(host.getCapability().available, true, '当前进程无法实际应用 Seatbelt')
   environment = host.initializeShellEnvironment({ sessionId: 'smoke', cwd: workspace })
   const snapshot = await waitForSnapshot(cache)
+  // 文件 rename 可先于 ready 回调被观察到；只在测试等预热实际收束，生产工具仍不等待。
+  await environment.drain()
   const context: Omit<AgentSandboxShellCommandRequest, 'command'> = {
     cwd: workspace, policy: buildAgentSandboxPolicy({ projectRoot: workspace, mode: 'workspaceWrite' }), grants: [],
     environment: { HOME: home, ZDOTDIR: home, PATH: '/usr/bin:/bin' },
@@ -89,6 +91,22 @@ void (async () => {
   const inside = join(workspace, 'inside.txt')
   assert.equal((await environment.executeShellCommand({ ...context, command: `printf inside > ${quote(inside)}` })).exitCode, 0)
   assert.equal(readFileSync(inside, 'utf8'), 'inside')
+  // 选择项目外 cwd 不改变可信沙箱根：允许读取，仍能写原工作区，但不能写执行目录。
+  assert.equal((await environment.executeShellCommand({ ...context, cwd: home, command: 'pwd' })).stdout.trim(), home)
+  const fromOutside = join(workspace, 'from-outside.txt')
+  assert.equal((await environment.executeShellCommand({ ...context, cwd: home, command: `printf inside > ${quote(fromOutside)}` })).exitCode, 0)
+  assert.equal(readFileSync(fromOutside, 'utf8'), 'inside')
+  const relativeOutside = join(home, 'relative-denied.txt')
+  const relativeDenied = await environment.executeShellCommand({ ...context, cwd: home, command: 'printf denied > relative-denied.txt' })
+  assert.notEqual(relativeDenied.exitCode, 0)
+  assert.equal(existsSync(relativeOutside), false)
+  assert.equal(context.policy.sandboxCwd, workspace)
+  assert.deepEqual(context.policy.writableRoots, [workspace])
+  const protectedDirectory = join(workspace, '.git')
+  mkdirSync(protectedDirectory)
+  const protectedTarget = join(protectedDirectory, 'sandbox-denied')
+  await expectEscalation({ ...context, cwd: protectedDirectory, command: `printf denied > ${quote(protectedTarget)}` }, 'protectedPathWrite')
+  assert.equal(existsSync(protectedTarget), false)
   // explore 的 Shell 实际采用只读 profile；项目写入被 OS 拒绝，审批也不能扩大角色权限。
   const readOnly = { ...context, policy: buildAgentSandboxPolicy({ projectRoot: workspace, mode: 'readOnly' }) }
   assert.equal((await environment.executeShellCommand({ ...readOnly, command: `cat ${quote(inside)}` })).stdout, 'inside')
@@ -104,13 +122,13 @@ void (async () => {
     toolExecution: { kind: 'sandbox', mode: 'readOnly' }, sandboxEscalation: readOnlyDenied.escalation,
   })).behavior, 'deny')
   const outside = join(home, 'outside.txt')
-  const original = { ...context, command: `printf outside > ${quote(outside)}` }
+  const original = { ...context, cwd: home, command: `printf outside > ${quote(outside)}` }
   const denied = await expectEscalation(original, 'filesystemWriteOutsideWorkspace')
   assert.deepEqual(denied.escalation.permission, { type: 'filesystemWrite', roots: [outside] })
   assert.equal(existsSync(outside), false)
   assert.equal((await environment.executeShellCommand({ ...original, grants: [{ scope: 'once', permission: denied.escalation.permission }] })).exitCode, 0)
   assert.equal(readFileSync(outside, 'utf8'), 'outside')
-  await expectEscalation({ ...context, command: `printf no > ${quote(join(home, 'still-denied.txt'))}` }, 'filesystemWriteOutsideWorkspace')
+  await expectEscalation({ ...context, cwd: home, command: `printf no > ${quote(join(home, 'still-denied.txt'))}` }, 'filesystemWriteOutsideWorkspace')
 
   await new Promise<void>((done) => server.listen(0, '127.0.0.1', done))
   const address = server.address()
@@ -139,6 +157,6 @@ void (async () => {
   environment.dispose()
   assert.equal(existsSync(snapshot), false)
   assert.deepEqual(readdirSync(cache), [])
-  console.log('SHELL_SMOKE_OK: 真实 Electron/Seatbelt、异步初始化、PATH 恢复、输出流、工作区写入、只读角色写入拒绝且不能升级、精确文件/网络授权、环境覆盖、cwd 回退、停止/超时及释放清理通过')
+  console.log('SHELL_SMOKE_OK: 真实 Electron/Seatbelt、项目外 cwd 与可信 sandboxCwd 分离、原工作区写入/外部写入拒绝/保护目录不放宽、精确授权、异步初始化、PATH 恢复、输出流、只读角色、网络授权、环境覆盖、cwd 回退、停止/超时及释放清理通过')
   finish(0)
 })().catch((error: unknown) => { console.error('Shell 冒烟失败', error); finish(1) })

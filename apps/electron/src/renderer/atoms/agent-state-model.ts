@@ -10,6 +10,8 @@ import type {
   AgentRetryStatus,
   AgentRunSource,
   AgentSessionMeta,
+  AgentPauseSnapshot,
+  BackendOwnedRun,
   SDKMessage,
 } from '@axon/shared'
 
@@ -31,6 +33,11 @@ export interface AgentRendererState {
   messageStatusBySession: Record<string, AgentLoadStatus>
   /** 值是当前运行令牌；不存在即未运行。 */
   activeRunsBySession: Record<string, number>
+  /** 只由原入口身份通知/查询恢复，公开运行状态不赋予控制权。 */
+  ownedRunsBySession: Record<string, BackendOwnedRun>
+  pausesBySession: Record<string, AgentPauseSnapshot>
+  pauseStatusBySession: Record<string, AgentLoadStatus>
+  pauseOperationsBySession: Record<string, 'pausing' | 'continuing'>
   /** 与运行令牌同步清理，用于区分前台发送和外部后台任务。 */
   activeRunSourcesBySession: Record<string, AgentRunSource>
   /** 当前模型 API 自动重试；瞬时 UI 状态，不从 JSONL 恢复。 */
@@ -56,6 +63,10 @@ export function createInitialAgentRendererState(): AgentRendererState {
     messagesBySession: {},
     messageStatusBySession: {},
     activeRunsBySession: {},
+    ownedRunsBySession: {},
+    pausesBySession: {},
+    pauseStatusBySession: {},
+    pauseOperationsBySession: {},
     activeRunSourcesBySession: {},
     retryStatusBySession: {},
     compactionStatusBySession: {},

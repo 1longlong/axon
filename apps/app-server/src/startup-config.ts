@@ -6,12 +6,13 @@ export interface AppServerStartupConfig {
   homeDir: string
   applicationVersion: string
   zimaPython?: string
+  entry?: 'exec'
 }
 
 /** 必填目录避免独立测试/其他宿主意外写入正式数据；未知/重复参数直接拒绝。 */
 export function parseAppServerStartupConfig(argv: readonly string[], environment: NodeJS.ProcessEnv): AppServerStartupConfig {
   const fields = new Map<string, string>()
-  const allowed = ['--data-dir', '--home-dir', '--application-version', '--zima-python']
+  const allowed = ['--data-dir', '--home-dir', '--application-version', '--zima-python', '--entry']
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index]!, value = argv[index + 1]
     if (!allowed.includes(key) || fields.has(key) || value === undefined || !value.trim() || value.includes('\0')) throw new Error('后端启动参数无效')
@@ -21,5 +22,7 @@ export function parseAppServerStartupConfig(argv: readonly string[], environment
   if (!dataDir || !homeDir || !isAbsolute(dataDir) || !isAbsolute(homeDir)
     || !applicationVersion || applicationVersion.length > 100 || /[\r\n]/.test(applicationVersion)) throw new Error('后端启动参数无效')
   const zimaPython = fields.get('--zima-python') ?? environment.AXON_ZIMA_PYTHON?.trim()
-  return { dataDir, homeDir, applicationVersion, ...(zimaPython ? { zimaPython } : {}) }
+  const entry = fields.get('--entry')
+  if (entry !== undefined && entry !== 'exec') throw new Error('后端启动参数无效')
+  return { dataDir, homeDir, applicationVersion, ...(zimaPython ? { zimaPython } : {}), ...(entry ? { entry } : {}) }
 }

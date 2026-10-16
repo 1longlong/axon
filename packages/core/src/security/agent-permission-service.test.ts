@@ -16,6 +16,23 @@ function options(signal: AbortSignal, toolUseId = 'tool-1') {
 }
 
 describe('AgentPermissionService', () => {
+  test('同一 Bash 命令在不同 workdir 不能复用普通始终允许审批', async () => {
+    let sequence = 0
+    const service = new AgentPermissionService({ createId: () => `workdir-${++sequence}` })
+    service.bindOwner('session-1', 'client-1')
+    const run = new AbortController()
+    const canUseTool = service.createCanUseTool('session-1', 1, run.signal)
+    const runtimeOptions: AgentToolPermissionOptions = { ...options(run.signal), toolExecution: { kind: 'runtime' } }
+    const args = { command: 'pwd', workdir: '/project/one' }
+    const first = canUseTool('Bash', args, runtimeOptions)
+    service.respond('client-1', { requestId: 'workdir-1', behavior: 'allow', alwaysAllow: true })
+    expect((await first).behavior).toBe('allow')
+    expect((await canUseTool('Bash', args, runtimeOptions)).behavior).toBe('allow')
+    const different = canUseTool('Bash', { ...args, workdir: '/project/two' }, runtimeOptions)
+    expect(sequence).toBe(2)
+    service.respond('client-1', { requestId: 'workdir-2', behavior: 'deny' })
+    expect((await different).behavior).toBe('deny')
+  })
   test('无沙箱 runtime 的副作用工具必须人工审批，不能复用沙箱先执行分支', async () => {
     let sequence = 0
     const service = new AgentPermissionService({ createId: () => `request-${++sequence}` })

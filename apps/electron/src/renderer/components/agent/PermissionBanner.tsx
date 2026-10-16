@@ -11,14 +11,18 @@ export interface PermissionBannerContent {
   description: string
   detail?: string
   target?: string
+  workingDirectory?: string
 }
 
 /** 把普通工具确认与沙箱升级翻译成明确文案，不在 renderer 推测授权范围。 */
 export function buildPermissionBannerContent(request: AgentPermissionRequest): PermissionBannerContent {
   const escalation = request.sandboxEscalation
+  const workingDirectory = request.toolName === 'Bash' && typeof request.toolInput.workdir === 'string'
+    ? request.toolInput.workdir : undefined
   if (!escalation) return {
     title: `Agent 请求执行：${request.toolName}`,
     description: request.description,
+    workingDirectory,
   }
   const kind = escalation.reason === 'networkAccess'
     ? '网络访问'
@@ -29,6 +33,7 @@ export function buildPermissionBannerContent(request: AgentPermissionRequest): P
     title: `Agent 请求扩展沙箱权限：${request.toolName}`,
     kind,
     description: request.description,
+    workingDirectory,
     detail: escalation.message,
     ...(escalation.target ? { target: escalation.target } : {}),
   }
@@ -56,6 +61,7 @@ export function PermissionBanner({ sessionId }: { sessionId: string }): React.Re
           {pending.length > 1 && <span className="text-[11px] text-muted-foreground">另有 {pending.length - 1} 项等待确认</span>}
         </div>
         <p className="mt-1 break-words text-xs text-muted-foreground">{content.description}</p>
+        {content.workingDirectory && <p className="mt-1 break-all text-xs text-muted-foreground">工作目录：{content.workingDirectory}</p>}
         {content.target && <p className="mt-1 break-all font-mono text-[11px] text-foreground">{content.target}</p>}
         {content.detail && <p className="mt-2 break-words text-xs text-amber-800 dark:text-amber-200">{content.detail}</p>}
         {request.sandboxEscalation && <p className="mt-1 text-[11px] text-muted-foreground">批准后只携带本项权限重试当前工具一次。</p>}

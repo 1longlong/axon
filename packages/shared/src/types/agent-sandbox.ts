@@ -1,8 +1,8 @@
-/** Agent 本地工具沙箱的 Runtime 中立契约；具体 Seatbelt profile 只由主进程实现。 */
+/** Agent 本地工具沙箱的 Runtime 中立契约；具体 Seatbelt profile 只由宿主执行层实现。 */
 
 export type AgentSandboxPlatform = 'macos'
 export type AgentSandboxMode = 'readOnly' | 'workspaceWrite'
-export type AgentApprovalPolicy = 'onRequest'
+export type AgentApprovalPolicy = 'onRequest' | 'never'
 export type AgentApprovalReviewer = 'user' | 'autoReview'
 
 export type AgentSandboxCapabilityLimitation =
@@ -34,8 +34,8 @@ export interface AgentSandboxFullReadAccess {
 export interface AgentSandboxPolicy {
   platform: AgentSandboxPlatform
   mode: AgentSandboxMode
-  /** 项目管理器解析出的可信项目根；命令 cwd 只能位于其中。 */
-  workingDirectory: string
+  /** 项目管理器解析出的可信沙箱目录基准；独立于模型指定的命令 cwd，不能随 workdir 改变。 */
+  sandboxCwd: string
   readAccess: AgentSandboxFullReadAccess
   writableRoots: string[]
   protectedReadOnlyRoots: string[]
@@ -78,6 +78,7 @@ export interface AgentSandboxGrant {
 /** 宿主命令执行输入始终使用 argv，禁止 adapter 拼接 Seatbelt profile 或 shell 包装串。 */
 export interface AgentSandboxCommandRequest {
   argv: string[]
+  /** 本次进程执行目录，可位于项目外；不能用它重新生成或扩大 policy。 */
   cwd: string
   policy: AgentSandboxPolicy
   grants: AgentSandboxGrant[]

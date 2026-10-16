@@ -20,6 +20,7 @@ import type {
   ChannelUpdateInput,
   ProviderType,
   ResolvedChannel,
+  RuntimeChannelDefinition,
 } from '@axon/shared'
 import type { ChannelCredentialCodec } from './credential-codec'
 import { readJsonFileSafe, writeJsonFileAtomic } from '../storage/safe-file'
@@ -60,6 +61,8 @@ export interface ChannelManagerOptions {
   credentialCodec: ChannelCredentialCodec
   createId?: () => string
   now?: () => number
+  /** 瞬时运行凭据优先于持久密文；不能把失败降级到其他凭据来源。 */
+  resolveRuntimeCredential?: (channel: Channel) => Promise<string>
 }
 
 function cloneModels(models: readonly ChannelModel[]): ChannelModel[] {
@@ -172,12 +175,37 @@ export class ChannelManager {
   private readonly credentialCodec: ChannelCredentialCodec
   private readonly createId: () => string
   private readonly now: () => number
+  private readonly resolveRuntimeCredential?: ChannelManagerOptions['resolveRuntimeCredential']
 
   constructor(options: ChannelManagerOptions) {
     this.configPath = options.configPath
     this.credentialCodec = options.credentialCodec
     this.createId = options.createId ?? randomUUID
     this.now = options.now ?? Date.now
+    this.resolveRuntimeCredential = options.resolveRuntimeCredential
+  }
+
+  /** 可信入口在启动阶段写入无密钥渠道；保持 ID/创建时间，不落盘运行凭据或伪密文。 */
+  configureRuntimeChannels(definitions: readonly RuntimeChannelDefinition[]): void {
+    const seen = new Set<string>()
+    const normalized = definitions.map((input) => {
+      if (!input.id || input.id !== input.id.trim() || seen.has(input.id) || !isProviderType(input.provider)
+        || typeof input.enabled !== 'boolean') throw new ChannelManagerError('invalid_input', '运行渠道配置无效')
+      seen.add(input.id)
+      return { id: input.id, name: normalizeName(input.name), provider: input.provider,
+        baseUrl: normalizeBaseUrl(input.provider, input.baseUrl), models: normalizeModels(input.models), enabled: input.enabled }
+    })
+    if (!normalized.length) return
+    const config = this.readConfig()
+    const timestamp = this.now()
+    for (const input of normalized) {
+      const index = config.channels.findIndex((item) => item.id === input.id)
+      const channel: StoredChannel = { ...input, encryptedCredential: '',
+        createdAt: index < 0 ? timestamp : config.channels[index]!.createdAt, updatedAt: timestamp }
+      if (index < 0) config.channels.push(channel)
+      else config.channels[index] = channel
+    }
+    this.writeConfig(config)
   }
 
   list(): Channel[] {
@@ -278,14 +306,19 @@ export class ChannelManager {
     return toPublicChannel(removed!)
   }
 
-  /** 仅供后端 Provider 调用：等待宿主解密，明文和宿主错误均不能直接透传给 renderer。 */
+  /** Provider 调用时才解析瞬时凭据或宿主密文；任一失败均脱敏，不切换来源。 */
   async resolve(id: string): Promise<ResolvedChannel> {
     const stored = this.readConfig().channels.find((item) => item.id === id)
     if (!stored) throw new ChannelManagerError('not_found', `渠道不存在: ${id}`)
 
     try {
-      const { hasApiKey: _hasApiKey, ...channel } = toPublicChannel(stored)
-      return { ...channel, apiKey: await this.credentialCodec.decrypt(stored.encryptedCredential) }
+      const publicChannel = toPublicChannel(stored)
+      const { hasApiKey: _hasApiKey, ...channel } = publicChannel
+      const apiKey = this.resolveRuntimeCredential
+        ? await this.resolveRuntimeCredential(publicChannel)
+        : await this.credentialCodec.decrypt(stored.encryptedCredential)
+      if (typeof apiKey !== 'string') throw new Error()
+      return { ...channel, apiKey }
     } catch {
       throw new ChannelManagerError('credential_error', '读取渠道凭据失败')
     }

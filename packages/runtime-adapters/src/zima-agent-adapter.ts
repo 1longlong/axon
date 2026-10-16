@@ -4,9 +4,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { basename, dirname, join, isAbsolute, relative, resolve } from 'node:path'
-import { AsyncWorkTracker } from '@axon/core'
+import { AsyncWorkTracker, resolveAgentShellWorkdir } from '@axon/core'
+import { AgentRuntimeCleanupError } from '@axon/shared'
 import type {
   AgentProviderAdapter,
+  AgentContinueQueryInput,
   AgentCustomToolDefinition,
   AgentErrorCategory,
   AgentExecutionPolicy,
@@ -33,6 +35,7 @@ const SHUTDOWN_TIMEOUT_MS = 2_000
 const ZIMA_CONTEXT_WINDOW_TOKENS = 128_000
 
 type JsonObject = Record<string, unknown>
+type ZimaExecutionInput = AgentQueryInput | AgentContinueQueryInput
 
 interface PendingRequest {
   resolve: (value: JsonObject) => void
@@ -53,6 +56,7 @@ export interface ZimaRuntimeProcessOptions {
 export interface ZimaRuntimeHandshake {
   bootId: string
   runtimeVersion: string
+  supportsContinue: boolean
 }
 
 function asObject(value: unknown): JsonObject | undefined {
@@ -129,7 +133,8 @@ export class ZimaRuntimeTransport {
         || typeof runtime.version !== 'string' || !runtime.version
         || typeof runtime.boot_id !== 'string' || !runtime.boot_id
       ) throw new Error('Zima Runtime 握手版本或身份无效')
-      transport.handshake = { bootId: runtime.boot_id, runtimeVersion: runtime.version }
+      transport.handshake = { bootId: runtime.boot_id, runtimeVersion: runtime.version,
+        supportsContinue: asObject(response.capabilities)?.continue === true }
       return transport
     } catch (error) {
       transport.fail(error instanceof Error ? error : new Error('Zima Runtime 握手失败'))
@@ -277,6 +282,8 @@ export class ZimaRuntimeTransport {
 }
 
 interface ActiveZimaRun {
+  abortWork?: Promise<void>
+  cleanupFailed?: boolean
   transport?: ZimaRuntimeTransport
   runId: string
   runtimeSessionId: string
@@ -306,18 +313,24 @@ export function assertZimaConnection(connection: NonNullable<AgentQueryInput['co
   }
 }
 
-/** 当前协议不能在 Read 后热更新系统提示；明确提示模型主动检查子目录规则。 */
-function zimaSystemPrompt(input: AgentQueryInput): string | null {
+/** 补充当前项目目录；协议不能在 Read 后热更新系统提示，子目录规则由模型主动检查。 */
+function zimaSystemPrompt(input: ZimaExecutionInput): string | null {
   const base = input.systemPrompt?.trim() ?? ''
-  if (!input.projectInstructionScope) return base || null
   return [
     base,
-    'Zima Runtime 当前不会自动把子目录 AGENTS.md 加入后续模型请求。进入子目录读取或修改文件前，先用 Read 检查沿途适用的 AGENTS.md；项目根规则已由宿主提供。',
-  ].filter(Boolean).join('\n\n')
+    input.cwd ? `当前项目工作目录：${input.cwd}` : '',
+    input.projectInstructionScope
+      ? 'Zima Runtime 当前不会自动把子目录 AGENTS.md 加入后续模型请求。进入子目录读取或修改文件前，先用 Read 检查沿途适用的 AGENTS.md；项目根规则已由宿主提供。' : '',
+  ].filter(Boolean).join('\n\n') || null
 }
 
-/** 只在 adapter 内把连接信息和恢复凭据翻译成 Zima 的 session.run 参数。 */
-function buildRunParams(input: AgentQueryInput, runId: string): JsonObject {
+/** 两种执行共用可信装配；继续只编码宿主背景，不构造 prompt 或用户消息。 */
+function buildRunParams(input: ZimaExecutionInput, runId: string): JsonObject {
+  const continuation = 'interruptionId' in input ? input : undefined
+  if (continuation && ('prompt' in input || !continuation.interruptionId?.trim() || !continuation.interruptionContext?.trim()
+    || !(input.runtimeSessionFile || input.resumeSessionId || input.recoveryPrompt?.trim()))) {
+    throw new Error('Zima Runtime 继续缺少中断身份、背景或恢复来源')
+  }
   const connection = input.connection
   if (!connection || !input.model || !input.cwd || !input.runtimeSessionDir) {
     throw new Error('Zima Runtime 缺少模型、工作区或会话目录')
@@ -335,7 +348,10 @@ function buildRunParams(input: AgentQueryInput, runId: string): JsonObject {
   return {
     session_id: input.sessionId,
     run_id: runId,
-    prompt: input.prompt,
+    ...(continuation ? {
+      interruption_id: continuation.interruptionId,
+      interruption_context: continuation.interruptionContext,
+    } : { prompt: (input as AgentQueryInput).prompt }),
     working_directory: input.cwd,
     system_prompt: zimaSystemPrompt(input),
     model: {
@@ -648,7 +664,7 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
   /** 回答 Zima 反向调用：内置工具走权限策略，宿主工具由 Axon 执行后回传。 */
   private async resolveCallback(
     event: JsonObject,
-    input: AgentQueryInput,
+    input: ZimaExecutionInput,
     run: ActiveZimaRun,
   ): Promise<void> {
     const transport = run.transport
@@ -657,9 +673,12 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
     const target = { request_id: requestId, session_id: run.runtimeSessionId, run_id: run.runId }
     if (event.event === 'approval.requested') {
       let decision: Awaited<ReturnType<NonNullable<AgentQueryInput['canUseTool']>>>
+      let normalizedArgs = args
       try {
+        normalizedArgs = name === 'Bash'
+          ? { ...args, workdir: resolveAgentShellWorkdir(input.cwd!, args.workdir) } : args
         decision = input.canUseTool
-          ? await input.canUseTool(name, permissionInput(name, args), {
+          ? await input.canUseTool(name, permissionInput(name, normalizedArgs), {
             signal: input.abortSignal,
             toolUseId: toolCallId,
             executionPolicy: run.executionPolicy,
@@ -674,7 +693,7 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
         ...target,
         behavior: decision.behavior,
         updated_arguments: decision.behavior === 'allow'
-          ? restoredArguments(args, decision.updatedInput)
+          ? restoredArguments(normalizedArgs, decision.updatedInput)
           : null,
         message: decision.message ?? null,
       })
@@ -735,6 +754,15 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
 
   /** 首次消费才启动进程；退出主动 return 暂停的流，不依赖 UI 继续拉取。 */
   query(input: AgentQueryInput): AsyncIterableIterator<AgentStreamPayload> {
+    return this.createQuery(input)
+  }
+
+  /** 精确暂停授权由 core 核验；adapter 只负责新协议和既有执行/取消生命周期。 */
+  continueQuery(input: AgentContinueQueryInput): AsyncIterableIterator<AgentStreamPayload> {
+    return this.createQuery(input)
+  }
+
+  private createQuery(input: ZimaExecutionInput): AsyncIterableIterator<AgentStreamPayload> {
     const iterator = this.executeQuery(input)
     let started = false
     return {
@@ -754,7 +782,7 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
   }
 
   /** 握手前登记归属；查询 finally 等进程 close 与在途回调真实结束后才撤销登记。 */
-  private async *executeQuery(input: AgentQueryInput): AsyncGenerator<AgentStreamPayload, void, unknown> {
+  private async *executeQuery(input: ZimaExecutionInput): AsyncGenerator<AgentStreamPayload, void, unknown> {
     this.ensureOpen()
     if (this.active.has(input.sessionId)) throw new Error('Zima 会话已有运行中的查询')
     const runId = randomUUID()
@@ -762,6 +790,7 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
     const events: JsonObject[] = []
     let wake: (() => void) | undefined
     let transportFailure: Error | undefined
+    let pendingResult: AgentStreamPayload | undefined
     const run: ActiveZimaRun = {
       runId, runtimeSessionId: input.resumeSessionId ?? input.sessionId,
       abortRequested: false, controller: new AbortController(), callbacks: new AsyncWorkTracker(),
@@ -790,7 +819,10 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
       run.transport = transport
       this.ensureOpen()
       run.controller.signal.throwIfAborted()
-      const accepted = await transport.request('session.run', params)
+      const continuing = 'interruptionId' in input
+      // 未明确支持的新 Runtime 不能把继续误当普通发送；不回退、不自动重投。
+      if (continuing && !transport.identity.supportsContinue) throw new Error('Zima Runtime 尚未支持无用户消息继续，请更新 Runtime')
+      const accepted = await transport.request(continuing ? 'session.continue' : 'session.run', params)
       this.ensureOpen()
       run.controller.signal.throwIfAborted()
       if (accepted.accepted !== true || accepted.run_id !== runId || typeof accepted.session_id !== 'string') {
@@ -958,7 +990,8 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
             }
           }
           terminal = true
-          yield resultPayload(data, run.runtimeSessionId, runUsage, run.abortRequested)
+          // 不在进程/回调仍存活时提前交付停止终态。
+          pendingResult = resultPayload(data, run.runtimeSessionId, runUsage, run.abortRequested)
         }
       }
     } finally {
@@ -966,15 +999,25 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
         input.abortSignal?.removeEventListener('abort', onAbort)
         // 先取消回调并关闭传输，释放等待中的 RPC；再等不配合取消的宿主工作，不回传迟到结果。
         run.controller.abort()
+        // 正常停止先等 abort 确认，避免本端 close 把仍在途的确认误诊为取消失败。
+        if (!this.disposed) await run.abortWork
         if (run.transport) {
-          try { await run.transport.close() } catch { this.recordCleanupFailure('Zima 传输清理失败') }
+          try { await run.transport.close() } catch {
+            this.recordCleanupFailure('Zima 传输清理失败', run)
+            // 关闭失败仍取消自有进程并等真实 close，不跳过宿主回调等待。
+            run.transport.terminate()
+            await run.transport.drain()
+          }
         }
+        await run.abortWork
         await run.callbacks.drain()
       } finally {
         if (this.active.get(input.sessionId) === run) this.active.delete(input.sessionId)
         finish()
       }
+      if (run.cleanupFailed) throw new AgentRuntimeCleanupError()
     }
+    if (pendingResult) yield pendingResult
   }
 
   /** 取消初始化/宿主回调；已握手的运行只发送一次 session.abort，不自动重发。 */
@@ -984,9 +1027,13 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
     run.abortRequested = true
     run.controller.abort()
     if (!run.transport) return
-    void this.work.run(() => run.transport!.request('session.abort', {
+    run.abortWork = this.work.run(() => run.transport!.request('session.abort', {
       session_id: run.runtimeSessionId, run_id: run.runId, reason: '用户停止',
-    })).catch(() => { run.transport?.terminate() })
+    })).then(() => {}).catch(() => {
+      // 整体退出主动终止传输，未收到业务取消回包属于预期；仍由 finally 等真实进程关闭。
+      if (!this.disposed) this.recordCleanupFailure('Zima 运行取消确认失败', run)
+      run.transport?.terminate()
+    })
   }
 
   /** 封住入口、停止全部自有进程，再驱动已开始的查询 finally。 */
@@ -998,7 +1045,9 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
       run.transport?.terminate()
     }
     for (const stream of this.streams) {
-      void this.work.run(() => stream.return()).catch(() => this.recordCleanupFailure('Zima 查询流清理失败'))
+      void this.work.run(() => stream.return()).catch((error: unknown) => {
+        if (!(error instanceof AgentRuntimeCleanupError)) this.recordCleanupFailure('Zima 查询流清理失败')
+      })
         .finally(() => this.streams.delete(stream))
     }
   }
@@ -1013,7 +1062,8 @@ export class ZimaAgentAdapter implements AgentProviderAdapter {
     if (this.disposed) throw new DOMException('Zima adapter 已释放', 'AbortError')
   }
 
-  private recordCleanupFailure(message: string): void {
+  private recordCleanupFailure(message: string, run?: ActiveZimaRun): void {
+    if (run) run.cleanupFailed = true
     this.cleanupFailures.push(new Error(message))
     console.warn(`[zima-adapter] ${message}`)
   }
