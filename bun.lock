@@ -17,7 +17,7 @@
     },
     "apps/app-server": {
       "name": "@axon/app-server-app",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "dependencies": {
         "@axon/app-server": "workspace:*",
         "@axon/core": "workspace:*",
@@ -28,7 +28,7 @@
     },
     "apps/electron": {
       "name": "@axon/electron",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "dependencies": {
         "@axon/app-server": "workspace:*",
         "@axon/app-server-app": "workspace:*",
@@ -79,7 +79,7 @@
     },
     "apps/exec": {
       "name": "@axon/exec",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "dependencies": {
         "@axon/app-server": "workspace:*",
         "@axon/shared": "workspace:*",
@@ -89,7 +89,7 @@
     },
     "packages/app-server": {
       "name": "@axon/app-server",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "dependencies": {
         "@axon/core": "workspace:*",
         "@axon/shared": "workspace:*",
@@ -100,7 +100,7 @@
     },
     "packages/core": {
       "name": "@axon/core",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "dependencies": {
         "@axon/loop-engine": "workspace:*",
         "@axon/shared": "workspace:*",
@@ -115,7 +115,7 @@
     },
     "packages/host-node": {
       "name": "@axon/host-node",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "dependencies": {
         "@axon/core": "workspace:*",
         "@axon/shared": "workspace:*",
@@ -126,14 +126,14 @@
     },
     "packages/loop-engine": {
       "name": "@axon/loop-engine",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "dependencies": {
         "croner": "10.0.1",
       },
     },
     "packages/runtime-adapters": {
       "name": "@axon/runtime-adapters",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "dependencies": {
         "@axon/core": "workspace:*",
         "@axon/shared": "workspace:*",
@@ -147,7 +147,7 @@
     },
     "packages/shared": {
       "name": "@axon/shared",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "devDependencies": {
         "typescript": "^5.0.0",
       },

@@ -1,6 +1,6 @@
 {
   "name": "@axon/app-server-app",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Axon 独立后端 stdio 可执行入口",
   "private": true,
   "type": "module",

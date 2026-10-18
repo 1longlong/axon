@@ -207,7 +207,7 @@ const executor = new AgentSandboxCommandService({ shellSnapshotDirectory: paths.
 const pi = new PiAgentAdapter(undefined, executor)
 const backend = createBackend({
   paths,
-  applicationVersion: '0.1.5',
+  applicationVersion: '0.1.6',
   credentialCodec: createCredentialCodec(), // 无安全后端：拒绝非空凭据，不保存明文。
   resolveAdapter: (runtimeId) => {
     if (runtimeId !== 'pi') throw new Error('本示例只装配 Pi')
@@ -234,7 +234,7 @@ try {
 bun run app-server:dev \
   --data-dir /absolute/axon-data \
   --home-dir /absolute/axon-home \
-  --application-version 0.1.5
+  --application-version 0.1.6
 ```
 
 这是等待父端协议请求的 stdio 服务，不是交互式聊天 CLI。父端应以子进程管道启动它，先握手再登记客户端，之后携带 `clientId` 调用固定业务方法。下面的最小父端示例保存在 `apps/app-server/example-client.ts`，从仓库根目录执行 `bun run apps/app-server/example-client.ts`；不读写桌面正式数据，也不请求模型。
@@ -251,7 +251,7 @@ import type { AppServerClient } from '@axon/shared'
 const directory = mkdtempSync(join(tmpdir(), 'axon-server-example-'))
 const child = spawn(process.execPath, ['run', 'apps/app-server/src/main.ts',
   '--data-dir', join(directory, 'data'), '--home-dir', directory,
-  '--application-version', '0.1.5'], { stdio: ['pipe', 'pipe', 'pipe'] })
+  '--application-version', '0.1.6'], { stdio: ['pipe', 'pipe', 'pipe'] })
 const closed = new Promise<number | null>((resolve, reject) => {
   child.once('close', resolve)
   child.once('error', reject)
@@ -261,7 +261,7 @@ const peer = new JsonRpcPeer(child.stdout, child.stdin, APP_SERVER_RPC_OPTIONS)
 try {
   await peer.request(methods.INITIALIZE, {
     protocolVersion: APP_SERVER_PROTOCOL_VERSION,
-    client: { name: 'axon-example', version: '0.1.5' },
+    client: { name: 'axon-example', version: '0.1.6' },
     hostCapabilities: { credentialStorage: 'unavailable', channelTargetConfirmation: false },
   })
   const client = await peer.request(methods.REGISTER_CLIENT, { kind: 'external' }) as unknown as AppServerClient

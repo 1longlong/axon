@@ -4,12 +4,12 @@
 
 ## 当前状态
 
-- 独立 Loop 目录/MCP 已完成；本轮完成创建表单交互修正。Loop 直接绑定本地文件夹，不绑定或创建 Agent 项目，MCP 独立加密保存/连接/授权，不继承项目记忆。
+- 独立 Loop 目录/MCP 与创建表单交互修正已完成。Loop 直接绑定本地文件夹，不绑定或创建 Agent 项目，MCP 独立加密保存/连接/授权，不继承项目记忆。
 - 底层仍共用 AgentSessionFactory、AgentService 和完整主子工作流；Loop 真实根创建后固定、执行前复核。应用 JSONL 与 Runtime artifact 不变。
-- 根及九 workspace 为 v0.1.5，仅 macOS/Pi Loop；Zima Loop、常驻服务、系统唤醒及其他后置项未恢复。
+- 根及九 workspace 为 v0.1.6，仅 macOS/Pi Loop；Zima Loop、常驻服务、系统唤醒及其他后置项未恢复。
 - 现行 LoopDefinition/创建输入使用 workspacePath，旧 projectId 格式不迁移、不自动删除；本轮不再改 DTO、持久化格式、RPC 或执行权限。
 
-## 本轮改动
+## 最近功能改动
 
 1. 创建/编辑的目录区域不再使用输入框：选择/更换文件夹按钮加普通路径文字，创建后只展示固定目录。提交前显式检查目录，仍由后端校验真实根。
 2. 配置 MCP 不再要求先选目录；新建草稿可以先填写保存。连接测试和工具发现仍沿用现行目录契约，缺少目录/服务器时给出具体原因；运行/排队时禁止改服务器的后端边界不变。
@@ -24,7 +24,7 @@
 - 新增 LoopForm.test.tsx，scripts/smoke-loop.ts 增加未选目录先配置、明确测试提示及无目录输入框断言。
 - README、docs/ui-design.md、docs/axon-project-design.md 同步现行交互；后端与协议本轮未改。
 
-## 本轮验证
+## 最近功能验收
 
 - 表单/测试生命周期/样式定向：7 pass / 0 fail，48 断言，3 文件；/private/tmp/axon-loop-form-ui-tests.log。
 - 九 workspace 类型全部退出 0：/private/tmp/axon-loop-form-ui-types.log；源码 Electron production build、git diff --check 通过。未重复全仓测试或构建安装包。
@@ -32,7 +32,15 @@
 - 截图 /private/var/folders/g_/9jwx4hbn38vbn9fn6cryjpmm0000gn/T/axon-loop-desktop-7jgqlm，已检查 agent-compose.png 和 loop-mcp-no-workspace.png。不冒充人工原生 picker 或外部模型验收。既有 Vite 大 chunk 和 Electron console-message 弃用提示仍在。
 - 完整后端基线为此前同日目录/MCP 解耦回归：1462 pass / 2 skip / 0 fail，10191 断言、220 文件；/private/tmp/axon-loop-independent-full.log。两项需显式解释器配置的 Zima 专项跳过，不当作本轮全仓重跑结果。
 
+## v0.1.6 验证
+
+- 根与九 workspace、锁文件和 README 使用示例的版本统一为 0.1.6；不改业务行为、DTO 或权限。
+- 九 workspace 类型检查全部通过：/private/tmp/axon-v016-types.log；版本/启动入口定向测试 4 pass / 0 fail、36 断言：/private/tmp/axon-v016-version-tests.log。
+- 当前版本全仓回归：1465 pass / 2 skip / 0 fail，10211 断言、221 文件；/private/tmp/axon-v016-full-tests-unrestricted.log。两项真实 Zima 专项仍需显式解释器配置，未当作通过。首次受限沙箱运行因无法监听本机测试端口已中止；上述结果来自放开测试所需权限后的完整重跑。
+- Electron production build 与独立 CLI 构建通过：/private/tmp/axon-v016-electron-build.log、/private/tmp/axon-v016-cli-build.log。CLI 版本与帮助入口正常，归档清单确认为 darwin/arm64、0.1.6、内嵌 Worker。
+- macOS arm64 DMG/ZIP 构建成功，hdiutil verify 与 unzip -t 均通过；app/ZIP 内版本和第三方声明已核对，三份产物的 SHA-256 与清单一致。证据：/private/tmp/axon-v016-packaging.log、/private/tmp/axon-v016-dmg-verify.log、/private/tmp/axon-v016-zip-verify.log。产物未签名/公证，未进行安装后的 GUI 或 Keychain 验收。
+
 ## 后续起点
 
-- 本轮仅改目录和 MCP 表单交互；可直接新建 Loop 测试，既有权限边界不放宽。
+- 可直接新建 Loop 测试；当前版本核对未改变既有功能与权限边界。
 - 等用户明确下一需求，不自动扩展模板、Zima Loop、常驻、项目互斥或其他暂不实现项。
