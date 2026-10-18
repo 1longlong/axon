@@ -97,6 +97,12 @@ export function prepareAgentShellSnapshotCommand(
   }
   if (!snapshot || !sameDirectory || input.argv[0] !== snapshot.shell.path
     || input.argv[1] !== '-lc' || input.argv.length < 3 || !existsSync(snapshot.path)) {
+    // 无快照或子目录不匹配时，仍须在登录初始化后放回受管命令目录；不能误调全局同名 CLI。
+    if (input.pathPrepend?.length && input.argv.length >= 3 && ['-lc', '-c'].includes(input.argv[1]!)) {
+      const argv = [...input.argv]
+      argv[2] = `export PATH=${quoteShell(input.pathPrepend.join(':'))}\${PATH:+:"$PATH"}\n${argv[2]}`
+      return { argv, environment: {} }
+    }
     return { argv: input.argv, environment: {} }
   }
   const keys = [...new Set([

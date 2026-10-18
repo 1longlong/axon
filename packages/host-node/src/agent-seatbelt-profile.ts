@@ -77,6 +77,8 @@ export function compileSeatbeltProfile(
     // 登录 shell 初始化和常见重定向依赖此字符设备；只开放精确路径，不放宽 /dev。
     '(allow file-write* (literal "/dev/null"))',
     ...(policy.networkAccess || overrides.networkAccess ? [] : ['(deny network*)']),
+    // 只开放可信 Loop 的精确 Unix socket；不能用此字段申请 TCP 或其他本地服务。
+    ...(policy.controlSocketPath ? [`(allow network-outbound (remote unix-socket (subpath ${encodeSeatbeltPath(policy.controlSocketPath)})))`] : []),
     ...writableRoots.map((root) => `(allow file-write* (subpath ${encodeSeatbeltPath(root)}))`),
     ...protectedRoots.map((root) => `(deny file-write* (subpath ${encodeSeatbeltPath(root)}))`),
     // 临时授权最后应用，才能只为本次命令打开保护目录中的精确子路径。

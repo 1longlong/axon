@@ -1,8 +1,9 @@
 /** 弹窗测试生命周期；取消/关闭先撤销 UI 代次，再请求主进程取消连接等待。 */
 import type { McpConnectionTestInput, McpConnectionTestResult } from '@axon/shared'
 
+export type McpDraftTestInput = Omit<McpConnectionTestInput, 'projectId'>
 export interface McpConnectionTestApi {
-  testConnection(input: McpConnectionTestInput): Promise<McpConnectionTestResult>
+  testConnection(input: McpDraftTestInput): Promise<McpConnectionTestResult>
   cancelConnectionTest(requestId: string): Promise<boolean>
 }
 export interface McpConnectionTestCallbacks {
@@ -17,7 +18,7 @@ export class McpConnectionTestRunner {
   constructor(private readonly api: McpConnectionTestApi, private readonly callbacks: McpConnectionTestCallbacks) {}
 
   /** 一次只发起一个草稿测试；传输失败显示固定提示，不回显未知原生异常。 */
-  async run(input: Omit<McpConnectionTestInput, 'requestId'>): Promise<void> {
+  async run(input: Omit<McpDraftTestInput, 'requestId'>): Promise<void> {
     if (this.disposed || this.current) return
     const requestId = crypto.randomUUID()
     this.current = requestId

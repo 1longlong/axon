@@ -134,6 +134,25 @@ describe('Agent 模型思考能力', () => {
 })
 
 describe('Pi Bash 宿主委托', () => {
+  test('宿主命令上下文覆盖或删除环境并前置目录，adapter 不解释业务来源', async () => {
+    const requests: AgentSandboxShellCommandRequest[] = []
+    const host = hostToolPort({ executeShellCommand: async (request) => {
+      requests.push(request)
+      return { exitCode: 0, timedOut: false, aborted: false, stdout: '', stderr: '', stdoutTruncated: false, stderrTruncated: false }
+    } })
+    const context = { pathPrepend: ['/trusted/host/bin'], environmentOverrides: { AXON_HOST_TOKEN: '本轮', AXON_EXPIRED_TOKEN: undefined } }
+    await createPiSandboxedBashOperations(host, SANDBOX_POLICY, undefined, undefined, context).exec('true', '/tmp/project', {
+      onData: () => {}, env: { AXON_HOST_TOKEN: '旧值', AXON_EXPIRED_TOKEN: '过期值' },
+    })
+    expect(requests[0]?.environmentOverrides).toMatchObject({ AXON_HOST_TOKEN: '本轮', AXON_EXPIRED_TOKEN: undefined })
+    expect(requests[0]?.pathPrepend).toEqual(['/trusted/host/bin'])
+    expect(context.environmentOverrides.AXON_HOST_TOKEN).toBe('本轮')
+    await createPiSandboxedBashOperations(host, SANDBOX_POLICY, undefined, undefined,
+      { environmentOverrides: { AXON_HOST_TOKEN: undefined } }).exec('true', '/tmp/project', { onData: () => {} })
+    expect(requests[1]?.environmentOverrides).toHaveProperty('AXON_HOST_TOKEN', undefined)
+    expect(requests[1]?.pathPrepend).toBeUndefined()
+  })
+
   test('SDK 完整环境与运行时 PATH 前缀被拆开，继承值不变成显式覆盖', async () => {
     let received: AgentSandboxShellCommandRequest | undefined
     const bin = '/tmp/pi-managed-bin'

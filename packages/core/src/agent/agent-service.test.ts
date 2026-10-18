@@ -17,6 +17,7 @@ import type {
 import { AgentRuntimeCleanupError } from '@axon/shared'
 import { AgentEventBus } from './agent-event-bus'
 import { AgentService, AgentServiceError } from './agent-service'
+import { resolveBackendAgentContext } from '../backend-agent-session-context'
 import { AgentSessionManager, AgentSessionManagerError } from './agent-session-manager'
 import { AgentRootStateStore } from './agent-root-state-store'
 import {
@@ -118,7 +119,7 @@ function createService(
     resolveProjectCwd?: (id: string) => string
     resolveProjectInstructions?: (root: string) => ProjectInstructionManifest
     discoverAgentSkills?: (root: string) => AgentSkillCatalog
-    getCustomTools?: (context: { projectId: string; runSignal: AbortSignal }) => Promise<AgentCustomToolDefinition[]>
+    getCustomTools?: (context: { workspacePath: string; runSignal: AbortSignal }) => Promise<AgentCustomToolDefinition[]>
     getProjectMemoryContext?: (
       projectId: string,
       previous: Record<string, { updatedAt: number; size: number }> | undefined,
@@ -142,7 +143,8 @@ function createService(
     runtimeConfigDir: join(directory, 'runtime'),
     runtimeSessionDir: join(directory, 'runtime', 'sessions'),
     getSystemPrompt: () => '全局规则',
-    resolveProjectCwd: overrides.resolveProjectCwd ?? (() => directory),
+    resolveExecutionContext: (session) => resolveBackendAgentContext(session, { getSession: (id) => sessions.get(id),
+      resolveProjectCwd: overrides.resolveProjectCwd ?? (() => directory) }),
     ...(overrides.resolveProjectInstructions
       ? { resolveProjectInstructions: overrides.resolveProjectInstructions }
       : {}),
@@ -151,7 +153,7 @@ function createService(
       : {}),
     ...(overrides.getCustomTools ? { getCustomTools: overrides.getCustomTools } : {}),
     ...(overrides.getProjectMemoryContext
-      ? { getProjectMemoryContext: overrides.getProjectMemoryContext }
+      ? { getMemoryContext: (session) => session.projectId ? overrides.getProjectMemoryContext!(session.projectId, session.memoryFileStates) : undefined }
       : {}),
     ...(overrides.generateTitle ? { generateTitle: overrides.generateTitle } : {}),
     createId: overrides.createId ?? (() => 'user-1'),
@@ -561,7 +563,7 @@ describe('AgentService 消息编排主链', () => {
       kind: 'sdk_message',
       message: { type: 'result', subtype: 'success', usage: { input_tokens: 1 } },
     }]
-    let observedProjectId = ''
+    let observedWorkspacePath: string | undefined
     const customTool: AgentCustomToolDefinition = {
       name: 'mcp__local__read_file',
       description: '读取文件',
@@ -570,8 +572,8 @@ describe('AgentService 消息编排主链', () => {
       execute: async () => ({ content: 'ok' }),
     }
     const { service } = createService(adapter, resolvedChannel(), {
-      getCustomTools: async ({ projectId, runSignal }) => {
-        observedProjectId = projectId
+      getCustomTools: async ({ workspacePath, runSignal }) => {
+        observedWorkspacePath = workspacePath
         expect(runSignal.aborted).toBe(false)
         return withAgentToolSearch([customTool])
       },
@@ -579,7 +581,7 @@ describe('AgentService 消息编排主链', () => {
 
     await service.sendMessage({ sessionId: 'session-1', text: '读取文件' })
 
-    expect(observedProjectId).toBe('project-1')
+    expect(observedWorkspacePath).toBe(directory)
     expect(adapter.input?.customTools?.map((tool) => tool.name)).toEqual([
       'mcp__local__read_file', 'tool_search',
     ])

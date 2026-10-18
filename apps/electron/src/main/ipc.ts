@@ -13,6 +13,7 @@ import { registerAppServerProjectIpcHandlers } from './ipc/app-server-project-ip
 import { registerAppServerMcpIpcHandlers } from './ipc/app-server-mcp-ipc'
 import { registerAppServerSkillIpcHandlers } from './ipc/app-server-skill-ipc'
 import { registerAppServerTaskIpcHandlers } from './ipc/app-server-task-ipc'
+import { registerAppServerLoopIpcHandlers } from './ipc/app-server-loop-ipc'
 import { registerWindowIpcHandlers } from './ipc/window-ipc-handlers'
 import type { AgentWorkspaceDirectorySelection } from '@axon/shared'
 import type { WebContents } from 'electron'
@@ -44,6 +45,7 @@ export function registerIpcHandlers(options: DesktopIpcOptions): () => void {
     releases.push(registerAppServerMcpIpcHandlers(ipcMain, options))
     releases.push(registerAppServerSkillIpcHandlers(ipcMain, options))
     releases.push(registerAppServerTaskIpcHandlers(ipcMain, options))
+    releases.push(registerAppServerLoopIpcHandlers(ipcMain, options))
     releases.push(registerAppServerSettingsIpcHandlers(ipcMain, options))
     releases.push(registerWindowIpcHandlers())
   } catch (error) { dispose(); throw error }

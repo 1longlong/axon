@@ -52,6 +52,7 @@ import {
 import type { AgentTitleGenerationInput, AgentTitleGenerator } from './agent-title-generator'
 import { AsyncWorkTracker } from '../async/async-work-tracker'
 import { AgentInterruptedHistory } from './agent-interrupted-history'
+import type { AgentExecutionContext } from './agent-execution-context'
 
 const MAX_AGENT_INPUT_LENGTH = 100_000
 
@@ -76,18 +77,15 @@ export interface AgentServiceOptions {
   eventBus: AgentEventBus
   runtimeConfigDir: string
   runtimeSessionDir: string
-  /** 将会话 projectId 解析为项目唯一工作区对应的可信 runtime cwd。 */
-  resolveProjectCwd: (projectId: string) => string
+  /** 宿主按业务归属解析可信上下文；执行层不自行选择项目或任务目录。 */
+  resolveExecutionContext: (session: AgentSessionMeta) => AgentExecutionContext
   getSystemPrompt?: (session: AgentSessionMeta) => string
   /** 只从已解析的可信项目根读取指令；失败时本轮降级为无项目指令。 */
   resolveProjectInstructions?: (projectRoot: string) => ProjectInstructionManifest
   /** 按固定优先级发现项目、内置与用户 Skill；失败时本轮降级为无 Skills。 */
   discoverAgentSkills?: (projectRoot: string) => AgentSkillCatalog
-  /** 读取当前项目的动态记忆上下文；关闭记忆时返回 undefined。 */
-  getProjectMemoryContext?: (
-    projectId: string,
-    previous: AgentMemoryFileStates | undefined,
-  ) => { prompt: string; fileStates: AgentMemoryFileStates; shouldPersistStates: boolean } | undefined
+  /** 宿主按当前配置解析记忆；执行层不感知记忆属于项目还是其他来源。 */
+  getMemoryContext?: (session: AgentSessionMeta) => { prompt: string; fileStates: AgentMemoryFileStates; shouldPersistStates: boolean } | undefined
   getCustomTools?: (context: AgentCustomToolContext) =>
     AgentCustomToolDefinition[] | Promise<AgentCustomToolDefinition[]>
   /** 为每轮运行创建权限回调，使等待与该轮 AbortSignal 绑定。 */
@@ -106,7 +104,7 @@ export interface AgentServiceOptions {
 
 export interface AgentCustomToolContext {
   sessionId: string
-  projectId: string
+  workspacePath: string
   runStartedAt: number
   runSignal: AbortSignal
   executionPolicy: AgentExecutionPolicy
@@ -413,12 +411,12 @@ export class AgentService {
         signal: active.controller.signal,
       }
 
-      // 会话不能自带目录；必须经所属项目解析，守住项目内会话共享工作区的边界。
-      if (!session.projectId) throw new AgentServiceError('workspace_unavailable', 'Agent 会话尚未归入项目')
-      let resolvedCwd: string
-      try { resolvedCwd = this.options.resolveProjectCwd(session.projectId) }
-      catch { throw new AgentServiceError('workspace_unavailable', 'Agent 项目或工作区不可用') }
-      if (!resolvedCwd) throw new AgentServiceError('workspace_unavailable', 'Agent 项目无法解析运行目录')
+      // 目录与环境必须由可信宿主解析，模型参数不能选取另一套安全边界。
+      let executionContext: AgentExecutionContext
+      try { executionContext = this.options.resolveExecutionContext(session)
+        if (!executionContext.workspacePath) throw new Error('empty workspace') }
+      catch { throw new AgentServiceError('workspace_unavailable', 'Agent 项目或执行工作目录不可用') }
+      const resolvedCwd = executionContext.workspacePath
 
       // 先协商 runtime 能否让宿主接管全部工具执行；未明确支持时绝不宣称已启用 OS 沙箱。
       let sandboxPolicy: AgentSandboxPolicy | undefined
@@ -436,6 +434,9 @@ export class AgentService {
           mode: executionPolicy.sandboxMode,
         })
       }
+
+      const toolEnvironment = executionContext.toolEnvironment
+      if (toolEnvironment?.controlSocketPath && sandboxPolicy) sandboxPolicy = { ...sandboxPolicy, controlSocketPath: toolEnvironment.controlSocketPath }
 
       // 项目指令是可选上下文：读取失败不能吞掉用户消息或阻断模型请求。
       let systemPrompt = this.options.getSystemPrompt?.(session) ?? ''
@@ -470,12 +471,9 @@ export class AgentService {
 
       // 记忆索引与元信息必须逐轮读取；只在变化时持久化新基线，避免无意义索引写入。
       let memoryPrompt = ''
-      if (this.options.getProjectMemoryContext) {
+      if (this.options.getMemoryContext) {
         try {
-          const memoryContext = this.options.getProjectMemoryContext(
-            session.projectId,
-            session.memoryFileStates,
-          )
+          const memoryContext = this.options.getMemoryContext(session)
           if (memoryContext) {
             memoryPrompt = memoryContext.prompt
             if (memoryContext.shouldPersistStates) {
@@ -495,7 +493,7 @@ export class AgentService {
         try {
           customTools = await this.options.getCustomTools({
             sessionId: input.sessionId,
-            projectId: session.projectId,
+            workspacePath: resolvedCwd,
             runStartedAt: active.runStartedAt,
             runSignal: active.controller.signal,
             executionPolicy,
@@ -558,6 +556,7 @@ export class AgentService {
           ? { allowedBuiltinTools: allowedSubagentBuiltinTools(session.subagentType, sandboxPolicy, sandboxCapability) }
           : {}),
         executionPolicy,
+        ...(toolEnvironment ? { toolEnvironment } : {}),
         ...(sandboxPolicy ? { sandboxPolicy } : {}),
         ...(AGENT_RUNTIME_CAPABILITIES[session.runtimeId].thinkingLevel
           ? { thinkingLevel: session.thinkingLevel ?? 'medium' }

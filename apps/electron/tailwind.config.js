@@ -7,6 +7,8 @@ export default {
   theme: {
     extend: {
       colors: {
+        // Loop 移植视图的独立语义色；只在 .axon-loop-ui 定义变量。
+        ...Object.fromEntries(['paper', 'surface', 'raised', 'hairline', 'wire', 'disabled', 'display', 'success', 'success-soft', 'interactive', 'interactive-soft', 'warn', 'warn-soft', 'running', 'running-soft', 'accent-soft', 'rubik-red', 'rubik-green', 'rubik-yellow'].map((key) => [key, `var(--color-${key})`])),
         border: 'hsl(var(--border) / <alpha-value>)',
         'border-subtle': 'hsl(var(--border-subtle) / <alpha-value>)',
         input: 'hsl(var(--input))',
@@ -57,9 +59,11 @@ export default {
         sans: ['var(--font-sans)'],
         mono: ['var(--font-mono)'],
       },
+      fontSize: { body: '14px', meta: '13px', label: '12px', caption: '11px', micro: '10px' },
       // ===== 圆角：覆写标准三档，全部由 --radius 派生 =====
       // 改一处 --radius 即可整站统一调圆角节奏，无需 grep 替换 rounded-*
       borderRadius: {
+        control: '10px', card: '16px', sheet: '20px',
         sm: 'calc(var(--radius) - 4px)',
         DEFAULT: 'calc(var(--radius) - 2px)',
         md: 'calc(var(--radius) - 2px)',
@@ -71,6 +75,7 @@ export default {
       // 语义阴影由 :root（亮色）与 .dark（深色）分别定义，
       // 深色态额外加 inset 顶高光来制造"浮起"感（弥补黑底缺乏自然阴影的问题）。
       boxShadow: {
+        card: 'var(--shadow-xs)', focus: '0 0 0 2px hsl(var(--ring) / .4)',
         xs: 'var(--shadow-xs)',
         sm: 'var(--shadow-sm)',
         DEFAULT: 'var(--shadow-sm)',

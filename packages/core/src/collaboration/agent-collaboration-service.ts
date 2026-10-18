@@ -23,13 +23,16 @@ import type { AgentSessionManager } from '../agent/agent-session-manager'
 import type { AgentRunOutcome, AgentService } from '../agent/agent-service'
 import { AgentServiceError } from '../agent/agent-service'
 import { AsyncWorkTracker } from '../async/async-work-tracker'
+import type { AgentExecutionContext } from '../agent/agent-execution-context'
 
 export interface AgentCollaborationServiceOptions {
   sessions: Pick<AgentSessionManager, 'get' | 'create' | 'delete'>
   delegations: Pick<AgentDelegationManager, 'list' | 'get' | 'create' | 'transition'>
   agent: Pick<AgentService, 'sendMessage' | 'stop' | 'isActive'>
     & Partial<Pick<AgentService, 'getActiveExecutionPolicy'>>
-  resolveProjectCwd: (projectId: string) => string
+  resolveExecutionContext: (session: AgentSessionMeta) => AgentExecutionContext
+  /** 宿主提供业务归属；下方统一字段覆盖运行策略，不能借此放宽子角色权限。 */
+  prepareChildSession?: (parent: AgentSessionMeta) => AgentSessionCreateInput
   /** 父任务存在交互入口时，把同一 owner 临时绑定到子会话；外部任务可返回 undefined。 */
   bindChildInteractionOwner?: (parentSessionId: string, childSessionId: string) => (() => void) | undefined
 }
@@ -139,13 +142,13 @@ export class AgentCollaborationService {
     if (!this.options.agent.isActive(parent.id)) {
       throw new AgentCollaborationServiceError('parent_inactive', '只能从正在运行的父 Agent 创建子任务')
     }
-    if (!parent.projectId || !parent.channelId || !parent.modelId) {
-      throw new AgentCollaborationServiceError('invalid_input', '父 Agent 缺少项目、渠道或模型')
+    if (!parent.channelId || !parent.modelId) {
+      throw new AgentCollaborationServiceError('invalid_input', '父 Agent 缺少渠道或模型')
     }
     try {
-      if (!this.options.resolveProjectCwd(parent.projectId)) throw new Error('empty cwd')
+      if (!this.options.resolveExecutionContext(parent).workspacePath) throw new Error('empty workspace')
     } catch {
-      throw new AgentCollaborationServiceError('workspace_unavailable', '父 Agent 项目或工作区不可用')
+      throw new AgentCollaborationServiceError('workspace_unavailable', '父 Agent 项目或执行工作目录不可用')
     }
 
     const lineage = this.resolveChildLineage(parent)
@@ -156,11 +159,11 @@ export class AgentCollaborationService {
     if (existing) return existing
     const parentRunPolicy = this.options.agent.getActiveExecutionPolicy?.(parent.id)
     const childInput: AgentSessionCreateInput = {
+      ...this.options.prepareChildSession?.(parent),
       title: input.title,
       runtimeId: parent.runtimeId,
       channelId: parent.channelId,
       modelId: parent.modelId,
-      projectId: parent.projectId,
       // 只读角色只继承父边界的收窄版本，Shell 同样不能获得项目写权限。
       sandboxMode: input.subagentType === 'explore' || input.subagentType === 'plan'
         ? 'readOnly' : parent.sandboxMode,

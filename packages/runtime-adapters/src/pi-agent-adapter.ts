@@ -30,6 +30,7 @@ import type {
   AgentExecutionPolicy,
   AgentHostToolExecutionPort,
   AgentHostShellEnvironment,
+  AgentToolEnvironment,
   AgentProviderAdapter,
   AgentQueryInput,
   AgentReasoningCapability,
@@ -1175,6 +1176,7 @@ export function createPiSandboxedBashOperations(
   policy: AgentSandboxPolicy,
   getGrants: () => AgentSandboxGrant[] = () => [],
   runtimeBinDirectory?: string,
+  toolEnvironment?: AgentToolEnvironment,
 ): PiBashOperations {
   return {
     async exec(command, cwd, options) {
@@ -1197,6 +1199,10 @@ export function createPiSandboxedBashOperations(
       for (const key of ['PI_SESSION_ID', 'PI_SESSION_FILE', 'PI_PROVIDER', 'PI_MODEL', 'PI_REASONING_LEVEL']) {
         environmentOverrides[key] = environment?.[key]
       }
+      // 宿主显式覆盖最后应用，包括删除值；adapter 不解释业务变量，也不把它们写入快照。
+      Object.assign(environmentOverrides, toolEnvironment?.environmentOverrides)
+      const pathPrepend = [...(toolEnvironment?.pathPrepend ?? []), ...(usesRuntimePath ? [runtimeBinDirectory] : [])]
+        .filter((path): path is string => Boolean(path))
       const result = await hostTools.executeShellCommand({
         command,
         cwd,
@@ -1204,7 +1210,7 @@ export function createPiSandboxedBashOperations(
         grants: getGrants(),
         environment,
         environmentOverrides,
-        ...(usesRuntimePath ? { pathPrepend: [runtimeBinDirectory!] } : {}),
+        ...(pathPrepend.length ? { pathPrepend } : {}),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ...(options.signal ? { abortSignal: options.signal } : {}),
       }, {
@@ -1527,6 +1533,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
             input.sandboxPolicy,
             currentSandboxGrants,
             join(sdk.getAgentDir(), 'bin'),
+            input.toolEnvironment,
           ),
         },
       }

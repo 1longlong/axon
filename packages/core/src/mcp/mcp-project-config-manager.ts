@@ -1,4 +1,4 @@
-/** MCP 项目配置持久化：负责加密、原子写、恢复和项目私有路径隔离。 */
+/** MCP 配置持久化：项目与 Loop 各自装配独立实例，复用加密、原子写和恢复。 */
 
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -28,7 +28,7 @@ export class McpProjectConfigManagerError extends Error {
 
 export interface McpProjectConfigManagerOptions {
   credentialCodec: CredentialCodec
-  /** 由项目管理器解析应用私有目录，不能直接使用客户端传入的路径。 */
+  /** 由归属服务解析应用私有目录，不能直接使用客户端传入的路径。 */
   resolveProjectDataDir: (projectId: string) => string
 }
 

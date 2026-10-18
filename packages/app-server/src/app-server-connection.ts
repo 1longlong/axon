@@ -21,6 +21,7 @@ import { ConfigRpcRouter } from './config-rpc-router'
 import { ProjectRpcRouter } from './project-rpc-router'
 import { McpRpcRouter } from './mcp-rpc-router'
 import { TaskRpcRouter } from './task-rpc-router'
+import { LoopRpcRouter } from './loop-rpc-router'
 import { CapabilityRpcRouter } from './capability-rpc-router'
 import { HistoryRpcRouter } from './history-rpc-router'
 import type { ResolveAppServerClient } from './rpc-command-context'
@@ -79,6 +80,7 @@ export class AppServerConnection {
   private readonly agentRouter: AgentRpcRouter
   private readonly projectRouter: ProjectRpcRouter
   private readonly taskRouter: TaskRpcRouter
+  private readonly loopRouter: LoopRpcRouter
   private unsubscribeClients = (): void => {}
   private readonly work = new AsyncWorkTracker()
   private readonly cleanupFailures: Error[] = []
@@ -101,6 +103,7 @@ export class AppServerConnection {
     this.projectRouter = new ProjectRpcRouter(options.peer, resolve, () => this.clients.values())
     new McpRpcRouter(options.peer, resolve)
     this.taskRouter = new TaskRpcRouter(options.peer, resolve)
+    this.loopRouter = new LoopRpcRouter(options.peer, resolve)
     new CapabilityRpcRouter(options.peer, resolve)
     new HistoryRpcRouter(options.peer, resolve)
     this.unsubscribePeer = options.peer.onClose(() => this.close())
@@ -150,6 +153,7 @@ export class AppServerConnection {
         this.agentRouter.detach(id)
         this.projectRouter.detach(id)
         this.taskRouter.detach(id)
+        this.loopRouter.detach(id)
       })
       this.state = 'ready'
       return encoded
@@ -201,6 +205,7 @@ export class AppServerConnection {
     this.agentRouter.detach(clientId)
     this.projectRouter.detach(clientId)
     this.taskRouter.detach(clientId)
+    this.loopRouter.detach(clientId)
     return this.bootstrapResult?.backend.clients.detach(clientId) ?? false
   }
   /** 已清空连接引用的后端仍须登记真实等待；清理失败不保留底层敏感原因。 */
@@ -231,6 +236,7 @@ export class AppServerConnection {
     this.clean(() => this.agentRouter.close())
     this.clean(() => this.projectRouter.close())
     this.clean(() => this.taskRouter.close())
+    this.clean(() => this.loopRouter.close())
     if (backend) this.releaseBackend(backend)
     this.clean(() => this.options.peer.close())
   }

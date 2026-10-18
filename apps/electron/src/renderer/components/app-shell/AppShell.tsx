@@ -1,5 +1,5 @@
 /**
- * 应用主布局骨架：[左侧会话导航] | [当前会话内容]。
+ * 应用主布局：[模块导航] | [会话或 Loop]，隐藏视图保留本地阅读状态。
  */
 
 import * as React from 'react'
@@ -44,6 +44,9 @@ import { useCreateChatConversation } from '@/components/chat/useCreateChatConver
 import { useCreateAgentSession } from '@/components/agent/useCreateAgentSession'
 import { useAgentController } from '@/components/agent/AgentStateProvider'
 import type { DesktopAction } from '@/types/desktop'
+import { loopPageAtom } from '@/atoms/loop-page'
+import { appSectionAtom, navigateAppAtom } from '@/atoms/app-navigation'
+import { LoopWorkspace } from '@/components/loops/LoopWorkspace'
 
 const SHELL_PERSIST_DEBOUNCE_MS = 180
 
@@ -56,6 +59,9 @@ export function AppShell(): React.ReactElement {
   const [rightPanelWidth, setRightPanelWidth] = useAtom(rightPanelWidthAtom)
   const [chatDrafts, setChatDrafts] = useAtom(chatDraftsAtom)
   const [settingsOpen, setSettingsOpen] = useAtom(settingsOpenAtom)
+  const loopPage = useAtomValue(loopPageAtom)
+  const section = useAtomValue(appSectionAtom)
+  const navigate = useSetAtom(navigateAppAtom)
   const editing = useAtomValue(settingsEditingAtom)
   const chatState = useAtomValue(chatStateAtom)
   const agentState = useAtomValue(agentStateAtom)
@@ -139,6 +145,11 @@ export function AppShell(): React.ReactElement {
     setProcessingDesktopAction(true)
     setDesktopActions((current) => current.slice(1))
     setDesktopActionError(null)
+    if (!navigate({ section: action.type === 'new_chat' ? 'chat' : 'agent' })) {
+      setDesktopActionError('尚有未保存或正在保存的 Loop 更改，未新建会话')
+      setProcessingDesktopAction(false)
+      return
+    }
     setSettingsOpen(false)
 
     const processAction = async (): Promise<void> => {
@@ -164,7 +175,7 @@ export function AppShell(): React.ReactElement {
     }
 
     void processAction().finally(() => setProcessingDesktopAction(false))
-  }, [createAgentSession, createChatConversation, creationReady, desktopActions, didRestore, processingDesktopAction, setActiveTabId, setAppMode, setSettingsOpen, setTabs])
+  }, [createAgentSession, createChatConversation, creationReady, desktopActions, didRestore, navigate, processingDesktopAction, setActiveTabId, setAppMode, setSettingsOpen, setTabs])
 
   React.useEffect(() => {
     if (!didRestore) return
@@ -212,16 +223,18 @@ export function AppShell(): React.ReactElement {
     <>
       <WindowControls />
       <div className={cn('h-screen w-screen overflow-hidden bg-background text-foreground', isWindows && 'pt-8')}>
-        {settingsOpen ? (
-          <SettingsPanel onClose={handleCloseSettings} />
-        ) : (
-          <div className="flex h-full w-full">
-            <LeftSidebar isWindows={isWindows} />
-            <main style={{ minWidth: CONVERSATION_MIN_WIDTH }} className="flex flex-1 flex-col bg-content-area">
-              <TabContent />
-            </main>
-          </div>
-        )}
+        {settingsOpen && <SettingsPanel onClose={handleCloseSettings} />}
+        <div className={cn('flex h-full w-full', settingsOpen && 'hidden')}>
+          <LeftSidebar isWindows={isWindows} />
+          <main style={{ minWidth: CONVERSATION_MIN_WIDTH }} className="flex min-w-0 flex-1 flex-col bg-content-area">
+            <div className={cn('relative flex min-h-0 flex-1 flex-col', section === 'loop' && 'hidden')} aria-hidden={section === 'loop'}>
+              <TabContent visible={section !== 'loop' && !settingsOpen} />
+            </div>
+            {loopPage && <div className={cn('min-h-0 flex-1', section !== 'loop' && 'hidden')} aria-hidden={section !== 'loop'}>
+              <LoopWorkspace active={section === 'loop' && !settingsOpen} />
+            </div>}
+          </main>
+        </div>
       </div>
       {persistenceError && (
         <div className="fixed bottom-3 right-3 z-[110] max-w-sm rounded-md bg-destructive px-3 py-2 text-xs text-destructive-foreground shadow-lg">

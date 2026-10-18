@@ -16,7 +16,7 @@ describe('MCP 项目配置编排', () => {
         abort.abort()
         expect(signal?.aborted).toBe(true)
         return []
-      } }, projects: { resolveProjectCwd: () => '/trusted/project' },
+      } }, resolveWorkspace: () => '/trusted/project',
     })
     const server = { type: 'stdio', command: 'fixture' }
     await expect(controller.testConnection('project-1', 'local', server, abort.signal)).rejects.toMatchObject({ name: 'AbortError' })
@@ -29,7 +29,7 @@ describe('MCP 项目配置编排', () => {
     const controller = new McpProjectController({
       configs: { get: async () => emptyConfig, save: async (_id, config) => config as McpProjectConfig },
       tools: { disposeProject: (projectId) => { disposed.push(projectId) }, testConnection: async () => [] },
-      projects: { resolveProjectCwd: () => '/trusted/project' },
+      resolveWorkspace: () => '/trusted/project',
     })
     expect((await controller.save(' project-1 ', emptyConfig))).toEqual(emptyConfig)
     expect(disposed).toEqual(['project-1'])
@@ -40,7 +40,7 @@ describe('MCP 项目配置编排', () => {
     const controller = new McpProjectController({
       configs: { get: async () => emptyConfig, save: async () => { throw new Error('invalid') } },
       tools: { disposeProject: () => { disposed = true }, testConnection: async () => [] },
-      projects: { resolveProjectCwd: () => '/trusted/project' },
+      resolveWorkspace: () => '/trusted/project',
     })
     await expect(controller.save('project-1', {})).rejects.toThrow('invalid')
     expect(disposed).toBe(false)
@@ -53,7 +53,7 @@ describe('MCP 项目配置编排', () => {
     const controller = new McpProjectController({
       configs: { get: async () => emptyConfig, save: () => delayed },
       tools: { disposeProject: (id) => { disposed.push(id) }, testConnection: async () => [] },
-      projects: { resolveProjectCwd: () => '/trusted/project' },
+      resolveWorkspace: () => '/trusted/project',
     })
     const pending = controller.save('project-1', emptyConfig)
     expect(disposed).toEqual([])
@@ -66,7 +66,7 @@ describe('MCP 项目配置编排', () => {
     const controller = new McpProjectController({
       configs: { get: async () => emptyConfig, save: async () => emptyConfig },
       tools: { disposeProject: () => undefined, testConnection: async () => [] },
-      projects: { resolveProjectCwd: (projectId) => `/trusted/${projectId}` },
+      resolveWorkspace: (projectId) => `/trusted/${projectId}`,
     })
     const preset = controller.materializeBuiltinPreset('project-1', 'filesystem')
     expect(preset.config.type).toBe('stdio')
@@ -78,7 +78,7 @@ describe('MCP 项目配置编排', () => {
     const controller = new McpProjectController({
       configs: { get: async () => emptyConfig, save: async () => emptyConfig },
       tools: { disposeProject: () => undefined, testConnection: async () => [] },
-      projects: { resolveProjectCwd: () => '/trusted/project' },
+      resolveWorkspace: () => '/trusted/project',
     })
     await expect(controller.get('')).rejects.toThrow('项目标识无效')
     expect(() => controller.materializeBuiltinPreset('project-1', '')).toThrow('预设标识无效')
@@ -92,7 +92,7 @@ describe('MCP 项目配置编排', () => {
         disposeProject: () => { throw new Error('不能淘汰连接') },
         testConnection: async (server) => { received.push(server); return [] },
       },
-      projects: { resolveProjectCwd: (id) => { if (id !== 'project-1') throw new Error('项目不存在'); return '/trusted/project' } },
+      resolveWorkspace: (id) => { if (id !== 'project-1') throw new Error('项目不存在'); return '/trusted/project' },
     })
     const server = { type: 'stdio', command: 'fixture', enabled: false }
     await expect(controller.testConnection('missing', 'local', server)).rejects.toThrow('项目不存在')
@@ -109,7 +109,7 @@ describe('MCP 项目配置编排', () => {
         disposeProject: () => undefined,
         testConnection: async () => { throw new Error('401 unauthorized https://private.invalid Authorization=private-secret') },
       },
-      projects: { resolveProjectCwd: () => '/trusted/project' },
+      resolveWorkspace: () => '/trusted/project',
     })
     expect(await controller.testConnection('project-1', 'local', { type: 'http', url: 'https://fixture.invalid/mcp' }))
       .toEqual({ ok: false, message: '服务器拒绝认证，请检查请求头或凭据' })

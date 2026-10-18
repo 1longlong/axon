@@ -234,7 +234,7 @@ function normalizeMeta(value: unknown): AgentSessionMeta {
   const memoryFileStates = normalizeMemoryFileStates(meta.memoryFileStates)
   const lineage = normalizeLineage(meta, id)
   const subagentType = normalizeSubagentType(meta.subagentType)
-  if (meta.creationOrigin !== undefined && (meta.creationOrigin !== 'exec' || lineage.parentSessionId
+  if (meta.creationOrigin !== undefined && (meta.creationOrigin !== 'exec' && meta.creationOrigin !== 'loop' || lineage.parentSessionId
     || typeof meta.creationWorkspacePath !== 'string' || !isAbsolute(meta.creationWorkspacePath)
     || meta.creationWorkspacePath.length > 4096 || meta.creationWorkspacePath.includes('\0'))
     || meta.creationOrigin === undefined && meta.creationWorkspacePath !== undefined) {
@@ -245,7 +245,7 @@ function normalizeMeta(value: unknown): AgentSessionMeta {
   }
   return {
     id,
-    ...(meta.creationOrigin === undefined ? {} : { creationOrigin: 'exec' as const, creationWorkspacePath: meta.creationWorkspacePath as string }),
+    ...(meta.creationOrigin === undefined ? {} : { creationOrigin: meta.creationOrigin as 'exec' | 'loop', creationWorkspacePath: meta.creationWorkspacePath as string }),
     runtimeId: normalizeRuntimeId(meta.runtimeId),
     title: normalizeTitle(meta.title),
     ...(channelId === undefined ? {} : { channelId }),
@@ -402,7 +402,7 @@ export class AgentSessionManager {
     const id = this.createUniqueId(this.list())
     const lineage = normalizeLineage(input as Record<string, unknown>, id)
     const subagentType = normalizeSubagentType(input.subagentType)
-    if (input.creationOrigin !== undefined && (input.creationOrigin !== 'exec' || lineage.parentSessionId
+    if (input.creationOrigin !== undefined && (!['exec', 'loop'].includes(input.creationOrigin) || lineage.parentSessionId
       || typeof input.creationWorkspacePath !== 'string' || !isAbsolute(input.creationWorkspacePath)
       || input.creationWorkspacePath.length > 4096 || input.creationWorkspacePath.includes('\0'))
       || input.creationOrigin === undefined && input.creationWorkspacePath !== undefined) {

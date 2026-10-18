@@ -157,7 +157,7 @@ test('配置退出封住新入口，等待已接纳保存和解密；迟到读�
       get: async () => { await finishRead.promise; return config },
       save: async () => { saves += 1; await finishSave.promise; return config },
     },
-    projects: { resolveProjectCwd: () => '/trusted/project' },
+    resolveWorkspace: () => '/trusted/project',
     tools: { testConnection: async () => [], disposeProject: () => { invalidations += 1 } },
   })
   controllers.push(service)

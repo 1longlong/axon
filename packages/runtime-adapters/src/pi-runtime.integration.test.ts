@@ -121,7 +121,7 @@ for (const stage of ['stream', 'parameters', 'retry', 'compact'] as const) {
     const clients = new BackendClientRegistry(), owner = clients.register()
     const events = new AgentEventBus(), sessions = new AgentSessionManager({ indexPath: join(directory, 'index.json'), sessionsDir: join(directory, 'history') })
     const session = sessions.create({ projectId: 'project', channelId: 'local', modelId: 'axon-fixture' })
-    const agent = new AgentService({ adapter, sessionManager: sessions, eventBus: events, resolveProjectCwd: () => directory,
+    const agent = new AgentService({ adapter, sessionManager: sessions, eventBus: events, resolveExecutionContext: () => ({ workspacePath: directory }),
       runtimeConfigDir: join(directory, 'config'), runtimeSessionDir: join(directory, 'runtime'),
       channelManager: { resolve: async () => ({ id: 'local', name: '本机', provider: 'custom',
         baseUrl: `http://127.0.0.1:${server.port}/v1`, apiKey: '', enabled: true, createdAt: 1, updatedAt: 1,

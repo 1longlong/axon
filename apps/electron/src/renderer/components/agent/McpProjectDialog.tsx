@@ -5,8 +5,9 @@ import {
   DEFAULT_MCP_STARTUP_TIMEOUT_MS,
   MCP_PROJECT_CONFIG_VERSION,
 } from '@axon/shared'
-import type { BuiltinMcpPresetSummary, McpConnectionTestResult, McpProjectConfig, McpServerConfig } from '@axon/shared'
+import type { BuiltinMcpPresetSummary, MaterializedMcpPreset, McpConnectionTestResult, McpProjectConfig, McpServerConfig } from '@axon/shared'
 import { McpConnectionTestRunner } from '../../lib/mcp-connection-test'
+import type { McpConnectionTestApi } from '../../lib/mcp-connection-test'
 
 interface McpServerDraft {
   id: string
@@ -27,6 +28,12 @@ interface McpProjectDialogProps {
   projectId: string
   projectName: string
   onClose(): void
+}
+export interface McpConfigDialogApi extends McpConnectionTestApi {
+  getConfig(): Promise<McpProjectConfig>
+  saveConfig(config: McpProjectConfig): Promise<unknown>
+  listBuiltinPresets?(): Promise<BuiltinMcpPresetSummary[]>
+  materializeBuiltinPreset?(presetId: string): Promise<MaterializedMcpPreset>
 }
 
 const SERVER_NAME_PATTERN = /^[a-z][a-z0-9-]{0,62}[a-z0-9]$|^[a-z]$/
@@ -144,6 +151,21 @@ function draftsToConfig(drafts: readonly McpServerDraft[]): McpProjectConfig {
 
 /** 项目级 MCP 编辑器：保存/取消只处理草稿，关闭动作由独立按钮负责。 */
 export function McpProjectDialog({ projectId, projectName, onClose }: McpProjectDialogProps): React.ReactElement {
+  const api = React.useMemo<McpConfigDialogApi>(() => ({
+    getConfig: () => window.axon.mcpProjects.getConfig(projectId),
+    saveConfig: (config) => window.axon.mcpProjects.saveConfig(projectId, config),
+    testConnection: (input) => window.axon.mcpProjects.testConnection({ ...input, projectId }),
+    cancelConnectionTest: (id) => window.axon.mcpProjects.cancelConnectionTest(id),
+    listBuiltinPresets: () => window.axon.mcpProjects.listBuiltinPresets(),
+    materializeBuiltinPreset: (id) => window.axon.mcpProjects.materializeBuiltinPreset(projectId, id),
+  }), [projectId])
+  return <McpConfigDialog name={projectName} description="项目下全部 Agent 会话共享这些服务器；配置仅保存在应用私有目录。" api={api} onClose={onClose} />
+}
+
+/** 共用 MCP 编辑/测试界面；上层绑定确切归属，组件不自行选择项目或 Loop。 */
+export function McpConfigDialog({ name, description, api, testUnavailableReason, onClose }: {
+  name: string; description: string; api: McpConfigDialogApi; testUnavailableReason?: string; onClose(): void
+}): React.ReactElement {
   const [drafts, setDrafts] = React.useState<McpServerDraft[]>([])
   const [savedDrafts, setSavedDrafts] = React.useState<McpServerDraft[]>([])
   const [presets, setPresets] = React.useState<BuiltinMcpPresetSummary[]>([])
@@ -161,7 +183,7 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
   const modalVersion = React.useRef(0)
 
   React.useEffect(() => {
-    const runner = new McpConnectionTestRunner(window.axon.mcpProjects, {
+    const runner = new McpConnectionTestRunner(api, {
       started: () => { setTestingId(testedDraftId.current); setTestResult(null); setError(null) },
       result: (result) => { if (testedDraftId.current) setTestResult({ id: testedDraftId.current, ...result }) },
       finished: () => setTestingId(null),
@@ -170,7 +192,7 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
     setTestingId(null)
     setTestResult(null)
     return () => { runner.dispose(); if (testRunner.current === runner) testRunner.current = null }
-  }, [projectId])
+  }, [api])
 
   /** 关闭只取消未完成测试，不保存草稿；卸载时再幂等释放同一代次。 */
   const close = React.useCallback((): void => {
@@ -185,8 +207,8 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
     setLoading(true); setLoadFailed(false); setDrafts([]); setSavedDrafts([]); setPresets([]); setSelectedId(null)
     setSaving(false); setMaterializingId(null); setError(null); setNotice(null)
     void Promise.all([
-      window.axon.mcpProjects.getConfig(projectId),
-      window.axon.mcpProjects.listBuiltinPresets(),
+      api.getConfig(),
+      api.listBuiltinPresets?.() ?? Promise.resolve([]),
     ]).then(([config, catalog]) => {
       if (disposed) return
       const loaded = Object.entries(config.servers).map(([name, server]) => configToDraft(name, server))
@@ -203,7 +225,7 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
       if (!disposed) setLoading(false)
     })
     return () => { disposed = true; modalVersion.current += 1 }
-  }, [projectId])
+  }, [api])
 
   React.useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent): void => {
@@ -237,7 +259,7 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
     setMaterializingId(preset.id)
     setError(null)
     try {
-      const materialized = await window.axon.mcpProjects.materializeBuiltinPreset(projectId, preset.id)
+      const materialized = await api.materializeBuiltinPreset!(preset.id)
       if (modalVersion.current !== version) return
       const name = uniqueServerName(materialized.name, drafts.map((item) => item.name))
       const draft = configToDraft(name, materialized.config)
@@ -263,7 +285,7 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
     setNotice(null)
   }
 
-  /** 取消只回退本弹窗尚未保存的整份项目草稿，不关闭窗口或改动磁盘配置。 */
+  /** 取消只回退本弹窗尚未保存的整份草稿，不关闭窗口或改动磁盘配置。 */
   const cancel = (): void => {
     if (saving || testingId || materializingId) return
     const restored = savedDrafts.map((draft) => ({ ...draft }))
@@ -276,12 +298,12 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
 
   /** 校验当前草稿后交给可取消测试；请求与结果绑定原弹窗及原服务器。 */
   const testConnection = async (): Promise<void> => {
-    if (!selected || saving || testingId || materializingId) return
+    if (!selected || saving || testingId || materializingId || testUnavailableReason) return
     try {
       const config = draftsToConfig([selected])
       const serverName = selected.name.trim()
       testedDraftId.current = selected.id
-      await testRunner.current?.run({ projectId, serverName, server: config.servers[serverName]! })
+      await testRunner.current?.run({ serverName, server: config.servers[serverName]! })
     } catch (cause) {
       setTestResult({ id: selected.id, ok: false, message: cause instanceof Error ? cause.message : '连接测试失败' })
     }
@@ -295,7 +317,7 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
     setNotice(null)
     try {
       const config = draftsToConfig(drafts)
-      await window.axon.mcpProjects.saveConfig(projectId, config)
+      await api.saveConfig(config)
       if (modalVersion.current !== version) return
       setSavedDrafts(drafts.map((draft) => ({ ...draft })))
       setNotice('配置已保存')
@@ -306,13 +328,13 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
     }
   }
 
-  return <div role="dialog" aria-modal="true" aria-label={`配置 ${projectName} 的 MCP 服务`}
+  return <div role="dialog" aria-modal="true" aria-label={`配置 ${name} 的 MCP 服务`}
     className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
     <div className="flex h-[min(680px,calc(100vh-32px))] w-full max-w-4xl flex-col rounded-lg border bg-dialog text-dialog-foreground shadow-lg">
       <div className="flex items-start justify-between gap-3 border-b border-border-subtle px-4 py-3">
         <div>
-          <h2 className="text-sm font-semibold">MCP 服务 · {projectName}</h2>
-          <p className="mt-1 text-xs text-muted-foreground">项目下全部 Agent 会话共享这些服务器；配置仅保存在应用私有目录。</p>
+          <h2 className="text-sm font-semibold">MCP 服务 · {name}</h2>
+          <p className="mt-1 text-xs text-muted-foreground">{description}</p>
         </div>
         <button type="button" aria-label="关闭 MCP 配置" title="关闭" disabled={saving || materializingId !== null} onClick={close}
           className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
@@ -365,15 +387,16 @@ export function McpProjectDialog({ projectId, projectName, onClose }: McpProject
         </main>
       </div>
       <div className="border-t border-border-subtle px-4 py-3">
+        {testUnavailableReason && <p className="mb-2 text-xs text-muted-foreground">{testUnavailableReason}</p>}
         {error && <p className="mb-2 text-xs text-destructive">{error}</p>}
         {notice && <p role="status" className="mb-2 text-xs text-emerald-700 dark:text-emerald-400">{notice}</p>}
         <div className="flex flex-wrap justify-end gap-2">
           {testingId && <button type="button" onClick={() => testRunner.current?.cancel()} className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring">取消测试</button>}
-          <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null || !selected} onClick={() => void testConnection()} className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
+          <button type="button" title={testUnavailableReason} disabled={!!testUnavailableReason || loading || loadFailed || saving || testingId !== null || materializingId !== null || !selected} onClick={() => void testConnection()} className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
             {testingId ? '正在测试…' : '测试连接'}
           </button>
-          <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null} onClick={cancel} title="撤销本项目所有未保存的 MCP 修改" className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">取消</button>
-          <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null} onClick={() => void save()} title="保存本项目所有 MCP 配置" className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
+          <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null} onClick={cancel} title="撤销当前全部未保存的 MCP 修改" className="h-8 rounded-md border px-3 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">取消</button>
+          <button type="button" disabled={loading || loadFailed || saving || testingId !== null || materializingId !== null} onClick={() => void save()} title="保存当前全部 MCP 配置" className="h-8 rounded-md bg-primary px-3 text-xs text-primary-foreground hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40">
             {saving ? '正在保存…' : '保存'}
           </button>
         </div>

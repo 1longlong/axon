@@ -57,6 +57,7 @@ packages/
     src/agent/       运行协调、上下文与恢复
     src/providers/   文本生成协议与流处理
     src/storage/     JSON/JSONL、原子写与历史分页
+  loop-engine/       独立 Loop 生命周期与 Cron 调度
   runtime-adapters/  Runtime SDK、工具格式与 artifact 转换
   host-node/         文件/命令执行、Seatbelt、Shell 快照与环境探测
   app-server/        协议库：JSON-RPC、身份、路由、私有桥与历史客户端
@@ -89,6 +90,22 @@ bun run dev
 3. 创建 Agent 会话时选择 Runtime，随后即可开始任务。
 
 ## Runtime
+
+### 本地 Loop
+
+左侧顶部 Agent / Chat / Loop 切换中进入 Loop，侧栏显示独立任务导航，可选择本地工作目录，配置模型、任务、Cron 和完成目标，查看运行时间线、执行过程、产物和历史变更。Loop 不绑定或创建 Agent 项目，侧栏支持按目录搜索；切换模块不会停止后台任务，并保留本窗口最近查看的位置。每次使用新的 Pi 会话；`axon loop report/finish` 通过本次私有通道回报，不启动第二个后端。任务文件在所选目录 `axon-loops/<id>/`，正式状态在应用数据目录 `loops/`。工作目录创建后固定，运行前复核真实路径；删除 Loop 保留本地文件夹及任务产物。
+
+使用步骤：配置可用渠道 → 左侧 Loop → 选择本地文件夹 → 描述任务、确认模型/计划/权限 → Agent 准备配置 → 按计划或立即执行。无需手写 HTML、JS 或指标 JSON；Agent 核实来源后按需生成持续面板、指标与预检，没有合适用途时可以留空。没有目标则持续巡检，有目标且 Agent 经 CLI 确认完成后停止计划；不同任务可共享工作区，冲突由用户安排。
+
+工作目录用“选择/更换文件夹”按钮选择，路径以普通文字显示。在“后台权限”中配置此 Loop 自己的 MCP，可先填写服务器草稿，再选目录进行测试连接、查看完整 tools/list 和刷新工具列表；界面明确显示未满足的条件。勾选“允许后台自动调用的工具”即授予对应 MCP 工具的免逐次人工审批权限，不需要手填工具名；不选不影响内置文件/Shell 工具。新建时草稿随创建请求加密保存到 `loops/<id>/mcp.json`，不进入定义或执行日志；与同目录项目及其他 Loop 的配置、连接和授权相互独立。编辑已有 Loop 的 MCP 会立即保存并清空旧白名单，需重新勾选、保存授权；运行/排队期间禁止修改服务器，草稿测试不影响运行连接。不继承项目记忆。配置保存失败时任务可能已登记为未就绪，应从列表查看并修复，不要重复创建；不会自动执行半份配置。
+
+创建可选“创建后立即执行”，准备成功后才运行普通任务。准备失败/取消/中断不自动重试，在详情查看原因后“重新准备”；计划暂停时可准备但不会暗中启用执行。基本设置不覆盖生成内容，后续用“让 Agent 修改”描述面板/预检等调整。详情保留准备/编辑/优化结果和运行来源。只有成功普通执行才检查自动优化；一次性安排采用后写覆盖。暂停计划不取消当前任务或阻止回报，真正停止须使用“停止本次”。优化模型通过 `axon loop log/trace` 查看应用历史，不寻找 Runtime 私有日志。
+
+当前仅 macOS/Pi，工具沿用沙箱和无人值守 `never/reject`；缺授权直接拒绝，不弹出等待审批。JS 预检可直接产出结果或按需调用模型，网络默认关闭，MCP 按用户白名单授权。`axon loop` 命令只在后台 Agent 本次受控环境可用，不是用来另启后端的普通终端管理入口。主窗关闭留托盘继续，应用真正退出即停止；不负责休眠唤醒或独立常驻。
+
+`@axon/loop-engine` 可独立导入纯生命周期与调度器，宿主须实现其时钟/任务列表/派发端口；它不包含存储、模型、Shell 或 UI。完整桌面能力由 core/app-server 装配。源码桌面验收可运行 `bun run --filter='@axon/electron' test:loop:smoke`，仅使用隔离临时数据和本机模型夹具。
+
+需要 macOS Seatbelt。需要审批的操作默认拒绝；JS 预检网络和 MCP 工具需用户显式授予。主窗关闭留托盘可继续，退出应用后停止，不唤醒休眠机器。同一任务不重叠，不同任务共享目录的冲突由用户安排。目前仍在集中验收前，暂不视为正式完成能力。
 
 ### Pi
 
@@ -171,6 +188,8 @@ Bash 通过 `workdir` 指定单次执行目录，可选择项目内或项目外�
 可以，但应区分业务库与独立服务入口。当前包使用 `workspace:*` 和 TypeScript 源码入口，适合在本 monorepo 或集成其源码的 Bun/构建环境中复用；不是已发布的独立 npm SDK，也不支持浏览器直接运行。宿主 workspace 需在自己的 package.json 声明所用包的 `workspace:*` 依赖并运行 `bun install`，不能假设根目录可解析所有包。
 
 ### 进程内使用 core
+
+可信宿主共用 `AgentSessionFactory.create(config, signal)` 创建根会话；项目、Loop 与 CLI 不是三种底层 Session。`AgentService` 通过 `resolveExecutionContext`、`getMemoryContext`、`getCustomTools` 接收宿主装配的目录、记忆与工具，后续运行重新解析，不冻结创建时的内容。`createBackend()` 提供 Axon 的项目/Loop/CLI 上层规则；其他用途可组合导出的工厂、服务与工作流，参考 [无项目宿主示例测试](packages/core/src/agent/generic-session.integration.test.ts)。这些是可信进程内端口，不向页面开放任意目录/身份覆盖；审批、子角色边界及唯一写入者责任不变。
 
 `@axon/core` 提供 `createBackend()`，宿主注入目录、版本、凭据端口和 Runtime 路由。下面是只创建本地 Chat 元数据的最小示例：保存在已声明依赖的 `apps/app-server/example-core.ts`，从仓库根目录执行 `bun run apps/app-server/example-core.ts`。
 

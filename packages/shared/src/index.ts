@@ -6,3 +6,4 @@
  */
 
 export * from './types/index'
+export { parseFrontMatter, artifactMeta } from './loop-artifact-metadata'

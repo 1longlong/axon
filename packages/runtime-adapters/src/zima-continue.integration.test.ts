@@ -41,7 +41,7 @@ interface ModelRequest {
     const sessions = new AgentSessionManager(paths), events = new AgentEventBus()
     const clients = new BackendClientRegistry(), owner = clients.register()
     const agent = new AgentService({ adapter, resolveAdapter: () => adapter, sessionManager: sessions, eventBus: events,
-      resolveProjectCwd: () => workspace, runtimeConfigDir: join(directory, 'config'), runtimeSessionDir: join(directory, 'runtime'),
+      resolveExecutionContext: () => ({ workspacePath: workspace }), runtimeConfigDir: join(directory, 'config'), runtimeSessionDir: join(directory, 'runtime'),
       channelManager: { resolve: async () => ({ id: 'local', name: '本机', provider: 'custom', apiKey: 'local-fixture-key',
         baseUrl: `http://127.0.0.1:${server.port}/v1`, enabled: true, createdAt: 1, updatedAt: 1,
         models: [{ id: 'axon-fixture', name: '模型', enabled: true }] }) },

@@ -1,0 +1,71 @@
+/* Loop 的布局与语义色限制在独立容器，不覆盖 Chat/Agent 现有主题。 */
+.axon-loop-ui {
+  --color-paper: hsl(var(--background));
+  --color-surface: hsl(var(--background));
+  --color-raised: hsl(var(--muted));
+  --color-hairline: hsl(var(--border-subtle));
+  --color-wire: hsl(var(--border));
+  --color-disabled: hsl(var(--muted-foreground) / .7);
+  --color-secondary: hsl(var(--muted-foreground));
+  --color-primary: hsl(var(--foreground));
+  --color-display: hsl(var(--foreground));
+  --color-accent: hsl(var(--destructive));
+  --color-accent-soft: hsl(var(--destructive) / .1);
+  --color-success: #22845a;
+  --color-success-soft: #22845a18;
+  --color-interactive: #477ac3;
+  --color-interactive-soft: #477ac315;
+  --color-warn: #a66d16;
+  --color-warn-soft: #a66d1618;
+  --color-running: #a66d16;
+  --color-running-soft: #a66d1618;
+  --color-rubik-green: var(--color-success);
+  --color-rubik-red: var(--color-accent);
+  --color-rubik-yellow: #d4a63e;
+  --color-run-nothing: var(--color-secondary);
+  --color-run-new: var(--color-interactive);
+  --color-run-resolved: var(--color-success);
+  --color-run-error: var(--color-accent);
+  --color-run-silent: var(--color-disabled);
+  --color-chart-1: var(--color-display);
+  --color-chart-2: var(--color-interactive);
+  --color-chart-3: var(--color-success);
+  --color-chart-4: var(--color-accent);
+  --color-chart-5: var(--color-secondary);
+  --color-diff-add-bg: #22845a18;
+  --color-diff-del-bg: hsl(var(--destructive) / .1);
+  --color-diff-hunk-bg: var(--color-raised);
+  color: var(--color-primary);
+  font-variant-numeric: tabular-nums;
+}
+.dark .axon-loop-ui { --color-success: #69bb91; --color-interactive: #85aef0; --color-warn: #d6b36c; --color-running: #d6b36c; }
+.axon-loop-ui .text-primary, .axon-loop-ui.text-primary { color: var(--color-primary); }
+.axon-loop-ui .text-secondary, .axon-loop-ui.text-secondary { color: var(--color-secondary); }
+.axon-loop-ui .text-accent { color: var(--color-accent); }
+.axon-loop-ui .glass-strong, .axon-loop-ui.glass-strong { background: var(--color-surface); border: 1px solid var(--color-wire); box-shadow: var(--shadow-lg); }
+.axon-loop-ui .loopview { contain: layout paint; isolation: isolate; overflow: hidden; min-width: 0; --loopview-gap: 1.25rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, max(28rem, (100% - var(--loopview-gap)) / 2)), 1fr)); gap: var(--loopview-gap); align-items: start; }
+.axon-loop-ui .loopview > :is(h1,h2,h3,h4,h5,h6,p,hr,header,footer,section,ul,ol,table,pre,blockquote,figure,img) { grid-column: 1 / -1; }
+.axon-loop-ui .taskmd { font-size: 13px; line-height: 1.6; color: var(--color-secondary); overflow-wrap: anywhere; }
+.axon-loop-ui .taskmd > :first-child { margin-top: 0; }
+.axon-loop-ui .taskmd :is(h1,h2,h3,h4) { color: var(--color-display); font-weight: 600; line-height: 1.3; margin: 1.1em 0 .4em; }
+.axon-loop-ui .taskmd h1 { font-size: 15px; }
+.axon-loop-ui .taskmd h2 { font-size: 13.5px; }
+.axon-loop-ui .taskmd :is(h3,h4) { font-size: 12.5px; }
+.axon-loop-ui .taskmd p { margin: .5em 0; }
+.axon-loop-ui .taskmd :is(ul,ol) { margin: .5em 0; padding-left: 1.3em; }
+.axon-loop-ui .taskmd ul { list-style: disc; }
+.axon-loop-ui .taskmd ol { list-style: decimal; }
+.axon-loop-ui .taskmd li { margin: .2em 0; }
+.axon-loop-ui .taskmd a { color: var(--color-interactive); text-decoration: underline; text-underline-offset: 2px; }
+.axon-loop-ui .taskmd strong { color: var(--color-primary); font-weight: 600; }
+.axon-loop-ui .taskmd code { font-family: var(--font-mono); font-size: .9em; background: var(--color-raised); padding: .1em .35em; border-radius: 4px; }
+.axon-loop-ui .taskmd pre { font-family: var(--font-mono); font-size: 12px; line-height: 1.5; background: var(--color-raised); padding: 12px 14px; border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; margin: .6em 0; }
+.axon-loop-ui .taskmd pre code { background: none; padding: 0; }
+.axon-loop-ui .taskmd blockquote { border-left: 2px solid var(--color-wire); padding-left: 12px; color: var(--color-disabled); margin: .6em 0; }
+.axon-loop-ui .taskmd hr { border: 0; border-top: 1px solid var(--color-hairline); margin: 1em 0; }
+.axon-loop-ui .taskmd table { display: block; width: max-content; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: .6em 0; }
+.axon-loop-ui .taskmd :is(th,td) { border: 1px solid var(--color-hairline); padding: 4px 8px; text-align: left; white-space: nowrap; }
+.axon-loop-ui .taskmd img { max-width: 100%; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes runPulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+@media (prefers-reduced-motion: reduce) { .axon-loop-ui * { animation: none !important; transition: none !important; } }

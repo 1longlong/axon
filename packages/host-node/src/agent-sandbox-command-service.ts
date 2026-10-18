@@ -561,7 +561,7 @@ export class AgentSandboxCommandService {
       environment: { ...context.environment, ...environmentOverrides },
     }
     // 直接程序入口永不自动加载快照；原始 request 也不被包装代码改写。
-    return snapshot
+    return snapshot || pathPrepend?.length
       ? this.executePreparedCommand(originalRequest, handlers, {
           snapshot, environmentOverrides: environmentOverrides ?? context.environment, pathPrepend,
         })
@@ -584,7 +584,7 @@ export class AgentSandboxCommandService {
     request: AgentSandboxCommandRequest,
     handlers: AgentSandboxCommandOutputHandlers,
     shellPreparation?: {
-      snapshot: AgentShellSnapshot
+      snapshot?: AgentShellSnapshot
       environmentOverrides?: Record<string, string | undefined>
       pathPrepend?: string[]
     },

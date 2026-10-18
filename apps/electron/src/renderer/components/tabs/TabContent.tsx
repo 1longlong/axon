@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { useAtomValue } from 'jotai'
 import { tabsAtom, activeTabIdAtom, type TabItem } from '@/atoms/tab-atoms'
+import { appModeAtom } from '@/atoms/app-mode'
 import { MessageSquare } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useChatController } from '@/components/chat/ChatStateProvider'
@@ -16,24 +17,21 @@ const ChatViewShell = React.lazy(() => import('@/components/chat/ChatViewShell')
 /**
  * 当前会话内容区：左侧栏负责选择，内部缓存只用于保留已打开会话状态。
  */
-export function TabContent(): React.ReactElement {
+export function TabContent({ visible = true }: { visible?: boolean }): React.ReactElement {
   const tabs = useAtomValue(tabsAtom)
   const activeTabId = useAtomValue(activeTabIdAtom)
-
-  if (!activeTabId || !tabs.some((tab) => tab.id === activeTabId)) {
-    return (
-      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 bg-[hsl(var(--tab-surface))] text-muted-foreground">
-        <MessageSquare size={28} />
-        <p className="text-sm text-foreground">尚未选择会话</p>
-        <p className="text-xs opacity-60">请从左侧新建或选择会话</p>
-      </div>
-    )
-  }
+  const mode = useAtomValue(appModeAtom)
+  const hasActive = tabs.some((tab) => tab.id === activeTabId && tab.type === mode)
 
   return (
     <div className="relative min-h-0 flex-1">
+      {!hasActive && <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-[hsl(var(--tab-surface))] text-muted-foreground">
+        <MessageSquare size={28} />
+        <p className="text-sm text-foreground">尚未选择会话</p>
+        <p className="text-xs opacity-60">请从左侧新建或选择会话</p>
+      </div>}
       {tabs.map((tab) => (
-        <TabPane key={tab.id} tab={tab} isActive={tab.id === activeTabId} />
+        <TabPane key={tab.id} tab={tab} isActive={visible && tab.type === mode && tab.id === activeTabId} />
       ))}
     </div>
   )

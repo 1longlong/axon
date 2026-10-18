@@ -34,12 +34,14 @@ export interface AgentSandboxFullReadAccess {
 export interface AgentSandboxPolicy {
   platform: AgentSandboxPlatform
   mode: AgentSandboxMode
-  /** 项目管理器解析出的可信沙箱目录基准；独立于模型指定的命令 cwd，不能随 workdir 改变。 */
+  /** 后端按项目或 Loop 归属解析的可信沙箱根；独立于模型的命令 cwd，不能随 workdir 改变。 */
   sandboxCwd: string
   readAccess: AgentSandboxFullReadAccess
   writableRoots: string[]
   protectedReadOnlyRoots: string[]
   networkAccess: boolean
+  /** 仅可信后端提供的精确本地控制 socket，不等于开放命令网络。 */
+  controlSocketPath?: string
 }
 
 /** 越过基础策略时可申请的最小权限单元。 */

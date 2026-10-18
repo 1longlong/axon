@@ -59,14 +59,14 @@ export const AGENT_RUNTIME_CAPABILITIES: Record<AgentRuntimeId, AgentRuntimeCapa
 export interface AgentSessionMeta {
   id: string
   /** 仅可信宿主在创建根会话时标记；缺失为普通会话，不能据 external 消息推断。 */
-  creationOrigin?: 'exec'
-  /** CLI 根创建时的真实工作区；项目改绑后不能无提示在新目录恢复。 */
+  creationOrigin?: 'exec' | 'loop'
+  /** 可信 CLI/Loop 根创建时的真实工作区；Loop 不允许用模型目录参数改变此根。 */
   creationWorkspacePath?: string
   runtimeId: AgentRuntimeId
   title: string
   channelId?: string
   modelId?: string
-  /** 所属项目；运行 cwd 由项目的唯一工作区解析。 */
+  /** 普通会话所属项目；可信 Loop 执行根可不属于项目。 */
   projectId?: string
   /** runtime 侧会话 ID，resume 时经 adapter 扩展输入传入。 */
   sdkSessionId?: string
@@ -94,7 +94,7 @@ export interface AgentSessionMeta {
 
 export interface AgentSessionCreateInput {
   /** 只供可信装配写入；普通创建/更新 RPC 不接受该字段。 */
-  creationOrigin?: 'exec'
+  creationOrigin?: 'exec' | 'loop'
   creationWorkspacePath?: string
   title?: string
   runtimeId?: AgentRuntimeId

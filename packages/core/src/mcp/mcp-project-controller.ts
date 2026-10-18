@@ -2,7 +2,6 @@
 
 import { MCP_PROJECT_CONFIG_VERSION } from '@axon/shared'
 import type { BuiltinMcpPresetSummary, MaterializedMcpPreset, McpConnectionTestResult, McpProjectConfig } from '@axon/shared'
-import type { AgentProjectManager } from '../project/agent-project-manager'
 import { getBuiltinMcpCatalog } from './builtin-mcp/catalog'
 import { materializeBuiltinMcpPreset } from './builtin-mcp/baseline'
 import type { McpProjectConfigManager } from './mcp-project-config-manager'
@@ -14,7 +13,8 @@ import { AsyncWorkTracker } from '../async/async-work-tracker'
 export interface McpProjectControllerOptions {
   configs: Pick<McpProjectConfigManager, 'get' | 'save'>
   tools: Pick<McpToolProvider, 'disposeProject' | 'testConnection'>
-  projects: Pick<AgentProjectManager, 'resolveProjectCwd'>
+  /** 配置所属对象的可信工作目录；项目和 Loop 使用独立实例与连接池。 */
+  resolveWorkspace: (scopeId: string) => string
 }
 
 function parseProjectId(value: unknown): string {
@@ -66,15 +66,22 @@ export class McpProjectController {
 
   /** 校验草稿后临时连接；信号只取消本次测试，不保存或淘汰 Agent 的连接缓存。 */
   testConnection(projectId: unknown, serverName: unknown, server: unknown, signal?: AbortSignal): Promise<McpConnectionTestResult> {
+    return this.work.run(async () => {
+      this.ensureOpen()
+      this.options.resolveWorkspace(parseProjectId(projectId))
+      return this.testDraft(serverName, server, signal)
+    })
+  }
+
+  /** 上层已校验新建对象目录时，可测试尚未保存的草稿；不保存也不占用运行连接。 */
+  testDraft(serverName: unknown, server: unknown, signal?: AbortSignal): Promise<McpConnectionTestResult> {
     const combined = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal
-    return this.work.run(() => this.executeTestConnection(projectId, serverName, server, combined))
+    return this.work.run(() => this.executeTestConnection(serverName, server, combined))
   }
 
   /** 先校验可信项目和草稿，再等待连接关闭；退出不把迟到工具列表交付为成功。 */
-  private async executeTestConnection(projectId: unknown, serverName: unknown, server: unknown, signal: AbortSignal): Promise<McpConnectionTestResult> {
+  private async executeTestConnection(serverName: unknown, server: unknown, signal: AbortSignal): Promise<McpConnectionTestResult> {
     if (signal.aborted) throw new DOMException('MCP 测试已取消', 'AbortError')
-    const normalizedProjectId = parseProjectId(projectId)
-    this.options.projects.resolveProjectCwd(normalizedProjectId)
     if (typeof serverName !== 'string') throw new McpProjectConfigManagerError('invalid_input', 'MCP 服务器名称无效')
     const parsed = parseMcpProjectConfig({ version: MCP_PROJECT_CONFIG_VERSION, servers: { [serverName]: server } })
     if (!parsed.ok) throw new McpProjectConfigManagerError('invalid_input', parsed.diagnostics[0]?.message ?? 'MCP 服务器配置无效', parsed.diagnostics)
@@ -102,7 +109,7 @@ export class McpProjectController {
     }
     return materializeBuiltinMcpPreset(
       presetId.trim(),
-      this.options.projects.resolveProjectCwd(normalizedProjectId),
+      this.options.resolveWorkspace(normalizedProjectId),
     )
   }
 

@@ -6,7 +6,7 @@ import { AGENT_IPC_CHANNELS, AGENT_PROJECT_IPC_CHANNELS, AGENT_MEMORY_IPC_CHANNE
 import type { AgentGenerationEvent, AgentProject, BackendAgentRunEvent, RpcJsonObject, RpcJsonValue, RpcParams } from '@axon/shared'
 import type { AppServerWindowClients } from './app-server-window-clients'
 import { APP_SERVER_PAGE_DISCONNECTED } from './app-server-window-clients'
-import { AGENT_TASK_IPC_CHANNELS } from '@axon/shared'
+import { AGENT_TASK_IPC_CHANNELS, LOOP_IPC_CHANNELS } from '@axon/shared'
 
 export interface AppServerEventOptions {
   clients: Pick<AppServerWindowClients, 'find' | 'matches' | 'getClientSignal'>
@@ -14,6 +14,7 @@ export interface AppServerEventOptions {
   desktopSettings?: { receive(clientId: string, value: unknown): void }
   onProjectsChanged?: (clientId: string, projects: AgentProject[]) => void
   onAgentEvent?: (clientId: string, event: AgentGenerationEvent) => void
+  onLoopNotification?: (event: { loopId: string; title: string; message: string }) => void
 }
 type Interaction = Extract<AgentGenerationEvent, { type: 'permission_request' | 'ask_user_request' }>
 interface PendingInteraction {
@@ -55,6 +56,11 @@ export class AppServerEvents {
 
   constructor(peer: JsonRpcPeer, private readonly options: AppServerEventOptions) {
     peer.handleNotification(APP_SERVER_NOTIFICATIONS.AGENT_RUN, (params) => this.onRun(params))
+    peer.handleNotification(APP_SERVER_NOTIFICATIONS.LOOP_CHANGED, (params) => this.forward(params, 'event', LOOP_IPC_CHANNELS.EVENT))
+    peer.handleNotification(APP_SERVER_NOTIFICATIONS.LOOP_NOTIFICATION, (params) => {
+      if (!object(params) || !id(params.loopId) || typeof params.title !== 'string' || typeof params.message !== 'string') throw new RpcFault(-32602, 'Loop 通知内容无效')
+      if (!this.disposed) this.options.onLoopNotification?.({ loopId: params.loopId, title: params.title.slice(0, 160), message: params.message.slice(0, 500) })
+    })
     peer.handleNotification(APP_SERVER_NOTIFICATIONS.AGENT_QUEUE, (params) => this.forward(params, 'snapshot', AGENT_IPC_CHANNELS.QUEUE_EVENT))
     peer.handleNotification(APP_SERVER_NOTIFICATIONS.AGENT_METADATA, (params) => this.forward(params, 'event', AGENT_IPC_CHANNELS.EVENT))
     peer.handleNotification(APP_SERVER_NOTIFICATIONS.AGENT_PAUSE_CHANGED, (params) => {

@@ -9,6 +9,7 @@ import { APP_SERVER_METHODS as methods, APP_SERVER_NOTIFICATIONS as notices } fr
 import type { AgentCompletionPayload, AgentWorkflowResult, AppServerInitializeResult, ExecEvent } from '@axon/shared'
 import { runExecCommand } from './command'
 import { ExecInputError } from './arguments'
+import { version } from '../package.json'
 import type { ExecBackendPort, ExecCommandContext } from './command'
 
 const cleanups: Array<() => Promise<void>> = []
@@ -130,7 +131,7 @@ describe('exec 实际命令编排与退出', () => {
       const f = fixture({ pipe: true }); f.context.argv = ['--json', option]
       expect(await runExecCommand(f.context)).toBe(0)
       expect(f.creations).toBe(0); expect(f.stopped).toBe(0)
-      expect(f.chunks.join('')).toContain(option === '--help' ? '用法：axon exec' : 'axon 0.1.4')
+      expect(f.chunks.join('')).toContain(option === '--help' ? '用法：axon exec' : `axon ${version}`)
       expect(f.chunks.join('')).not.toContain('exec_started')
       expect(f.signals.listenerCount('SIGINT')).toBe(0); expect(f.signals.listenerCount('SIGTERM')).toBe(0)
     }

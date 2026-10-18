@@ -10,3 +10,5 @@ export { registerPrivateHostBridge, createPrivateHostPorts } from './private-hos
 export type { PrivateHostBridgeOptions, PrivateHostPorts, PrivateHostPortOptions } from './private-host-bridge'
 export { registerExecHostBridge, createExecHostPorts } from './exec-host-bridge'
 export type { ExecHostBridgeOptions, ExecHostPorts } from './exec-host-bridge'
+export * from './loop-cli-client'
+export * from './loop-control-server'

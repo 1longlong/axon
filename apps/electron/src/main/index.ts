@@ -1,4 +1,4 @@
-import { app, dialog, globalShortcut, Menu } from 'electron'
+import { app, dialog, globalShortcut, Menu, Notification } from 'electron'
 import { join } from 'node:path'
 import type { QuickChatShortcutBinding } from '@axon/shared'
 import { registerIpcHandlers } from './ipc'
@@ -103,6 +103,12 @@ async function bootstrap(): Promise<void> {
     confirmChannelTarget: (id, url, signal) => createAppServerChannelTargetConfirmation({ clients: clients!, show: showChannelTargetConfirmation })(id, url, signal),
     configurePeer: (peer) => {
       events = new AppServerEvents(peer, { clients: clients!, desktopSettings,
+        onLoopNotification: ({ title, message }) => {
+          if (getIsQuitting() || !Notification.isSupported()) return
+          const notification = new Notification({ title: `Axon · ${title}`, body: message })
+          notification.on('click', showMainWindow)
+          notification.show()
+        },
         onAgentEvent: (id, event) => dockFeedback?.handleEvent(event, id),
         onProjectsChanged: (id, projects) => {
           if (!desktopSettings?.ownsClient(id)) return

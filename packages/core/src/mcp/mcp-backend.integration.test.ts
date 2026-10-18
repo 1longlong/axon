@@ -37,7 +37,7 @@ describe('core MCP 非 Electron 装配', () => {
     }
     const configs = new McpProjectConfigManager(options)
     const provider = new McpToolProvider({ applicationVersion: 'axon-test-version', getProjectConfig: (id) => configs.get(id) })
-    const controller = new McpProjectController({ projects, configs, tools: provider })
+    const controller = new McpProjectController({ resolveWorkspace: (id) => projects.resolveProjectCwd(id), configs, tools: provider })
     const script = fileURLToPath(new URL('../../test-support/mcp-stdio-fixture.mjs', import.meta.url))
     const testMarker = join(directory, 'test-closed')
     const cachedMarker = join(directory, 'cached-closed')

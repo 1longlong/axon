@@ -228,6 +228,16 @@ export class McpToolProvider {
     return this.work.run(() => this.discoverTools(projectId, this.operationSignal(signal)))
   }
 
+  /** 新建对象的草稿独立发现；完成或取消都等待真实关闭，不污染任何运行连接池。 */
+  getDraftTools(config: McpProjectConfig, signal?: AbortSignal): Promise<AgentCustomToolDefinition[]> {
+    const snapshot = structuredClone(config)
+    return this.work.run(async () => {
+      const draft = new McpToolProvider({ ...this.options, getProjectConfig: async () => snapshot })
+      try { return await draft.getTools('draft', this.operationSignal(signal)) }
+      finally { draft.dispose(); await draft.drain() }
+    })
+  }
+
   /** 解密配置后并行发现服务器；取消优先于可选服务器降级，避免退出返回半份目录。 */
   private async discoverTools(projectId: string, signal: AbortSignal): Promise<AgentCustomToolDefinition[]> {
     if (signal?.aborted) throw abortError()

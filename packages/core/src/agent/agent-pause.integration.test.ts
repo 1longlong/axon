@@ -64,7 +64,7 @@ function fixture(options: { childFailure?: boolean; persistenceFailure?: boolean
   const agent = new AgentService({ sessionManager: sessions, adapter, eventBus: events,
     channelManager: { resolve: async () => ({ id: 'channel', name: '渠道', provider: 'openai',
       baseUrl: 'https://example.test/v1', apiKey: '', models: [{ id: 'model', name: '模型', enabled: true }],
-      enabled: true, createdAt: 1, updatedAt: 1 }) }, resolveProjectCwd: () => directory,
+      enabled: true, createdAt: 1, updatedAt: 1 }) }, resolveExecutionContext: () => ({ workspacePath: directory }),
     runtimeConfigDir: join(directory, 'runtime'), runtimeSessionDir: join(directory, 'runtime', 'sessions'),
   })
   const children = Promise.withResolvers<void>()

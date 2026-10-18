@@ -18,6 +18,7 @@ apps/app-server：独立装配入口 → packages/core → runtime-adapters / ho
 
 - 一个 Electron 父进程管理一个共享 app-server child；主窗口和快捷浮窗分别登记 clientId。桌面只保留窗口/托盘/Dock/快捷键、picker、safeStorage 私有桥及协议代理，不直接装配业务服务、adapter 或执行器，不提供进程内生产回退。
 - `packages/shared` 保存中立 DTO、消息、IPC/RPC 与能力契约；`packages/core` 是不依赖 Electron/具体 Runtime 的后端业务库，统一拥有会话、渠道、项目、上下文、队列、审批/追问、MCP、Skills、记忆、Task 与业务持久化。
+- `packages/loop-engine` 是独立 Loop 领域包，提供生命周期和注入宿主端口的 Cron 调度；core 装配分段权威日志/执行桥，禁止引擎导入 core、Electron 或 Runtime。迭代 27 的后台、CLI、受控 JS 与界面已完成源码集中验收。Loop 使用 CLI 回报，UI 优先复用可移植源码并尽量还原布局/交互，仅适配 Axon 主题/导航/数据；不同 Loop 不做项目互斥，同一 Loop 不重叠。Pi 完整工作流包含子任务及用量；执行中断不重放未知副作用，编辑优先于优化和普通执行。预检网络与确切 MCP 白名单只能由用户配置，不继承普通会话 Grant；工具调用后的脚本失败不转模型重放。
 - `packages/runtime-adapters` 负责 Runtime 接入，SDK、工具 shape、artifact 和私有协议只在对应 adapter；`packages/host-node` 负责文件/Shell/Seatbelt/快照/环境探测，不导入 Runtime SDK。core 不反向导入这两个执行实现包。
 - Pi/Zima 内置 Bash 的单次 `workdir` 解析为进程 `cwd`，默认项目根目录，可选择项目外真实目录；审批展示实际目录，执行不拼接 cd，各次调用不继承 cd/export。Pi 的 `policy.sandboxCwd` 始终来自可信项目工作区，保护目录/可写根/网络不随执行位置改变，项目外写入仍需精确批准。Zima 仍是普通人工审批而非 OS 沙箱，文件工具边界不随 Bash 目录变化。
 - `packages/app-server` 是协议库（peer、身份/路由、私有桥、历史客户端）；`apps/app-server` 才是组合 core、adapter 与宿主的可执行服务入口。完整应用命令不可用仅有 adapter.query 代替。
@@ -106,11 +107,21 @@ apps/app-server：独立装配入口 → packages/core → runtime-adapters / ho
 - [x] 迭代 25：通用非交互 Agent 入口（2026-10-11；macOS/Pi 新任务、完整工作流、正文/JSONL、文件/Schema、CLI 根恢复/临时会话、期限/信号与实际清理、独立 CLI 构建完成；全仓 1307 项/八 workspace 类型/源码构建、真实压缩恢复及源码桌面集中验收通过，非评测专用）
 - [x] 迭代 26：Agent 暂停与继续（2026-10-16 原轮继续完善验收；Pi/Zima 不新增用户发言，保留原 turn/合并回复与汇总，单次执行用新 runId 隔离旧控制。Pi 仅用公开 SDK API、不改依赖；Zima 独立上游和 adapter 增加 session.continue 与宿主背景编码，保持人工审批。全仓 1398 通过/2 项显式 Zima 专项跳过后单独补跑通过、八 workspace 类型、源码构建、双桌面入口/新 PID 恢复、真实 Pi/Zima 继续及独立 Zima 126 项回归通过，证据见 PROGRESS。正常停止保留已有显示，不恢复半条流或重放工具；外部模型和安装包不在本次范围）
 
+- [x] 迭代 27：本地 Loop 与完整任务界面（2026-10-17；分段日志/恢复、Cron/漏跑合并、Pi 完整工作流/CLI、JS 预检/MCP 白名单、编辑/优化、历史产物及生成式面板完成；全仓回归问题经定向修复验证、九 workspace 类型、源码构建和真实桌面子任务/取消/模板安全/新 PID 恢复验收通过，证据见 PROGRESS；Zima Loop、常驻服务、系统唤醒及安装包不在本次范围）
+
+  后续交互修正：配置/执行版本分离，暂停计划不撤销当前回报；仅成功普通执行触发自动优化，nextRunAt 保持后写覆盖。执行来源、编辑/优化反馈和受控应用历史 trace 已接入；创建可选择准备成功后立即运行，运行中删除须先停止。现行 Loop 记录直接使用 executionRevision/trigger 等新字段，不做旧格式迁移或自动删数据。
+
+  首次配置由 Agent 创作：桌面创建仅接受任务/计划/权限，独立 setup 轮经 CLI 生成规范、面板、指标和可选预检；preparation ready 前不启动业务调度。完整工作流成功、resolved 回报及当前执行内容版本一起确认就绪，才兑现用户的立即执行意图；失败/取消/已运行中断不自动重试。准备可在计划暂停时执行但不能启用计划/改授权；基本设置不覆盖生成内容，后续用自然语言编辑。现行 Loop 日志增加 preparation/runAfterPreparation，不兼容旧格式、不自动删除旧记录；本轮定向/类型/源码构建及完整桌面复验通过，证据见 PROGRESS。
+
+  导航使用顶部 Agent/Chat/Loop 三模块与独立 Loop 任务侧栏；会话类型仍只有 Agent/Chat。切模块保留内容视图和本窗口最近位置，不控制后端运行；Loop 表单未保存确认、保存中拒绝离开。2026-10-18 完成新导航完整源码桌面复验，覆盖切页后台继续、取消和新 PID 恢复，证据见 PROGRESS。
+
+  目录解耦：项目、Loop 与 CLI 共用 AgentSessionFactory 创建根会话，同用 AgentService/完整工作流与持久化；不再提供 createLoopSession。执行层通过宿主端口取得可信工作目录、逐轮工具/记忆及私有工具环境，不按 projectId/creationOrigin 分支；业务归属/列表/恢复资格留在后端上层。普通 Agent RPC 不允许自报可信路径或来源。Loop 创建直接选择独立本地目录，不绑定或创建项目，真实根创建后固定、执行前复核；子会话回查根，AGENTS/Skills/沙箱按目录装配，不继承项目记忆/MCP。Loop MCP 按任务 ID 独立加密保存，独立连接池，复用现有编辑/测试与原页面精确取消；新建先保存草稿再准备，失败或退出不自动执行半份配置。修改服务器先撤销旧工具白名单，保存期间禁止本 Loop 运行/更新/删除，运行或排队时禁止改配置；删除 Loop 不删除用户目录。现行定义直接使用 workspacePath，不迁移或自动删除旧记录。验证证据见 PROGRESS。
+
 ## 可扩展功能迭代（暂不实现）
 
 - [ ] Chat 工具执行、联网/生图能力、订阅渠道与代理体系。
 - [ ] 内嵌终端、PTY 与受管浏览器自动化。
-- [ ] Automation、无人值守调度与远程机器人桥接（单次非交互入口已纳入迭代 25）。
+- [ ] 独立常驻服务、系统唤醒、多机器与远程机器人桥接（单次非交互入口已纳入迭代 25；本地 Loop 按迭代 27 开发）。
 - [ ] Planning、待办、日历、提醒及其 Agent 联动。
 - [ ] 首启引导、教程、平台特化、性能专项、TUI/其他 CLI 能力与完整发布链（exec 按迭代 25 开发）。
 - [ ] Agent 会话 Runtime 切换与跨 Runtime 增量历史导入。

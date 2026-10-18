@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@axon/loop-engine": "workspace:*",
     "@axon/shared": "workspace:*",
     "@modelcontextprotocol/sdk": "1.29.0",
     "mammoth": "^1.12.2",

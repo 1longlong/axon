@@ -3,6 +3,7 @@
 import { waitWithSignal } from '../async/wait-with-signal'
 import { randomUUID } from 'node:crypto'
 import { AsyncWorkTracker } from '../async/async-work-tracker'
+import { AgentSessionFactory } from './agent-session-factory'
 import type { BackendClientRegistry } from '../backend-client-registry'
 import type {
   AgentAskUserResponse,
@@ -73,8 +74,9 @@ export interface AgentRunCoordinatorOptions {
   askUsers?: Pick<AgentAskUserService, 'subscribe' | 'bindOwner' | 'unbindOwner' | 'respond' | 'matchesRequest' | 'cancelSession' | 'cancelOwner'>
   /** 创建前检查目标 runtime 可用性，不修改已有会话归属。 */
   validateCreate?: (input: AgentSessionCreateInput) => void | Promise<void>
-  /** 可信装配标记新根会话来源；普通 RPC 输入仍不能自报。 */
-  sessionCreationOrigin?: 'exec'
+  /** 上层装配已解析的业务配置；普通 RPC 只能先经过本层输入校验。 */
+  prepareCreate?: (input: AgentSessionCreateInput) => AgentSessionCreateInput
+  sessionFactory?: AgentSessionFactory
   resolveCreationWorkspace?: (projectId: string) => string
   /** 断开时收束具体子任务，不能借父会话停止误伤另一个入口新建的任务。 */
   cancelChild?: (childSessionId: string) => void
@@ -272,9 +274,11 @@ export class AgentRunCoordinator {
   private readonly unsubscribeClients: () => void
   private readonly disposeController = new AbortController()
   private disposed = false
+  private readonly sessionFactory: AgentSessionFactory
 
   /** 将客户端断开接到运行停止和交互收束；transport 只需注销身份，不执行业务清理。 */
   constructor(private readonly options: AgentRunCoordinatorOptions) {
+    this.sessionFactory = options.sessionFactory ?? new AgentSessionFactory({ sessions: options.sessions, validateCreate: options.validateCreate })
     this.workflows = new AgentWorkflowCoordinator({ clients: options.clients, getSession: (id) => options.sessions.get(id),
       busy: (id) => this.pauses.has(id) || this.owners.has(id) || options.agent.isActive(id) || Boolean(options.isWorkflowRootBusy?.(id)),
       send: (owner, input, workflowId) => this.send(owner, input, () => {}, { source: 'external', workflowId }),
@@ -420,7 +424,7 @@ export class AgentRunCoordinator {
     const run = this.getOwnedRun(owner, target.sessionId)
     const session = this.options.sessions.get(target.sessionId)
     if (!run || run.runId !== target.runId || !session || session.parentSessionId
-      || session.creationOrigin === 'exec' || this.workflows.active(target.sessionId)) {
+      || session.creationOrigin === 'exec' || session.creationOrigin === 'loop' || this.workflows.active(target.sessionId)) {
       throw new AgentServiceError('invalid_input', '只能暂停当前客户端的普通根会话轮次')
     }
     if (this.pauses.has(target.sessionId)) throw new AgentServiceError('already_active', '会话正在暂停')
@@ -508,7 +512,7 @@ export class AgentRunCoordinator {
   /** 只有最近真实停止终态后的宿主 marker 有效；新输入/终态和项目改绑使旧凭据失效。 */
   private readStoredPause(sessionId: string): AgentPauseSnapshot | null {
     const session = this.options.sessions.get(sessionId)
-    if (!session || session.parentSessionId || session.creationOrigin === 'exec') return null
+    if (!session || session.parentSessionId || session.creationOrigin === 'exec' || session.creationOrigin === 'loop') return null
     const messages = this.options.sessions.getMessages(sessionId)
     for (let index = messages.length - 1; index >= 0; index--) {
       const message = messages[index]!
@@ -568,7 +572,7 @@ export class AgentRunCoordinator {
   }
 
   /** 左侧栏只列顶层会话；子会话由后续 Task 卡片按关联读取。 */
-  listSessions() { return this.options.sessions.list().filter((session) => !session.parentSessionId) }
+  listSessions() { return this.options.sessions.list().filter((session) => !session.parentSessionId && session.creationOrigin !== 'loop') }
 
   listActiveRuns() {
     return this.options.agent.listActiveRuns().filter((run) => (
@@ -585,22 +589,12 @@ export class AgentRunCoordinator {
 
   /** 等待 runtime/凭据校验通过才建立会话，失败不能产生无效持久化记录。 */
   createSession(value: unknown, signal?: AbortSignal) {
-    return this.work.run(() => this.executeCreateSession(value, signal))
-  }
-
-  /** 预检跨过退出时不落索引；取消发送等待后，drain 仍等待原预检真实结束。 */
-  private async executeCreateSession(value: unknown, signal?: AbortSignal) {
-    const input = parseSessionInput(value, false) as AgentSessionCreateInput
-    if (this.disposed) throw new AgentServiceError('invalid_input', '运行协调服务已释放')
-    signal?.throwIfAborted()
-    await this.options.validateCreate?.(input)
-    // 异步凭据/runtime 预检返回后复核入口取消，不能创建迟到的会话记录。
-    signal?.throwIfAborted()
-    if (this.disposed) throw new AgentServiceError('invalid_input', '运行协调服务已释放')
-    const origin = this.options.sessionCreationOrigin
-    if (origin && (!input.projectId || !this.options.resolveCreationWorkspace)) return invalid()
-    return this.options.sessions.create({ ...input,
-      ...(origin ? { creationOrigin: origin, creationWorkspacePath: this.options.resolveCreationWorkspace!(input.projectId!) } : {}) })
+    return this.work.run(async () => {
+      if (this.disposed) throw new AgentServiceError('invalid_input', '运行协调服务已释放')
+      const input = parseSessionInput(value, false) as AgentSessionCreateInput
+      const config = this.options.prepareCreate?.(input) ?? input
+      return this.sessionFactory.create(config, signal ? AbortSignal.any([signal, this.disposeController.signal]) : this.disposeController.signal)
+    })
   }
 
   updateSession(id: unknown, value: unknown) {
@@ -920,6 +914,7 @@ export class AgentRunCoordinator {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    if (!this.options.sessionFactory) this.sessionFactory.dispose()
     this.workflows.dispose()
     this.disposeController.abort()
     this.unsubscribeClients()
@@ -937,7 +932,8 @@ export class AgentRunCoordinator {
   }
 
   /** 入口释放后等待发送、建会话预检和后台等待完成；真实 adapter 清理由下层负责。 */
-  async drain(): Promise<void> { await Promise.all([this.work.drain(), this.workflows.drain()]) }
+  async drain(): Promise<void> { await Promise.all([this.work.drain(), this.workflows.drain(),
+    ...(this.options.sessionFactory ? [] : [this.sessionFactory.drain()])]) }
 
   private emitQueueSnapshot(sessionId: string): void {
     const snapshot = { sessionId, messages: this.queue.list(sessionId) }

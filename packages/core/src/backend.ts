@@ -1,11 +1,23 @@
 /** 后端业务装配：接收明确目录、版本、凭据和 Runtime，自行拥有运行与交互协调。 */
 
 import { realpathSync } from 'node:fs'
+import { AgentSessionFactory } from './agent/agent-session-factory'
+import { resolveBackendAgentContext } from './backend-agent-session-context'
+import { randomUUID } from 'node:crypto'
+import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv'
+import { join } from 'node:path'
+import { LoopService } from './loops/loop-service'
+import { LoopServiceError } from './loops/loop-input'
+import { LoopArtifactStore } from './loops/loop-artifacts'
+import { AxonLoopExecutor } from './loops/axon-loop-executor'
+import { readLoopTrace } from './loops/loop-history'
+import type { AxonLoopExecutorOptions } from './loops/axon-loop-executor'
 import type {
   AgentMemoryFile,
   AgentProviderAdapter,
   AgentRuntimeId,
   AgentSessionCreateInput,
+  AgentSessionMeta,
   BackendAgentConfiguration,
   RuntimeChannelDefinition,
   AppSettings,
@@ -93,6 +105,8 @@ export interface BackendOptions {
   sessionCreationOrigin?: 'exec'
   runtimeChannels?: readonly RuntimeChannelDefinition[]
   resolveRuntimeCredential?: ConstructorParameters<typeof ChannelManager>[0]['resolveRuntimeCredential']
+  loopPrecheck?: AxonLoopExecutorOptions['precheck']
+  onLoopNotification?: (event: { loopId: string; title: string; message: string }) => void
 }
 
 /** 后端内部服务集合；不是可绕过 owner 校验的跨进程协议 API。 */
@@ -125,10 +139,15 @@ export interface AxonBackend {
   collaboration: AgentCollaborationService
   mcp: McpProjectController
   mcpTools: McpToolProvider
+  loopMcp: McpProjectController
+  loopMcpTools: McpToolProvider
   memory: AgentMemoryController
   memoryService: AgentMemoryService
   workspaceWatcher: WorkspaceWatcher
   skills: AgentSkillSettingsController
+  loops: LoopService
+  loopArtifacts: LoopArtifactStore
+  sessionFactory: AgentSessionFactory
   getAdapter: (runtimeId: AgentRuntimeId) => AgentProviderAdapter
   /** 同步发出停止并释放空闲资源；不代表异步请求已经 drain，独立进程退出由生命周期层等待。 */
   dispose: () => void
@@ -179,7 +198,7 @@ export function createBackend(options: BackendOptions): AxonBackend {
     applicationVersion: options.applicationVersion, getProjectConfig: (id) => configs.get(id),
     ...(options.connectMcpServer ? { connectServer: options.connectMcpServer } : {}),
   })
-  const mcp = new McpProjectController({ configs, tools: mcpTools, projects })
+  const mcp = new McpProjectController({ configs, tools: mcpTools, resolveWorkspace: (id) => projects.resolveProjectCwd(id) })
   const installations = new AgentSkillInstallationService({
     managedSkillsRoot: paths.managedSkillsDir, statePath: paths.skillInstallationsPath,
     getDesiredCatalogIds: () => settings.get().agentSkillCatalogIds,
@@ -194,6 +213,13 @@ export function createBackend(options: BackendOptions): AxonBackend {
   // 只缓存已实际使用的 adapter；删除会话不能启动尚未装配的 Runtime。
   const adapters = new Map<AgentRuntimeId, AgentProviderAdapter>()
   const ownedResources = new Set<BackendOwnedResource>(options.ownedResources)
+  const sessionFactory = new AgentSessionFactory({ sessions, validateCreate: async (input) => {
+    await options.validateCreate?.(input)
+    // CLI 的来源与原项目快照归装配层；共用创建器不识别此业务类型。
+    if (input.creationOrigin === 'exec' && (!input.projectId
+      || realpathSync(projects.resolveProjectCwd(input.projectId)) !== input.creationWorkspacePath)) throw new Error('CLI 原项目工作区已改变')
+  } })
+  ownedResources.add(sessionFactory)
   const cleanupFailures: Error[] = []
   let disposed = false
   const getAdapter = (runtimeId: AgentRuntimeId): AgentProviderAdapter => {
@@ -224,15 +250,24 @@ export function createBackend(options: BackendOptions): AxonBackend {
   let unsubscribeAskUsers = (): void => {}
   let collaboration: AgentCollaborationService
   let agentRuns: AgentRunCoordinator
+  let loopExecutor: AxonLoopExecutor | undefined
+  const resolveExecutionContext = (session: AgentSessionMeta) => {
+    const context = resolveBackendAgentContext(session, { getSession: (id) => sessions.get(id), resolveProjectCwd: (id) => projects.resolveProjectCwd(id) })
+    return { ...context, toolEnvironment: loopExecutor?.getContext(session.id) ?? {
+      // 普通任务清除本应用的临时业务变量，不能让旧 Shell 快照带回已过期凭据。
+      environmentOverrides: { AXON_LOOP_SOCKET: undefined, AXON_LOOP_TOKEN: undefined },
+    } }
+  }
   const agent = new AgentService({
     adapter: getAdapter('pi'), resolveAdapter: getAdapter, validateRuntimeSession: options.validateRuntimeSession,
     channelManager: channels, sessionManager: sessions, eventBus: events,
     runtimeConfigDir: paths.runtimeConfigDir, runtimeSessionDir: paths.runtimeSessionsDir,
-    resolveProjectCwd: (id) => projects.resolveProjectCwd(id),
+    resolveExecutionContext,
     resolveProjectInstructions: (projectRoot) => resolveProjectInstructions({ projectRoot }),
     discoverAgentSkills: features.skills ? (projectRoot) => discoverAgentSkills({ projectRoot, ...globalSkillRoots }) : undefined,
-    getProjectMemoryContext: features.memory
-      ? (id, previous) => projects.get(id)?.memoryEnabled ? resolveAgentMemoryContext(id, memoryService, previous) : undefined
+    getMemoryContext: features.memory
+      ? (session) => session.projectId && projects.get(session.projectId)?.memoryEnabled
+        ? resolveAgentMemoryContext(session.projectId, memoryService, session.memoryFileStates) : undefined
       : undefined,
     getSystemPrompt: (session) => {
       const config = settings.get()
@@ -243,8 +278,9 @@ export function createBackend(options: BackendOptions): AxonBackend {
       return [features.tasks ? buildAgentCollaborationSystemPrompt(base) : base,
         agentConfiguration?.finalOutputInstruction ?? ''].filter(Boolean).join('\n\n')
     },
-    getCustomTools: async ({ sessionId, projectId, runStartedAt, runSignal, executionPolicy }) => {
+    getCustomTools: async ({ sessionId, runStartedAt, runSignal, executionPolicy }) => {
       const session = sessions.get(sessionId)
+      const projectId = session?.projectId
       const role = session?.subagentType
       const updateMemoryBaseline = (file: AgentMemoryFile): void => {
         const current = sessions.get(sessionId)
@@ -253,14 +289,14 @@ export function createBackend(options: BackendOptions): AxonBackend {
         } })
       }
       // 主/子角色只收到各自允许的工具；搜索目录只能由过滤后的集合生成。
-      const memoryTools = features.memory && projects.get(projectId)?.memoryEnabled
+      const memoryTools = projectId && features.memory && projects.get(projectId)?.memoryEnabled
         ? createAgentMemoryTools({ projectId, memory: memoryService, onRead: updateMemoryBaseline, onWrite: updateMemoryBaseline })
           .filter((tool) => !role || role === 'coder' || tool.name !== 'MemoryWrite') : []
       return withAgentToolSearch([
         ...(!role ? [askUsers.createTool(sessionId, runStartedAt, runSignal, executionPolicy.userInputPolicy)] : []),
         ...(!features.tasks || session?.parentSessionId ? [] : createAgentCollaborationTools({ sessionId, runSignal, collaboration })),
         ...memoryTools,
-        ...(!features.mcp || role === 'explore' || role === 'plan' ? [] : await mcpTools.getTools(projectId, runSignal)),
+        ...(!projectId || !features.mcp || role === 'explore' || role === 'plan' ? [] : await mcpTools.getTools(projectId, runSignal)),
       ])
     },
     createCanUseTool: (sessionId, startedAt, signal) => permissions.createCanUseTool(
@@ -271,15 +307,20 @@ export function createBackend(options: BackendOptions): AxonBackend {
   })
   // 工具回调只在真正查询时执行；先完成双向装配，再开放服务，避免循环初始化单例。
   collaboration = new AgentCollaborationService({
-    sessions, delegations: tasks, agent, resolveProjectCwd: (id) => projects.resolveProjectCwd(id),
+    sessions, delegations: tasks, agent, resolveExecutionContext,
+    prepareChildSession: (parent) => ({ projectId: parent.projectId }),
     bindChildInteractionOwner: (parent, child) => agentRuns.bindChildInteractionOwner(parent, child),
   })
   // 先登记任务状态落盘，再登记客户端投递；UI 收到审批时能读取一致的 blocked 状态。
   unsubscribePermissions = permissions.subscribe((event) => collaboration.handleInteractionEvent(event))
   unsubscribeAskUsers = askUsers.subscribe((event) => collaboration.handleInteractionEvent(event))
   agentRuns = new AgentRunCoordinator({ clients, sessions, agent, events, permissions, askUsers,
-    validateCreate: options.validateCreate,
-    sessionCreationOrigin: options.sessionCreationOrigin,
+    sessionFactory,
+    prepareCreate: options.sessionCreationOrigin ? (input) => {
+      if (!input.projectId) throw new Error('CLI 会话必须属于项目')
+      return { ...input, creationOrigin: options.sessionCreationOrigin,
+        creationWorkspacePath: realpathSync(projects.resolveProjectCwd(input.projectId)) }
+    } : undefined,
     resolveCreationWorkspace: (projectId) => realpathSync(projects.resolveProjectCwd(projectId)),
     cancelWorkflowDescendants: (id) => { collaboration.cancelDescendants(id) },
     waitForWorkflowDescendants: (id) => collaboration.waitForRootIdle(id),
@@ -291,6 +332,42 @@ export function createBackend(options: BackendOptions): AxonBackend {
     },
   })
   if (features.tasks) collaboration.setBackgroundCompletionHandler((delegation) => agentRuns.notifyBackgroundCompletion(delegation))
+  const loopArtifacts = new LoopArtifactStore(join(paths.dataDir, 'loops'))
+  const loopConfigs = new McpProjectConfigManager({ credentialCodec: options.credentialCodec,
+    resolveProjectDataDir: (id) => loops.resolveDataDirectory(id) })
+  const loopMcpTools = new McpToolProvider({ applicationVersion: options.applicationVersion,
+    getProjectConfig: (id) => loopConfigs.get(id),
+    ...(options.connectMcpServer ? { connectServer: options.connectMcpServer } : {}) })
+  const loopMcp = new McpProjectController({ configs: loopConfigs, tools: loopMcpTools,
+    resolveWorkspace: (id) => loops.resolveWorkspace(id) })
+  ownedResources.add(loopMcp); ownedResources.add(loopMcpTools)
+  const loops: LoopService = new LoopService({ directory: join(paths.dataDir, 'loops'),
+    validateDefinition: (definition) => {
+      const channel = channels.get(definition.channelId)
+      if (!channel?.enabled || !channel.models.some((model) => model.id === definition.modelId && model.enabled)) {
+        throw new LoopServiceError('invalid_input', 'Loop 选择的渠道或模型不可用')
+      }
+    },
+    execute: (request) => loopExecutor!.execute(request),
+    captureArtifacts: (definition, runId) => loopArtifacts.capture(definition, runId),
+    readTrace: (sessionId, offset) => readLoopTrace(sessions.openMessageHistory(sessionId), offset),
+    notify: options.onLoopNotification,
+    saveMcpConfig: (id, config) => loopMcp.save(id, config),
+    deleteMcpConfig: (id) => { loopConfigs.delete(id); loopMcpTools.disposeProject(id) },
+    callMcp: async (id, name, args, signal) => {
+      const tool = (await loopMcpTools.getTools(id, signal)).find((item) => item.name === name)
+      if (!tool) throw new LoopServiceError('unavailable', '已授权 MCP 工具当前不可用')
+      try {
+        // 这条桥没有经过 Runtime 的参数编译器，须独立按已发现 Schema 校验。
+        if (!new AjvJsonSchemaValidator().getValidator(tool.inputSchema)(args).valid) throw new Error('参数不匹配')
+      } catch { throw new LoopServiceError('invalid_input', 'MCP 工具参数或 Schema 无效，尚未执行') }
+      const result = await tool.execute(args, { signal, toolUseId: `loop-${randomUUID()}` })
+      if (result.isError) throw new LoopServiceError('unavailable', 'MCP 工具报告执行错误，未自动重发')
+      return result
+    },
+  })
+  loopExecutor = new AxonLoopExecutor({ clients, runs: agentRuns, sessions, tasks, sessionFactory,
+    saveQuery: (id, query) => loops.setQuery(id, query), precheck: options.loopPrecheck })
   const parseDocument = createDocumentParser()
   const chat = new ChatService({
     channelManager: channels, conversationManager: conversations, userAgent, stream: options.providerStream,
@@ -317,6 +394,7 @@ export function createBackend(options: BackendOptions): AxonBackend {
       }
     }
     // 先封住派生、发送和附属标题入口，后续断开回调不能重新调度已排队工作。
+    clean(() => loops.dispose())
     clean(() => collaboration.dispose())
     clean(() => agent.dispose())
     clean(() => chat.dispose())
@@ -349,7 +427,7 @@ export function createBackend(options: BackendOptions): AxonBackend {
   const drainRuns = (): Promise<void> => {
     if (!disposed) return Promise.reject(new Error('必须先释放后端入口再等待运行结束'))
     return drainingRuns ??= Promise.all([
-      agentRuns.drain(), chatRuns.drain(), collaboration.drain(), agent.drain(), chat.drain(),
+      agentRuns.drain(), chatRuns.drain(), collaboration.drain(), agent.drain(), chat.drain(), loops.drain(),
     ]).then(() => {})
   }
   let draining: Promise<void> | undefined
@@ -379,9 +457,9 @@ export function createBackend(options: BackendOptions): AxonBackend {
   }
   return {
     paths, settings, userProfile, channels, channelController, channelNetwork, conversations, attachments, attachmentController,
-    projects, projectController, state, sessions, tasks, taskController, histories,
+    projects, projectController, state, sessions, tasks, taskController, histories, loops, loopArtifacts, sessionFactory,
     events, agent, agentCapabilities, clients, agentRuns, permissions, askUsers, chat, chatRuns, collaboration, mcpTools, memoryService, workspaceWatcher, skills, getAdapter,
-    mcp,
+    mcp, loopMcp, loopMcpTools,
     memory,
     dispose,
     drainRuns,

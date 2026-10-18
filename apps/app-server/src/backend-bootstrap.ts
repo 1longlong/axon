@@ -1,13 +1,13 @@
 /** 独立入口装配实际 Runtime/宿主；业务状态与写盘仍交给 createBackend。 */
 import { accessSync, constants, statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
-import { createBackend, createBackendPaths } from '@axon/core'
+import { buildAgentSandboxPolicy, createBackend, createBackendPaths, LoopServiceError } from '@axon/core'
 import type { AxonBackend } from '@axon/core'
-import { AppServerBootstrapCleanupError, createExecHostPorts, createPrivateHostPorts } from '@axon/app-server'
+import { AppServerBootstrapCleanupError, createExecHostPorts, createPrivateHostPorts, LoopControlServer } from '@axon/app-server'
 import type { AppServerBootstrap, JsonRpcPeer } from '@axon/app-server'
-import { AgentSandboxCommandService, checkAgentEnvironment } from '@axon/host-node'
+import { AgentSandboxCommandService, checkAgentEnvironment, LoopPrecheckRunner, LoopPrecheckPermissionError } from '@axon/host-node'
 import { PiAgentAdapter, ZimaAgentAdapter, assertZimaConnection } from '@axon/runtime-adapters'
-import { AGENT_RUNTIME_CAPABILITIES } from '@axon/shared'
+import { AGENT_RUNTIME_CAPABILITIES, APP_SERVER_NOTIFICATIONS } from '@axon/shared'
 import type { AgentRuntimeId, AgentSessionCreateInput, AppServerInitializeInput } from '@axon/shared'
 import type { AppServerStartupConfig } from './startup-config'
 
@@ -39,6 +39,8 @@ export async function bootstrapAppServerBackend(
   // 构造能力对象不会启动 Python；未配置的 adapter 不能进入执行路由。
   const pythonAvailable = configuredPython(config.zimaPython)
   const zima = new ZimaAgentAdapter(config.zimaPython ?? '', config.applicationVersion)
+  const loopControl = new LoopControlServer()
+  const loopPrecheck = new LoopPrecheckRunner(executor)
   const resolveAdapter = (runtimeId: AgentRuntimeId) => {
     if (runtimeId === 'pi') return pi
     if (!configuredPython(config.zimaPython)) throw new Error('Zima Runtime 受控解释器未配置或不可用')
@@ -57,12 +59,28 @@ export async function bootstrapAppServerBackend(
       ...(execHost ? { sessionCreationOrigin: 'exec' as const, agentConfiguration: execHost.bootstrap.agent, runtimeChannels: execHost.bootstrap.channels,
         resolveRuntimeCredential: execHost.resolveRuntimeCredential } : {}),
       confirmChannelTarget: host.confirmChannelTarget, resolveAdapter, checkEnvironment: checkAgentEnvironment,
-      ownedResources: [pi, zima, executor],
+      ownedResources: [pi, zima, loopPrecheck, executor, loopControl],
+      onLoopNotification: (event) => { if (!peer.closed) peer.notify(APP_SERVER_NOTIFICATIONS.LOOP_NOTIFICATION, event) },
+      loopPrecheck: async (request) => {
+        try {
+          const policy = buildAgentSandboxPolicy({ projectRoot: request.definition.workspacePath, mode: request.definition.sandboxMode })
+          policy.networkAccess = request.definition.precheckNetworkAccess === true
+          return await loopPrecheck.run({ code: request.definition.workflow!, prev: request.cursor, cwd: request.definition.workspacePath, policy, control: request.control, signal: request.signal })
+        } catch (error) {
+          if (error instanceof LoopPrecheckPermissionError) throw new LoopServiceError('forbidden', error.message)
+          throw error
+        }
+      },
       validateCreate: validateRuntime, validateRuntimeSession: validateRuntime })
     // 服务开始接收会话请求前收敛上次中断的子任务，不能让 UI 恢复伪运行态。
     backend.tasks.markRunningDelegationsAsInterrupted()
     signal.throwIfAborted()
     const piSandbox = pi.getSandboxCapability({ platform: 'macos' }), zimaSandbox = zima.getSandboxCapability({ platform: 'macos' })
+    if (!execHost && piSandbox.supported) {
+      const context = await loopControl.start((token, argv) => backend!.loops.dispatchCli(token, argv))
+      signal.throwIfAborted()
+      backend.loops.start(context)
+    }
     return { backend, applicationVersion: config.applicationVersion, capabilities: {
       ...input.hostCapabilities,
       runtimes: [{ runtimeId: 'pi', configured: true, capabilities: { ...AGENT_RUNTIME_CAPABILITIES.pi, osSandbox: piSandbox.supported }, sandbox: piSandbox },
@@ -74,7 +92,7 @@ export async function bootstrapAppServerBackend(
       try { backend.dispose() } catch { /* 仍须等待其他资源，不泄露底层异常。 */ }
       try { await backend.drain() } catch { throw new AppServerBootstrapCleanupError() }
     } else {
-      const resources = [pi, zima, executor]
+      const resources = [pi, zima, loopPrecheck, executor, loopControl]
       let cleanupFailed = false
       for (const resource of resources) {
         try { resource.dispose() } catch { cleanupFailed = true }

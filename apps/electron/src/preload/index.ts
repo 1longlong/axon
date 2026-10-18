@@ -21,7 +21,10 @@ import {
   CHANNEL_IPC_CHANNELS,
   CHAT_IPC_CHANNELS,
   MCP_IPC_CHANNELS,
+  LOOP_IPC_CHANNELS,
 } from '@axon/shared'
+import type { LoopArtifact, LoopArtifactContent, LoopChangedEvent, LoopComposeInput, LoopDetail, LoopRunDetail,
+  LoopSummary, LoopUpdateInput, LoopRunSummary, LoopDispatchResult, LoopMcpToolOption, LoopMcpTarget, LoopMcpConnectionTestInput } from '@axon/shared'
 import type {
   AgentActiveRun,
   AgentRunIdentityEvent,
@@ -237,6 +240,33 @@ const api = {
       const listener = (_event: IpcRendererEvent, snapshot: AgentQueueSnapshot): void => callback(snapshot)
       ipcRenderer.on(AGENT_IPC_CHANNELS.QUEUE_EVENT, listener)
       return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.QUEUE_EVENT, listener)
+    },
+  },
+  loops: {
+    mcpTools: (target: LoopMcpTarget, config?: McpProjectConfig): Promise<LoopMcpToolOption[]> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.MCP_TOOLS, { target, ...(config ? { config } : {}) }),
+    getMcpConfig: (id: string): Promise<McpProjectConfig> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.MCP_GET_CONFIG, id),
+    saveMcpConfig: (id: string, config: McpProjectConfig): Promise<McpProjectConfig> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.MCP_SAVE_CONFIG, { loopId: id, config }),
+    testMcpConnection: (input: LoopMcpConnectionTestInput): Promise<McpConnectionTestResult> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.MCP_TEST_CONNECTION, input),
+    cancelMcpTest: (id: string): Promise<boolean> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.MCP_CANCEL_TEST, id),
+    list: (): Promise<LoopSummary[]> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.LIST),
+    get: (id: string): Promise<LoopDetail> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.GET, id),
+    runs: (id: string, before?: string, limit?: number): Promise<LoopRunSummary[]> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.RUNS,
+      { loopId: id, ...(before ? { before } : {}), ...(limit === undefined ? {} : { limit }) }),
+    create: (input: LoopComposeInput): Promise<LoopSummary> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.CREATE, input),
+    prepare: (id: string): Promise<LoopDispatchResult> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.PREPARE, { loopId: id }),
+    update: (id: string, update: LoopUpdateInput): Promise<LoopSummary> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.UPDATE, { loopId: id, update }),
+    delete: (id: string): Promise<boolean> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.DELETE, id),
+    run: (id: string): Promise<LoopDispatchResult> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.RUN, { loopId: id }),
+    evolve: (id: string): Promise<LoopDispatchResult> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.EVOLVE, { loopId: id }),
+    edit: (id: string, instruction: string): Promise<LoopDispatchResult> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.EDIT, { loopId: id, instruction }),
+    stop: (id: string, runId: string): Promise<boolean> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.STOP, { loopId: id, runId }),
+    runDetail: (id: string, runId: string): Promise<LoopRunDetail> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.RUN_DETAIL, { loopId: id, runId }),
+    artifacts: (id: string, runId?: string): Promise<LoopArtifact[]> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.ARTIFACTS, { loopId: id, ...(runId ? { runId } : {}) }),
+    readArtifact: (id: string, path: string, runId?: string): Promise<LoopArtifactContent> => ipcRenderer.invoke(LOOP_IPC_CHANNELS.READ_ARTIFACT, { loopId: id, path, ...(runId ? { runId } : {}) }),
+    onChanged: (callback: (event: LoopChangedEvent) => void): (() => void) => {
+      const listener = (_event: IpcRendererEvent, event: LoopChangedEvent): void => callback(event)
+      ipcRenderer.on(LOOP_IPC_CHANNELS.EVENT, listener)
+      return () => ipcRenderer.removeListener(LOOP_IPC_CHANNELS.EVENT, listener)
     },
   },
   agentTasks: {

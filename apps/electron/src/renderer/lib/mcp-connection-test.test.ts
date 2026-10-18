@@ -3,14 +3,14 @@ import type { McpConnectionTestInput, McpConnectionTestResult } from '@axon/shar
 import { McpConnectionTestRunner } from './mcp-connection-test'
 
 function open() {
-  const calls: McpConnectionTestInput[] = [], cancelled: string[] = [], results: McpConnectionTestResult[] = []
+  const calls: Omit<McpConnectionTestInput, 'projectId'>[] = [], cancelled: string[] = [], results: McpConnectionTestResult[] = []
   const pending: Array<ReturnType<typeof Promise.withResolvers<McpConnectionTestResult>>> = []
   let started = 0, finished = 0
   const runner = new McpConnectionTestRunner({
     testConnection: (input) => { calls.push(input); const gate = Promise.withResolvers<McpConnectionTestResult>(); pending.push(gate); return gate.promise },
     cancelConnectionTest: async (id) => { cancelled.push(id); return true },
   }, { started: () => { started += 1 }, result: (value) => results.push(value), finished: () => { finished += 1 } })
-  const input = { projectId: 'project', serverName: 'local', server: {
+  const input = { serverName: 'local', server: {
     type: 'stdio' as const, command: 'fixture', enabled: false, required: false, startupTimeoutMs: 1000, requestTimeoutMs: 1000,
   } }
   return { runner, calls, cancelled, pending, results, input, counts: () => ({ started, finished }) }

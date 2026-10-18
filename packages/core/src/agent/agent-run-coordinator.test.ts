@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentGenerationEvent } from '@axon/shared'
 import { AgentEventBus } from './agent-event-bus'
 import { AgentRunCoordinator } from './agent-run-coordinator'
+import { AgentSessionFactory } from './agent-session-factory'
 import type { AgentRunCoordinatorOptions } from './agent-run-coordinator'
 import { AgentServiceError } from './agent-service'
 import { AgentSessionManager } from './agent-session-manager'
@@ -48,9 +49,28 @@ function passiveAgent(
 }
 
 describe('AgentRunCoordinator CRUD 与输入边界', () => {
+  test('Loop 创建的目录只走可信参数，普通入口不能伪造来源或目录', async () => {
+    const controller = new AgentRunCoordinator({ clients, sessions, agent: passiveAgent(), events: new AgentEventBus() })
+    const factory = new AgentSessionFactory({ sessions })
+    const loop = await factory.create({ channelId: 'channel', modelId: 'model', approvalPolicy: 'never', userInputPolicy: 'reject',
+      creationOrigin: 'loop', creationWorkspacePath: directory })
+    expect(loop.creationOrigin).toBe('loop')
+    expect(loop.projectId).toBeUndefined()
+    expect(loop.creationWorkspacePath).toBe(realpathSync(directory))
+    for (const input of [{ creationOrigin: 'loop' }, { creationWorkspacePath: directory }, { workspacePath: directory }]) {
+      await expect(controller.createSession(input)).rejects.toThrow()
+      expect(() => controller.updateSession(loop.id, input)).toThrow()
+    }
+    await expect(factory.create({ creationOrigin: 'loop', creationWorkspacePath: 'relative/path' })).rejects.toThrow('工作目录无效')
+    await expect(factory.create({ creationOrigin: 'loop', creationWorkspacePath: join(directory, 'missing') })).rejects.toThrow()
+    expect(sessions.list()).toHaveLength(1)
+    expect(controller.listSessions()).toEqual([])
+  })
+
   test('CLI 来源只由可信装配写入，普通创建/更新不能自报或清除', async () => {
     const common = { clients, sessions, agent: passiveAgent(), events: new AgentEventBus() }
-    const desktop = new AgentRunCoordinator(common), exec = new AgentRunCoordinator({ ...common, sessionCreationOrigin: 'exec', resolveCreationWorkspace: () => directory })
+    const desktop = new AgentRunCoordinator(common), exec = new AgentRunCoordinator({ ...common,
+      prepareCreate: (input) => ({ ...input, creationOrigin: 'exec', creationWorkspacePath: directory }), resolveCreationWorkspace: () => directory })
     expect((await desktop.createSession({})).creationOrigin).toBeUndefined()
     const root = await exec.createSession({ projectId: 'project', approvalPolicy: 'never', userInputPolicy: 'reject' })
     expect(root.creationOrigin).toBe('exec')

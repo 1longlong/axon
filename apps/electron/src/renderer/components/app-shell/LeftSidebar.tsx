@@ -1,12 +1,14 @@
 /**
- * 左侧栏：Chat 与 Agent 都展示主进程会话索引。
+ * 左侧栏按应用模块展示会话索引或 Loop 导航，底部只保留设置与收栏。
  */
 
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import { useAtom, useAtomValue, useSetAtom } from 'jotai'
 import { ChevronRight, PanelLeft, Plus, Search, Settings, Trash2 } from 'lucide-react'
-import { AgentModeIcon, ChatIcon, ProjectFolderIcon } from '@/components/icons/WorkbenchIcons'
+import { appSectionAtom, navigateAppAtom } from '@/atoms/app-navigation'
+import { LoopSidebar } from '@/components/loops/LoopSidebar'
+import { ProjectFolderIcon } from '@/components/icons/WorkbenchIcons'
 import { appModeAtom } from '@/atoms/app-mode'
 import {
   activeTabIdAtom,
@@ -29,7 +31,6 @@ import {
 } from '@/atoms/panel-layout'
 import { cn } from '@/lib/utils'
 import { ModeSwitcher } from './ModeSwitcher'
-import { settingsOpenAtom } from '@/atoms/settings-tab'
 import { chatStateAtom } from '@/atoms/chat-state'
 import { agentStateAtom } from '@/atoms/agent-state'
 import { useChatController } from '@/components/chat/ChatStateProvider'
@@ -45,14 +46,14 @@ import type { AgentRuntimeId } from '@axon/shared'
 
 export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactElement {
   const appMode = useAtomValue(appModeAtom)
-  const setAppMode = useSetAtom(appModeAtom)
+  const section = useAtomValue(appSectionAtom)
+  const navigate = useSetAtom(navigateAppAtom)
   const [tabs, setTabs] = useAtom(tabsAtom)
   const [activeTabId, setActiveTabId] = useAtom(activeTabIdAtom)
   const [collapsed, setCollapsed] = useAtom(sidebarCollapsedAtom)
   const [width, setWidth] = useAtom(leftSidebarWidthAtom)
   const rightPanelCollapsed = useAtomValue(rightPanelCollapsedAtom)
   const rightPanelWidth = useAtomValue(rightPanelWidthAtom)
-  const setSettingsOpen = useSetAtom(settingsOpenAtom)
   const chatState = useAtomValue(chatStateAtom)
   const chatController = useChatController()
   const { createChatConversation, creating: creatingChat, creationReady, createError: chatCreateError } = useCreateChatConversation()
@@ -72,29 +73,33 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
   )
 
   const handleCreate = React.useCallback(() => {
+    if (section === 'loop') {
+      if (navigate({ page: { kind: 'create' } })) setCollapsed(false)
+      return
+    }
     if (appMode === 'chat') {
       void createChatConversation()
       return
     }
     setCollapsed(false)
-  }, [appMode, createChatConversation, setCollapsed])
+  }, [appMode, createChatConversation, navigate, section, setCollapsed])
 
   /** 会话必须从具体项目节点创建，以此保证 projectId 在首次落盘时就明确。 */
   const handleCreateAgentSession = React.useCallback((projectId: string, runtimeId: AgentRuntimeId) => {
+    if (!navigate({ section: 'agent' })) return
     setHoveredProject(null)
     void createAgentSession(projectId, runtimeId).then((session) => {
       if (!session) return
       const result = openTab(tabs, { type: 'agent', sessionId: session.id, title: session.title })
       setTabs(result.tabs)
       setActiveTabId(result.activeTabId)
-      setAppMode('agent')
       setCollapsedProjects((current) => {
         const next = new Set(current)
         next.delete(projectId)
         return next
       })
     })
-  }, [createAgentSession, setActiveTabId, setAppMode, setTabs, tabs])
+  }, [createAgentSession, navigate, setActiveTabId, setTabs, tabs])
 
   /** 悬停信息使用页面顶层定位，完整路径不会被侧栏滚动区域截断。 */
   const showProjectInfo = (project: AgentProject, sessionCount: number, target: HTMLElement): void => {
@@ -106,30 +111,23 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
     })
   }
 
-  const handleSelect = React.useCallback((tabId: string) => {
-    const tab = tabs.find((item) => item.id === tabId)
-    if (!tab) return
-    setAppMode(tab.type)
-    setActiveTabId(tab.id)
-  }, [setActiveTabId, setAppMode, tabs])
-
   const handleSelectConversation = React.useCallback((conversation: ConversationMeta) => {
+    if (!navigate({ section: 'chat' })) return
     const result = openTab(tabs, {
       type: 'chat',
       sessionId: conversation.id,
       title: conversation.title,
     })
-    setAppMode('chat')
     setTabs(result.tabs)
     setActiveTabId(result.activeTabId)
-  }, [setActiveTabId, setAppMode, setTabs, tabs])
+  }, [navigate, setActiveTabId, setTabs, tabs])
 
   const handleSelectAgentSession = React.useCallback((session: { id: string; title: string }) => {
+    if (!navigate({ section: 'agent' })) return
     const result = openTab(tabs, { type: 'agent', sessionId: session.id, title: session.title })
     setTabs(result.tabs)
     setActiveTabId(result.activeTabId)
-    setAppMode('agent')
-  }, [setActiveTabId, setAppMode, setTabs, tabs])
+  }, [navigate, setActiveTabId, setTabs, tabs])
 
   /** 删除会话后同步清理内部视图缓存；主进程已先完成索引和 JSONL 清理。 */
   const handleDeleteConversation = React.useCallback(async (conversation: ConversationMeta) => {
@@ -162,7 +160,7 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
   if (collapsed) {
     return (
       <aside
-        aria-label="左侧会话栏"
+        aria-label="左侧导航栏"
         style={{ width: LEFT_SIDEBAR_COLLAPSED_WIDTH }}
         className={cn(
           'flex h-full shrink-0 flex-col items-center gap-1 border-r border-border-subtle bg-[hsl(var(--sidebar-surface))] px-2 pb-2',
@@ -170,33 +168,12 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
           isWindows && 'pt-2',
         )}
       >
-        {(['agent', 'chat'] as const).map((mode) => {
-          const Icon = mode === 'agent' ? AgentModeIcon : ChatIcon
-          return (
-            <button
-              key={mode}
-              type="button"
-              title={mode === 'agent' ? 'Agent 模式' : 'Chat 模式'}
-              aria-label={mode === 'agent' ? 'Agent 模式' : 'Chat 模式'}
-              onClick={() => {
-                setAppMode(mode)
-                const existing = [...tabs].reverse().find((tab) => tab.type === mode)
-                if (existing) setActiveTabId(existing.id)
-              }}
-              className={cn(
-                'flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-                appMode === mode && 'bg-muted text-foreground',
-              )}
-            >
-              <Icon size={14} />
-            </button>
-          )
-        })}
+        <ModeSwitcher collapsed />
         <button
           type="button"
-          title={appMode === 'chat' ? '新建对话' : '新建 Agent 项目'}
-          aria-label={appMode === 'chat' ? '新建对话' : '新建 Agent 项目'}
-          disabled={creatingChat || creatingAgent || (appMode === 'chat' && !creationReady)}
+          title={section === 'loop' ? '新建 Loop' : appMode === 'chat' ? '新建对话' : '新建 Agent 项目'}
+          aria-label={section === 'loop' ? '新建 Loop' : appMode === 'chat' ? '新建对话' : '新建 Agent 项目'}
+          disabled={section !== 'loop' && (creatingChat || creatingAgent || (appMode === 'chat' && !creationReady))}
           onClick={handleCreate}
           className="mt-1 flex h-8 w-8 items-center justify-center rounded-md border text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
@@ -206,7 +183,7 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
           type="button"
           title="设置"
           aria-label="设置"
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => navigate({ settings: true })}
           className="mt-auto flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
         >
           <Settings size={14} />
@@ -225,7 +202,7 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
   }
 
   const getMaxWidth = (): number => {
-    const rightSpace = appMode === 'agent'
+    const rightSpace = section === 'agent'
       ? RIGHT_PANEL_RAIL_WIDTH + (rightPanelCollapsed ? 0 : rightPanelWidth + PANEL_RESIZE_HANDLE_WIDTH)
       : 0
     return Math.max(LEFT_SIDEBAR_MIN_WIDTH, Math.min(
@@ -236,7 +213,7 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
 
   return <>
     <aside
-      aria-label="左侧会话栏"
+      aria-label="左侧导航栏"
       style={{ width }}
       className={cn(
         'flex h-full shrink-0 flex-col border-r border-border-subtle bg-[hsl(var(--sidebar-surface))] px-2 pb-2',
@@ -246,6 +223,7 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
     >
       <div className="px-1"><ModeSwitcher /></div>
 
+      {section === 'loop' ? <LoopSidebar /> : <>
       {appMode === 'chat' ? <button
           type="button"
           disabled={creatingChat || !creationReady}
@@ -379,11 +357,12 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
           <p className="px-2 py-2 text-xs text-destructive">{chatCreateError ?? agentCreateError ?? deleteError ?? projectError}</p>
         )}
       </div>
+      </>}
 
       <div className="flex h-9 shrink-0 items-end gap-1 border-t border-border-subtle pt-1">
         <button
           type="button"
-          onClick={() => setSettingsOpen(true)}
+          onClick={() => navigate({ settings: true })}
           className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded px-2 text-xs text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           <Settings size={14} />
@@ -400,7 +379,7 @@ export function LeftSidebar({ isWindows }: { isWindows: boolean }): React.ReactE
         </button>
       </div>
     </aside>
-    {hoveredProject && createPortal(<div role="tooltip" aria-label={`项目 ${hoveredProject.project.name} 信息`}
+    {section === 'agent' && hoveredProject && createPortal(<div role="tooltip" aria-label={`项目 ${hoveredProject.project.name} 信息`}
       style={{ left: hoveredProject.left, top: hoveredProject.top }}
       className="pointer-events-none fixed z-[90] w-72 rounded-md border bg-popover p-3 text-xs text-popover-foreground shadow-lg">
       <p className="font-medium">{hoveredProject.project.name}</p>

@@ -45,7 +45,7 @@ describe('AgentCollaborationService', () => {
   test('根收束等待实际子执行和终态后的后台交付；并发等待共用同一 Promise', async () => {
     const child = Promise.withResolvers<AgentRunOutcome>(), delivery = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
     const service = new AgentCollaborationService({ sessions, delegations: tasks,
-      agent: { sendMessage: () => child.promise, isActive: () => true, stop: () => false }, resolveProjectCwd: () => directory })
+      agent: { sendMessage: () => child.promise, isActive: () => true, stop: () => false }, resolveExecutionContext: () => ({ workspacePath: directory }) })
     service.setBackgroundCompletionHandler(async () => { entered.resolve(); await delivery.promise })
     const task = service.delegate({ parentSessionId: rootSessionId, parentToolUseId: 'root-drain', title: '后台任务',
       objective: '检查', subagentType: 'explore', runInBackground: true })
@@ -73,7 +73,7 @@ describe('AgentCollaborationService', () => {
         const gate = Promise.withResolvers<AgentRunOutcome>(); gates.set(input.text, gate)
         if (input.text === '交付后继') lastStarted.resolve()
         return await gate.promise
-      }, isActive: () => true, stop: () => false }, resolveProjectCwd: () => directory })
+      }, isActive: () => true, stop: () => false }, resolveExecutionContext: () => ({ workspacePath: directory }) })
     service.setBackgroundCompletionHandler(async (task) => {
       if (task.objective === '任务0') service.delegate({ parentSessionId: rootSessionId, parentToolUseId: 'followup', title: '后继',
         objective: '交付后继', subagentType: 'explore', runInBackground: false })
@@ -102,7 +102,7 @@ describe('AgentCollaborationService', () => {
     const stops: string[] = []
     const service = new AgentCollaborationService({ sessions, delegations: tasks,
       agent: { sendMessage(input) { const gate = Promise.withResolvers<AgentRunOutcome>(); gates.set(input.sessionId, gate); return gate.promise },
-        isActive: () => true, stop(id) { stops.push(id); return true } }, resolveProjectCwd: () => directory })
+        isActive: () => true, stop(id) { stops.push(id); return true } }, resolveExecutionContext: () => ({ workspacePath: directory }) })
     const ours = service.delegate({ parentSessionId: rootSessionId, parentToolUseId: 'ours', title: '当前根', objective: '检查', subagentType: 'explore', runInBackground: false })
     const theirs = service.delegate({ parentSessionId: other.id, parentToolUseId: 'theirs', title: '另一个根', objective: '检查', subagentType: 'explore', runInBackground: false })
     service.cancelDescendants(rootSessionId)
@@ -122,7 +122,7 @@ describe('AgentCollaborationService', () => {
   test('交付失败即使已被日志捕获、发生于等待之前，也不能报告根成功', async () => {
     const delivered = Promise.withResolvers<void>()
     const service = new AgentCollaborationService({ sessions, delegations: tasks,
-      agent: { async sendMessage() { return successOutcome('完成') }, isActive: () => true, stop: () => false }, resolveProjectCwd: () => directory })
+      agent: { async sendMessage() { return successOutcome('完成') }, isActive: () => true, stop: () => false }, resolveExecutionContext: () => ({ workspacePath: directory }) })
     service.setBackgroundCompletionHandler(async () => { delivered.resolve(); throw new Error('fixture-secret') })
     const task = service.delegate({ parentSessionId: rootSessionId, parentToolUseId: 'bad-delivery', title: '交付失败', objective: '检查', subagentType: 'explore', runInBackground: true })
     await delivered.promise
@@ -137,7 +137,7 @@ describe('AgentCollaborationService', () => {
     const service = new AgentCollaborationService({ sessions, delegations: {
       list: (...args) => tasks.list(...args), get: (...args) => tasks.get(...args), create: (...args) => tasks.create(...args),
       transition(id, update) { if (update.status === 'completed') throw new Error('fixture-secret'); return tasks.transition(id, update) },
-    }, agent: { async sendMessage() { return successOutcome('完成') }, isActive: () => true, stop: () => false }, resolveProjectCwd: () => directory })
+    }, agent: { async sendMessage() { return successOutcome('完成') }, isActive: () => true, stop: () => false }, resolveExecutionContext: () => ({ workspacePath: directory }) })
     service.delegate({ parentSessionId: rootSessionId, parentToolUseId: 'failed-storage', title: '存储失败', objective: '检查', subagentType: 'explore', runInBackground: false })
     await expect(service.waitForRootIdle(rootSessionId)).rejects.toMatchObject({ code: 'persistence_error' })
     await expect(service.waitForRootIdle(rootSessionId)).rejects.toMatchObject({ code: 'runtime_error', message: '存在没有实际执行器的未完成子任务' })
@@ -147,7 +147,7 @@ describe('AgentCollaborationService', () => {
   test('缺少后台交付处理器明确失败；续跑持久化错误保留错误类别', async () => {
     for (const mode of ['missing-handler', 'persistence']) {
       const service = new AgentCollaborationService({ sessions, delegations: tasks,
-        agent: { async sendMessage() { return successOutcome('完成') }, isActive: () => true, stop: () => false }, resolveProjectCwd: () => directory })
+        agent: { async sendMessage() { return successOutcome('完成') }, isActive: () => true, stop: () => false }, resolveExecutionContext: () => ({ workspacePath: directory }) })
       if (mode === 'persistence') service.setBackgroundCompletionHandler(async () => { throw new AgentServiceError('persistence_error', '保存续跑失败') })
       service.delegate({ parentSessionId: rootSessionId, parentToolUseId: mode, title: '后台结果', objective: '检查', subagentType: 'explore', runInBackground: true })
       await expect(service.waitForRootIdle(rootSessionId)).rejects.toMatchObject({ code: mode === 'persistence' ? 'persistence_error' : 'runtime_error' })
@@ -159,7 +159,7 @@ describe('AgentCollaborationService', () => {
       const child = Promise.withResolvers<AgentRunOutcome>(), delivered = Promise.withResolvers<void>()
       const service = new AgentCollaborationService({ sessions, delegations: tasks,
         agent: { sendMessage: (input) => input.text === '先完成' ? Promise.resolve(successOutcome('完成')) : child.promise,
-          isActive: () => true, stop: () => true }, resolveProjectCwd: () => directory })
+          isActive: () => true, stop: () => true }, resolveExecutionContext: () => ({ workspacePath: directory }) })
       service.setBackgroundCompletionHandler(async () => { delivered.resolve(); throw new Error('私有交付错误') })
       if (!canceled) {
         service.delegate({ parentSessionId: rootSessionId, parentToolUseId: 'runtime-before-storage', title: '先完成', objective: '先完成', subagentType: 'explore', runInBackground: true })
@@ -180,7 +180,8 @@ describe('AgentCollaborationService', () => {
     const service = new AgentCollaborationService({
       sessions, delegations: tasks,
       agent: { sendMessage: async () => successOutcome('完成'), isActive: () => true, stop: () => false },
-      resolveProjectCwd: () => directory,
+      resolveExecutionContext: () => ({ workspacePath: directory }),
+      prepareChildSession: (parent) => ({ projectId: parent.projectId, sandboxMode: 'workspaceWrite', approvalPolicy: 'onRequest', userInputPolicy: 'ask' }),
     })
     for (const role of ['explore', 'plan'] as const) {
       const task = service.delegate({ parentSessionId: rootSessionId, parentToolUseId: `tool-${role}`,
@@ -200,7 +201,8 @@ describe('AgentCollaborationService', () => {
         isActive: (sessionId) => sessionId === rootSessionId,
         stop: () => false,
       },
-      resolveProjectCwd: () => directory,
+      resolveExecutionContext: () => ({ workspacePath: directory }),
+      prepareChildSession: (parent) => ({ projectId: parent.projectId }),
     })
     const input = {
       parentSessionId: rootSessionId, parentToolUseId: 'tool-1', title: '检查项目',
@@ -235,7 +237,7 @@ describe('AgentCollaborationService', () => {
         isActive: (sessionId) => sessionId === rootSessionId,
         stop: () => false,
       },
-      resolveProjectCwd: () => directory,
+      resolveExecutionContext: () => ({ workspacePath: directory }),
     })
     service.setBackgroundCompletionHandler(async (task) => {
       notifiedStatus = tasks.get(task.id)?.status
@@ -259,7 +261,7 @@ describe('AgentCollaborationService', () => {
         isActive: () => false,
         stop: () => false,
       },
-      resolveProjectCwd: () => directory,
+      resolveExecutionContext: () => ({ workspacePath: directory }),
     })
     expect(() => service.delegate({
       parentSessionId: rootSessionId, parentToolUseId: 'tool-1', title: '任务',
@@ -273,7 +275,7 @@ describe('AgentCollaborationService', () => {
       sessions,
       delegations: tasks,
       agent: { sendMessage: async () => successOutcome('完成'), isActive: () => true, stop: () => false },
-      resolveProjectCwd: () => directory,
+      resolveExecutionContext: () => ({ workspacePath: directory }),
     })
     try {
       childService.delegate({

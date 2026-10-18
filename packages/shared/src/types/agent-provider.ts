@@ -150,6 +150,14 @@ export interface SendQueuedMessageOptions {
   onAccepted?: () => void
 }
 
+/** 可信宿主装配的单轮命令环境；不持久化，不向模型或公开 DTO 暴露凭据。 */
+export interface AgentToolEnvironment {
+  pathPrepend?: string[]
+  /** undefined 表示显式删除，防止 Shell 快照复活过期环境。 */
+  environmentOverrides: Record<string, string | undefined>
+  controlSocketPath?: string
+}
+
 /** Agent 查询输入（Provider 无关的通用字段）。 */
 export interface AgentQueryInput {
   /** 应用侧会话 ID（自有概念，不是 runtime 的） */
@@ -185,6 +193,7 @@ export interface AgentQueryInput {
   allowedBuiltinTools?: string[]
   customTools?: AgentCustomToolDefinition[]
   canUseTool?: AgentCanUseTool
+  toolEnvironment?: AgentToolEnvironment
   onRuntimeSession?: (sessionId: string, sessionFile?: string) => void
 }
 

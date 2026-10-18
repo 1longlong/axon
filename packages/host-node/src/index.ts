@@ -15,3 +15,5 @@ export { AgentSandboxCommandService, AgentSandboxExecutionError } from './agent-
 export type { AgentSandboxCommandServiceOptions, AgentSandboxExecutionErrorCode } from './agent-sandbox-command-service'
 export { acquireBackendDirectoryLease, BackendDirectoryLeaseError, BACKEND_DIRECTORY_LOCK_FILE } from './backend-directory-lease'
 export type { BackendDirectoryLease } from './backend-directory-lease'
+export { LoopPrecheckRunner, LoopPrecheckPermissionError } from './loop-precheck-runner'
+export type { LoopPrecheckInput, LoopPrecheckResult } from './loop-precheck-runner'

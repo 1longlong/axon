@@ -84,7 +84,7 @@ function openService(paths: BackendPaths, stores: ReturnType<typeof openStores>,
     adapter, resolveAdapter: () => adapter,
     eventBus, channelManager: stores.channels, sessionManager: stores.sessions,
     runtimeConfigDir: paths.runtimeConfigDir, runtimeSessionDir: paths.runtimeSessionsDir,
-    resolveProjectCwd: () => paths.dataDir,
+    resolveExecutionContext: () => ({ workspacePath: paths.dataDir }),
     getSystemPrompt: () => '隔离测试规则',
     createCanUseTool: () => async () => ({ behavior: 'deny', message: '测试入口没有交互授权能力' }),
   })
@@ -168,7 +168,8 @@ describe('公共 core 入口的 Agent 运行与重建', () => {
     const adapter = new ScriptedAdapter()
     const { service } = openService(paths, stores, adapter)
     const collaboration = new AgentCollaborationService({
-      sessions: stores.sessions, delegations: stores.tasks, agent: service, resolveProjectCwd: () => paths.dataDir,
+      sessions: stores.sessions, delegations: stores.tasks, agent: service, resolveExecutionContext: () => ({ workspacePath: paths.dataDir }),
+      prepareChildSession: (parent) => ({ projectId: parent.projectId }),
     })
     adapter.handler = async function* (input) {
       if (input.sessionId !== root.id) {
