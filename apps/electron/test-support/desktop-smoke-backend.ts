@@ -27,6 +27,7 @@ export interface DesktopSmokeBackendOptions {
   zimaPython?: string
   configurePeer?: (peer: JsonRpcPeer) => void
   pickLocalWorkspace?: DesktopIpcOptions['pickLocalWorkspace']
+  pickAttachments?: DesktopIpcOptions['pickAttachments']
 }
 
 export interface DesktopSmokeBackend {
@@ -82,7 +83,7 @@ export async function startDesktopSmokeBackend(options: DesktopSmokeBackendOptio
     finally { await backend.detachClient(seed.clientId) }
     await settings.readSettings()
     disposeIpc = registerIpcHandlers({ backend, clients, interactions: events!, transaction,
-      pickLocalWorkspace: options.pickLocalWorkspace })
+      pickLocalWorkspace: options.pickLocalWorkspace, pickAttachments: options.pickAttachments })
     return { backend, clients, desktopSettings: settings, close }
   } catch (error) { await close(); throw error }
 }

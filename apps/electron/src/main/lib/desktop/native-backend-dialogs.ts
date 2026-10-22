@@ -14,6 +14,17 @@ export async function pickAgentProjectRoot(sender: WebContents): Promise<AgentWo
   return { canceled: false, path, suggestedName: basename(path) || '本地项目' }
 }
 
+/** 附件选择只返回原生 picker 的真实路径；固定桥复核原页面后交给后端登记。 */
+export async function pickAgentAttachments(sender: WebContents): Promise<string[]> {
+  const window = BrowserWindow.fromWebContents(sender)
+  if (!window || window.isDestroyed()) throw new Error('Agent 窗口不可用')
+  const result = await dialog.showOpenDialog(window, {
+    title: '选择文件或文件夹',
+    properties: ['openFile', 'openDirectory', 'multiSelections'],
+  })
+  return result.canceled ? [] : result.filePaths
+}
+
 /** 非官方目标确认绑定原窗口与取消信号；结果仍交给私有桥复核，不在此处发送网络请求。 */
 export async function showChannelTargetConfirmation(sender: WebContents, url: string, signal: AbortSignal): Promise<boolean> {
   const window = BrowserWindow.fromWebContents(sender)

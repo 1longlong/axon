@@ -6,6 +6,7 @@ import type {
   AgentQueuedMessage,
   AgentQueuedMessageControlInput,
   AgentSendInput,
+  AgentInputAttachment,
 } from '@axon/shared'
 
 const DEFAULT_MAX_QUEUE_LENGTH = 50
@@ -29,13 +30,17 @@ export class AgentQueueCoordinator {
   }
 
   /** 接管一条等待消息；达到会话上限时返回 null，调用方不得假装已接受。 */
-  enqueue(input: AgentSendInput): AgentQueuedMessage | null {
+  enqueue(input: AgentSendInput, attachments?: AgentInputAttachment[]): AgentQueuedMessage | null {
     const queue = this.queues.get(input.sessionId) ?? []
     if (queue.length >= this.maxQueueLength) return null
     const message: AgentQueuedMessage = {
       id: this.createId(),
       sessionId: input.sessionId,
       text: input.text,
+      ...(input.inputParts ? { inputParts: structuredClone(input.inputParts) } : {}),
+      ...(input.attachmentDraftId ? { attachmentDraftId: input.attachmentDraftId } : {}),
+      ...(input.imageModelConsent ? { imageModelConsent: { ...input.imageModelConsent } } : {}),
+      ...(attachments ? { attachments: structuredClone(attachments) } : {}),
       createdAt: this.now(),
     }
     queue.push(message)

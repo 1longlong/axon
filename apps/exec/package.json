@@ -1,6 +1,6 @@
 {
   "name": "@axon/exec",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Axon 通用非交互 Agent 命令行入口",
   "private": true,
   "type": "module",

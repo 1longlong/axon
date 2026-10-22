@@ -95,6 +95,25 @@ export function QuickConversationLayout({ options, context, composer }: {
     if (options.expanded) setContextMounted(true)
   }, [options.expanded])
   const compactDragHandlers = useCompactWindowDrag(!options.expanded)
+  const composerRef = React.useRef<HTMLDivElement>(null)
+  const [extraHeight, setExtraHeight] = React.useState(0)
+  React.useLayoutEffect(() => {
+    const element = composerRef.current
+    if (!element) return
+    let frame: number | undefined
+    const update = (): void => {
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        const height = Math.max(0, Math.min(200, Math.ceil(element.scrollHeight) - 70))
+        setExtraHeight(height)
+        void window.axon.desktop.setQuickChatExpanded(options.expanded, height)
+      })
+    }
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
+    update()
+    return () => { observer.disconnect(); if (frame !== undefined) cancelAnimationFrame(frame) }
+  }, [options.expanded, options.resetEpoch])
 
   return <div className={`relative h-full min-h-0 px-2 pb-2 ${options.expanded ? 'pt-3' : 'pt-5'}`}>
     {!options.expanded && <span
@@ -103,7 +122,7 @@ export function QuickConversationLayout({ options, context, composer }: {
       style={nativeDragRegion}
       title={`${options.title ?? '快捷会话'} · 拖动调整位置`}
     >{options.title}</span>}
-    <div {...compactDragHandlers} className={`flex min-h-0 flex-col border border-[#E9ECF0] bg-[#FFFFFF] text-[#333333] ${options.expanded ? 'h-full rounded-[28px] shadow-[0_12px_30px_rgba(30,45,70,0.12),0_2px_8px_rgba(30,45,70,0.06)]' : 'h-[70px] rounded-full shadow-[0_2px_6px_rgba(30,45,70,0.09),0_1px_3px_rgba(30,45,70,0.04)]'}`}>
+    <div {...compactDragHandlers} style={options.expanded ? undefined : { height: 70 + extraHeight }} className={`flex min-h-0 flex-col border border-[#E9ECF0] bg-[#FFFFFF] text-[#333333] ${options.expanded ? 'h-full rounded-[28px] shadow-[0_12px_30px_rgba(30,45,70,0.12),0_2px_8px_rgba(30,45,70,0.06)]' : 'rounded-[36px] shadow-[0_2px_6px_rgba(30,45,70,0.09),0_1px_3px_rgba(30,45,70,0.04)]'}`}>
     {contextMounted && <div className={`${options.expanded ? 'flex' : 'hidden'} min-h-0 flex-1 flex-col overflow-hidden rounded-t-[28px]`}>
       <div
         data-quick-window-drag
@@ -124,7 +143,7 @@ export function QuickConversationLayout({ options, context, composer }: {
       >
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d={options.expanded ? 'm2.5 4.5 3.5 3 3.5-3' : 'm2.5 7.5 3.5-3 3.5 3'} stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
       </button>
-      <div className={options.expanded ? 'mx-4 mb-4 mt-3 overflow-hidden rounded-full border border-[#D4DDE8] bg-white shadow-[0_2px_10px_rgba(30,45,70,0.06)]' : 'max-h-full overflow-y-auto'} style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>{composer}</div>
+      <div ref={composerRef} className={options.expanded ? 'mx-4 mb-4 mt-3 overflow-hidden rounded-[36px] border border-[#D4DDE8] bg-white shadow-[0_2px_10px_rgba(30,45,70,0.06)]' : 'max-h-full overflow-y-auto'} style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>{composer}</div>
     </div>
   </div></div>
 }

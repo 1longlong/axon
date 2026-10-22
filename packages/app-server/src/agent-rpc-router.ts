@@ -1,5 +1,5 @@
 /** Agent 应用命令与定向事件/反向交互；运行、权限和持久化只调用 core 协调器。 */
-import { AgentServiceError } from '@axon/core'
+import { AgentServiceError, AgentAttachmentError } from '@axon/core'
 import type { AxonBackend } from '@axon/core'
 import { APP_SERVER_METHODS as methods, APP_SERVER_CLIENT_METHODS, APP_SERVER_NOTIFICATIONS } from '@axon/shared'
 import type { AppServerClient, BackendAgentRunEvent, RpcJsonObject } from '@axon/shared'
@@ -29,6 +29,7 @@ export class AgentRpcRouter {
         try { return toWireValue(await action(context, request)) }
         catch (error) {
           if (error instanceof AgentServiceError) throw new RpcFault(-32020, 'Agent 命令失败', { code: error.code })
+          if (error instanceof AgentAttachmentError) throw new RpcFault(-32028, error.message, { code: error.code })
           throw error
         }
       })
@@ -41,6 +42,14 @@ export class AgentRpcRouter {
       return backend.agentRuns.isActive(input)
     })
     handle(methods.AGENT_GET_SESSION, ['input'], ({ backend, input }) => backend.agentRuns.getSession(input))
+    handle(methods.AGENT_ATTACHMENT_COMMAND, ['input'], ({ backend, client, input }) => {
+      if (client.kind === 'external') throw new RpcFault(-32602, '当前附件入口仅支持桌面会话')
+      return backend.agentAttachments.command(client.clientId, input)
+    })
+    handle(methods.AGENT_ATTACHMENT_REGISTER_LOCAL, ['input'], ({ backend, client, input }) => {
+      if (client.kind === 'external') throw new RpcFault(-32602, '本地附件仅接受可信桌面选择入口')
+      return backend.agentAttachments.registerLocal(client.clientId, input)
+    })
     handle(methods.AGENT_CREATE_SESSION, ['input'], ({ backend, client, input }, { signal }) => {
       const ownerSignal = backend.clients.getSignal(client.clientId)!
       return backend.agentRuns.createSession(input, AbortSignal.any([signal, ownerSignal]))

@@ -2,11 +2,17 @@
 
 import type { AgentStreamPayload, AgentTypedError, SDKMessageUsage, SDKResultMessage } from './agent-message'
 import type { AgentSandboxEscalation } from './agent-sandbox'
+import type { AgentInputAttachment, AgentInputPart } from './agent-attachment'
 
 /** renderer 提交给主进程的一轮 Agent 输入。 */
 export interface AgentSendInput {
   sessionId: string
   text: string
+  inputParts?: AgentInputPart[]
+  /** 后端签发的当前入口草稿；页面不得直接提交附件元数据或可信路径。 */
+  attachmentDraftId?: string
+  /** 仅表示用户愿意对确切未知模型尝试图片，不绕过已知不支持的限制。 */
+  imageModelConsent?: { channelId: string; modelId: string }
 }
 
 /** 尚未进入 AgentService 的内存队列项；只有真正派发时才写入会话 JSONL。 */
@@ -14,6 +20,11 @@ export interface AgentQueuedMessage {
   id: string
   sessionId: string
   text: string
+  inputParts?: AgentInputPart[]
+  attachmentDraftId?: string
+  imageModelConsent?: AgentSendInput['imageModelConsent']
+  /** 安全描述与有界选区；不携带大粘贴全文或模型图片编码。 */
+  attachments?: AgentInputAttachment[]
   createdAt: number
 }
 

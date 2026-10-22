@@ -9,10 +9,11 @@
  * 渲染进程通过 window.axon 调用。
  */
 
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { IpcRendererEvent } from 'electron'
 import {
   AGENT_IPC_CHANNELS,
+  AGENT_ATTACHMENT_IPC_CHANNELS,
   AGENT_MEMORY_IPC_CHANNELS,
   AGENT_PROJECT_IPC_CHANNELS,
   AGENT_TASK_IPC_CHANNELS,
@@ -27,6 +28,9 @@ import type { LoopArtifact, LoopArtifactContent, LoopChangedEvent, LoopComposeIn
   LoopSummary, LoopUpdateInput, LoopRunSummary, LoopDispatchResult, LoopMcpToolOption, LoopMcpTarget, LoopMcpConnectionTestInput } from '@axon/shared'
 import type {
   AgentActiveRun,
+  AgentAttachmentCommand,
+  AgentAttachmentCommandResult,
+  AgentAttachmentDraft,
   AgentRunIdentityEvent,
   AgentPauseSnapshot,
   AgentContinueInput,
@@ -91,7 +95,7 @@ import type {
 } from '@axon/shared'
 import { DESKTOP_IPC_CHANNELS, WINDOW_IPC_CHANNELS } from '../types'
 import { SETTINGS_IPC_CHANNELS, USER_PROFILE_IPC_CHANNELS } from '@axon/shared'
-import type { QuickChatDragInput } from '../types'
+import type { QuickChatDragInput, QuickChatLayoutInput } from '../types'
 import type { DesktopAction } from '../types'
 import type { AppSettings, UserProfile } from '@axon/shared'
 
@@ -109,8 +113,8 @@ ipcRenderer.on(DESKTOP_IPC_CHANNELS.ACTION, (_event, action: DesktopAction) => {
 
 const api = {
   desktop: {
-    setQuickChatExpanded: (expanded: boolean): Promise<void> =>
-      ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.QUICK_CHAT_EXPANDED, expanded),
+    setQuickChatExpanded: (expanded: boolean, composerExtraHeight?: number): Promise<void> =>
+      ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.QUICK_CHAT_EXPANDED, { expanded, ...(composerExtraHeight !== undefined ? { composerExtraHeight } : {}) } satisfies QuickChatLayoutInput),
     dragQuickChat: (input: QuickChatDragInput): void =>
       ipcRenderer.send(DESKTOP_IPC_CHANNELS.QUICK_CHAT_DRAG, input),
     hideQuickChat: (): Promise<void> => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.HIDE_QUICK_CHAT),
@@ -177,6 +181,15 @@ const api = {
     },
   },
   agent: {
+    attachmentCommand: (input: AgentAttachmentCommand): Promise<AgentAttachmentCommandResult> =>
+      ipcRenderer.invoke(AGENT_ATTACHMENT_IPC_CHANNELS.COMMAND, input),
+    pickAttachments: (draftId: string): Promise<AgentAttachmentDraft | null> =>
+      ipcRenderer.invoke(AGENT_ATTACHMENT_IPC_CHANNELS.PICK, draftId),
+    /** 路径只能由真实 File 的宿主绑定得到；无稳定路径时由页面走有界上传。 */
+    addNativeFile: (draftId: string, file: File): Promise<AgentAttachmentDraft | null> => {
+      const path = webUtils.getPathForFile(file)
+      return path ? ipcRenderer.invoke(AGENT_ATTACHMENT_IPC_CHANNELS.ADD_NATIVE_FILES, draftId, [path]) : Promise.resolve(null)
+    },
     getReasoningCapability: (sessionId: string): Promise<AgentReasoningCapability | undefined> =>
       ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_REASONING_CAPABILITY, sessionId),
     checkEnvironment: (input: AgentEnvironmentCheckInput = {}): Promise<AgentEnvironmentCheckResult> =>
@@ -384,8 +397,8 @@ const api = {
   agentSkills: {
     getSettings: (): Promise<AgentSkillSettingsSnapshot> =>
       ipcRenderer.invoke(AGENT_SKILL_IPC_CHANNELS.GET_SETTINGS),
-    applySettings: (catalogIds: string[]): Promise<AgentSkillSettingsSnapshot> =>
-      ipcRenderer.invoke(AGENT_SKILL_IPC_CHANNELS.APPLY_SETTINGS, catalogIds),
+    applySettings: (catalogIds: string[], confirmedCatalogIds: string[] = []): Promise<AgentSkillSettingsSnapshot> =>
+      ipcRenderer.invoke(AGENT_SKILL_IPC_CHANNELS.APPLY_SETTINGS, { catalogIds, confirmedCatalogIds }),
   },
   window: {
     minimize: (): Promise<void> => ipcRenderer.invoke(WINDOW_IPC_CHANNELS.MINIMIZE),

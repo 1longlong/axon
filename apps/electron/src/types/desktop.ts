@@ -17,3 +17,8 @@ export const DESKTOP_IPC_CHANNELS = {
   QUICK_CHAT_DRAG: 'axon:desktop:quick-chat-drag',
   HIDE_QUICK_CHAT: 'axon:desktop:hide-quick-chat',
 } as const
+/** 紧凑输入区只可申请有界附加高度；不开放任意窗口 bounds。 */
+export interface QuickChatLayoutInput {
+  expanded: boolean
+  composerExtraHeight?: number
+}

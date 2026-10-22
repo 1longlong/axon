@@ -1,6 +1,6 @@
 {
   "name": "@axon/host-node",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Axon 宿主工具执行、Shell 快照与 macOS Seatbelt",
   "type": "module",
   "main": "./src/index.ts",
@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "@axon/core": "workspace:*",
-    "@axon/shared": "workspace:*"
+    "@axon/shared": "workspace:*",
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

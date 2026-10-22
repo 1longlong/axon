@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AgentGenerationEvent } from '@axon/shared'
+import type { AgentGenerationEvent, AgentInputPart, AgentSendInput } from '@axon/shared'
 import { AgentEventBus } from './agent-event-bus'
 import { AgentRunCoordinator } from './agent-run-coordinator'
 import { AgentSessionFactory } from './agent-session-factory'
@@ -49,6 +49,32 @@ function passiveAgent(
 }
 
 describe('AgentRunCoordinator CRUD 与输入边界', () => {
+  test('接管队列校验确切 Skill 引用，派发保留深复制的输入顺序', async () => {
+    const session = sessions.create()
+    let finish: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { finish = resolve })
+    const received: AgentSendInput[] = []
+    const controller = new AgentRunCoordinator({ clients, sessions, events: new AgentEventBus(),
+      attachments: { takeDraft: (_owner, sessionId, draftId) => ({ sessionId, draftId,
+        prepare: () => ({ context: '附件租约夹具', attachments: [{ id: 'skill', kind: 'skill', name: 'pdf', sourceId: 'source', createdAt: 1 }] }),
+        reserveForHistory: () => {}, commit: () => {}, settle: () => {}, cancel: () => {},
+      }) },
+      agent: passiveAgent({ sendMessage: async (input) => { received.push(input); if (received.length === 1) await gate } }),
+    })
+    const first = controller.send('client-1', { sessionId: session.id, text: '当前轮' }, () => {})
+    const inputParts: AgentInputPart[] = [{ type: 'text', text: '前' }, { type: 'skill', attachmentId: 'skill' }, { type: 'text', text: '后' }]
+    try {
+      expect(await controller.send('client-1', { sessionId: session.id, text: '前后', inputParts, attachmentDraftId: 'draft' }, () => {})).toMatchObject({ success: true, disposition: 'queued' })
+      inputParts[0] = { type: 'text', text: '修改新草稿' }
+      for (const invalid of [[{ type: 'text', text: '前后' }], [{ type: 'text', text: '前后' }, { type: 'skill', attachmentId: 'foreign' }]]) {
+        expect(await controller.send('client-1', { sessionId: session.id, text: '前后', inputParts: invalid, attachmentDraftId: 'other' }, () => {})).toMatchObject({ success: false, code: 'invalid_input' })
+      }
+      expect(controller.listQueuedMessages('client-1', session.id)).toHaveLength(1)
+      expect(controller.listQueuedMessages('client-1', session.id)[0]?.inputParts?.[0]).toEqual({ type: 'text', text: '前' })
+      finish(); await first
+      expect(received[1]?.inputParts).toEqual([{ type: 'text', text: '前' }, { type: 'skill', attachmentId: 'skill' }, { type: 'text', text: '后' }])
+    } finally { finish(); await first; controller.dispose(); await controller.drain() }
+  })
   test('Loop 创建的目录只走可信参数，普通入口不能伪造来源或目录', async () => {
     const controller = new AgentRunCoordinator({ clients, sessions, agent: passiveAgent(), events: new AgentEventBus() })
     const factory = new AgentSessionFactory({ sessions })

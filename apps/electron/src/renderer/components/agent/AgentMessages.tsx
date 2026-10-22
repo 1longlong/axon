@@ -94,7 +94,7 @@ export function AgentMessages({ sessionId }: { sessionId: string }): React.React
     className="h-full overflow-y-auto px-5 py-4"><div className="mx-auto flex max-w-3xl flex-col gap-4">
     {messages.length === 0 && !running && <div className="flex min-h-48 flex-col items-center justify-center gap-2 text-muted-foreground"><Bot size={28} /><p className="text-sm text-foreground">开始一个 Agent 任务</p><p className="text-xs">工具执行前会请求权限</p></div>}
     {displayGroups.map((group, index) => group.kind === 'user'
-      ? <AgentMessageItem key={`user-${index}`} message={group.message} />
+      ? <AgentMessageItem key={`user-${index}`} message={group.message} sessionId={sessionId} />
       : <AgentAssistantTurnItem
           key={`reply-${index}`}
           messages={group.messages}

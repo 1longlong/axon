@@ -8,7 +8,7 @@ import type { IpcMainInvokeEvent, WebContents } from 'electron'
 import { createCredentialCodec } from '@axon/core'
 import { JsonRpcPeer, RpcFault } from '@axon/app-server'
 import type { RpcRequestOptions } from '@axon/app-server'
-import { AGENT_IPC_CHANNELS as channels, APP_SERVER_METHODS as methods } from '@axon/shared'
+import { AGENT_IPC_CHANNELS as channels, AGENT_ATTACHMENT_IPC_CHANNELS as attachments, APP_SERVER_METHODS as methods } from '@axon/shared'
 import type { AppServerClientKind, RpcJsonObject, RpcJsonValue } from '@axon/shared'
 import { AppServerProcess } from '../lib/desktop/app-server-process'
 import { AppServerEvents } from '../lib/desktop/app-server-events'
@@ -48,7 +48,7 @@ class Registrar implements AppServerAgentIpcRegistrar {
 const cleanups: Array<() => void | Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 
-function open() {
+function open(pickAttachments?: AppServerAgentIpcOptions['pickAttachments']) {
   const upstream = new PassThrough(), downstream = new PassThrough()
   const parent = new JsonRpcPeer(downstream, upstream), child = new JsonRpcPeer(upstream, downstream)
   const main = new Surface(), quick = new Surface(), unknown = new Surface(), calls: Call[] = []
@@ -78,7 +78,7 @@ function open() {
     respondPermission: (sender: WebContents, response: unknown) => { replies.push({ sender, kind: 'permission', response }); return false },
     respondAskUser: (sender: WebContents, response: unknown) => { replies.push({ sender, kind: 'ask', response }); return true },
   }
-  const ipc = new Registrar(), dispose = registerAppServerAgentIpcHandlers(ipc, { backend, clients, interactions })
+  const ipc = new Registrar(), dispose = registerAppServerAgentIpcHandlers(ipc, { backend, clients, interactions, pickAttachments })
   registerQuickChatWindowOwner(quick.id, { id: 'binding', accelerator: 'CommandOrControl+Shift+A', sessionType: 'agent', sessionId: 'bound-session' })
   cleanups.push(() => {
     dispose(); clients.dispose(); parent.close(); child.close(); upstream.destroy(); downstream.destroy(); unregisterQuickChatWindowOwner(quick.id)
@@ -89,7 +89,7 @@ function open() {
 describe('独立后端 Agent IPC 固定代理', () => {
   test('只注册现行 Agent 命令；逐项固定编码方法、参数和长请求期限，不开放通用/私有 RPC', async () => {
     const f = open()
-    expect([...f.ipc.handlers.keys()].sort()).toEqual(Object.values(channels).filter((channel) => channel !== channels.EVENT && channel !== channels.QUEUE_EVENT && channel !== channels.RUN_EVENT && channel !== channels.PAUSE_EVENT).sort())
+    expect([...f.ipc.handlers.keys()].sort()).toEqual([...Object.values(channels).filter((channel) => channel !== channels.EVENT && channel !== channels.QUEUE_EVENT && channel !== channels.RUN_EVENT && channel !== channels.PAUSE_EVENT), ...Object.values(attachments)].sort())
     expect(f.ipc.handlers.has('axon/host/credential/decrypt')).toBe(false)
     const cases: Array<{ channel: string; args: unknown[]; method: Method; input?: RpcJsonValue; long?: boolean }> = [
       { channel: channels.LIST_SESSIONS, args: [], method: methods.AGENT_LIST_SESSIONS },
@@ -102,6 +102,7 @@ describe('独立后端 Agent IPC 固定代理', () => {
       { channel: channels.GET_REASONING_CAPABILITY, args: ['session'], method: methods.AGENT_GET_REASONING_CAPABILITY, input: 'session', long: true },
       { channel: channels.CHECK_ENVIRONMENT, args: [], method: methods.AGENT_CHECK_ENVIRONMENT, input: {}, long: true },
       { channel: channels.IS_ACTIVE, args: ['session'], method: methods.AGENT_IS_ACTIVE, input: 'session' },
+      { channel: attachments.COMMAND, args: [{ action: 'createDraft', sessionId: 'session' }], method: methods.AGENT_ATTACHMENT_COMMAND, input: { action: 'createDraft', sessionId: 'session' }, long: true },
       { channel: channels.SEND, args: [{ sessionId: 'session', text: 'hi' }], method: methods.AGENT_SEND, input: { sessionId: 'session', text: 'hi' }, long: true },
       { channel: channels.STOP, args: [{ sessionId: 'session', runId: 'actual-run' }], method: methods.AGENT_STOP, input: { sessionId: 'session', runId: 'actual-run' } },
       { channel: channels.PAUSE, args: [{ sessionId: 'session', runId: 'actual-run' }], method: methods.AGENT_PAUSE, input: { sessionId: 'session', runId: 'actual-run' }, long: true },
@@ -144,6 +145,46 @@ describe('独立后端 Agent IPC 固定代理', () => {
     registerQuickChatWindowOwner(f.quick.id, { id: 'binding', accelerator: 'CommandOrControl+Shift+A', sessionType: 'chat', sessionId: 'bound-session' })
     await expect(f.ipc.invoke(channels.SEND, f.quick.event(), { sessionId: 'bound-session', text: 'hi' })).rejects.toThrow('其他会话')
     expect(f.calls).toHaveLength(2)
+  })
+  test('附件固定命令也遵守浮窗绑定；不存在页面可用的任意路径登记命令', async () => {
+    const f = open()
+    for (const input of [{ action: 'createDraft', sessionId: 'other' }, { action: 'listSkills', sessionId: 'other' },
+      { action: 'getImageCapability', sessionId: 'other' }, { action: 'readImage', source: { kind: 'history', sessionId: 'other', messageId: 'id' }, attachmentId: 'id', variant: 'image', offset: 0 }]) {
+      await expect(f.ipc.invoke(attachments.COMMAND, f.quick.event(), input)).rejects.toThrow('其他会话')
+    }
+    expect(f.calls).toEqual([])
+    expect(f.ipc.handlers.has(methods.AGENT_ATTACHMENT_REGISTER_LOCAL)).toBe(false)
+    await f.ipc.invoke(attachments.COMMAND, f.quick.event(), { action: 'createDraft', sessionId: 'bound-session' })
+    expect(f.calls.at(-1)).toMatchObject({ method: methods.AGENT_ATTACHMENT_COMMAND, options: { timeoutMs: 0 } })
+  })
+  test('原生 picker 等待期间页面重载，迟到路径不登记到新页面或自动重发', async () => {
+    let finish!: (paths: string[]) => void, entered!: () => void
+    const started = new Promise<void>((done) => { entered = done })
+    const f = open(async () => { entered(); return await new Promise<string[]>((done) => { finish = done }) })
+    f.backend.request = async (clientId, method, input, options = {}) => {
+      f.calls.push({ clientId, method, input, options })
+      return { sessionId: 'session', status: 'draft' }
+    }
+    const waiting = f.ipc.invoke(attachments.PICK, f.main.event(), 'draft')
+    const outcome = waiting.catch((error: unknown) => error)
+    await started
+    f.main.emit('did-start-loading')
+    finish(['/tmp/fixture.pdf'])
+    expect(await outcome).toBe('axon_page_invalidated')
+    expect(f.calls.map((call) => call.method)).toEqual([methods.AGENT_ATTACHMENT_COMMAND])
+    expect(f.kinds).toHaveLength(1)
+  })
+  test('统一附件选择只收草稿 ID，文件与目录不再由页面指定类型', async () => {
+    const paths = ['/tmp/fixture.pdf', '/tmp/folder']
+    const f = open(async () => paths)
+    f.backend.request = async (clientId, method, input, options = {}) => {
+      f.calls.push({ clientId, method, input, options })
+      return method === methods.AGENT_ATTACHMENT_COMMAND ? { sessionId: 'session', status: 'draft' } : null
+    }
+    await expect(f.ipc.invoke(attachments.PICK, f.main.event(), 'draft', 'file')).rejects.toThrow('数量')
+    expect(f.calls).toEqual([])
+    await f.ipc.invoke(attachments.PICK, f.main.event(), 'draft')
+    expect(f.calls.at(-1)).toMatchObject({ method: methods.AGENT_ATTACHMENT_REGISTER_LOCAL, input: { draftId: 'draft', paths } })
   })
 
   test('停止只转交完整真实目标，不查询最新运行或把旧会话标识升级为新轮次', async () => {

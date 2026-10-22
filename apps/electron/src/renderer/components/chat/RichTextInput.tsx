@@ -20,7 +20,7 @@ function getMarkdown(editor: EditorInstance): string {
   return (storage as { markdown: MarkdownStorage }).markdown.getMarkdown()
 }
 
-/** Chat/Agent 共用的纯输入区：保留换行与 Markdown 文本兼容，不提供格式化工具栏。 */
+/** Chat 纯输入区：保留换行与 Markdown 文本兼容，不提供格式化工具栏。 */
 export function RichTextInput({ value, disabled, onChange, onSubmit }: RichTextInputProps): React.ReactElement {
   const onChangeRef = React.useRef(onChange)
   const onSubmitRef = React.useRef(onSubmit)

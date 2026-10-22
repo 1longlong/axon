@@ -44,6 +44,10 @@ import { AgentQueueCoordinator } from './agent-queue-coordinator'
 import type { AgentAskUserService } from '../security/agent-ask-user-service'
 import { buildBackgroundTaskNotificationPrompt } from '../collaboration/agent-collaboration-tools'
 import { AgentWorkflowCoordinator } from './agent-workflow-coordinator'
+import { AgentAttachmentError } from './agent-attachment-service'
+import { parseAgentInputParts, validateAgentInputPartReferences } from '@axon/shared'
+import type { AgentAttachmentService } from './agent-attachment-service'
+import type { AgentAttachmentLease } from './agent-attachment-lease'
 
 /** 工作流令牌只由可信协调层附加，不属于用户输入或 Runtime 上下文。 */
 interface CoordinatorRunContext extends AgentRunContext {
@@ -51,6 +55,7 @@ interface CoordinatorRunContext extends AgentRunContext {
 }
 
 export interface AgentRunCoordinatorOptions {
+  attachments?: Pick<AgentAttachmentService, 'takeDraft'>
   clients: Pick<BackendClientRegistry, 'has' | 'getSignal' | 'subscribeDetached'>
   sessions: Pick<
     AgentSessionManager,
@@ -59,7 +64,7 @@ export interface AgentRunCoordinatorOptions {
   agent: Pick<
     AgentService,
     'stop' | 'isActive' | 'listActiveRuns' | 'getActiveRun'
-  > & Partial<Pick<AgentService, 'waitUntilIdle' | 'continueMessage' | 'getActiveTurnId'>> & {
+  > & Partial<Pick<AgentService, 'waitUntilIdle' | 'continueMessage' | 'getActiveTurnId' | 'validateAttachmentInput'>> & {
     /** 协调层只关心执行是否结束；结构化 outcome 由协作编排层消费。 */
     sendMessage: (
       input: AgentSendInput,
@@ -192,12 +197,22 @@ function parseSessionInput(
 function parseSendInput(value: unknown): AgentSendInput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid()
   const input = value as Record<string, unknown>
-  if (Object.keys(input).some((key) => !['sessionId', 'text'].includes(key))) return invalid()
+  if (Object.keys(input).some((key) => !['sessionId', 'text', 'inputParts', 'attachmentDraftId', 'imageModelConsent'].includes(key))) return invalid()
   if (typeof input.sessionId !== 'string' || typeof input.text !== 'string') return invalid()
   const sessionId = input.sessionId.trim()
   const text = input.text
-  if (!sessionId || !text.trim() || text.includes('\0') || text.length > 100_000) return invalid()
-  return { sessionId, text }
+  const attachmentDraftId = input.attachmentDraftId === undefined ? undefined : parseId(input.attachmentDraftId)
+  let imageModelConsent: AgentSendInput['imageModelConsent']
+  if (input.imageModelConsent !== undefined) {
+    if (!input.imageModelConsent || typeof input.imageModelConsent !== 'object' || Array.isArray(input.imageModelConsent)
+      || Object.keys(input.imageModelConsent).some((key) => key !== 'channelId' && key !== 'modelId')) return invalid()
+    const consent = input.imageModelConsent as Record<string, unknown>
+    imageModelConsent = { channelId: parseId(consent.channelId), modelId: parseId(consent.modelId) }
+  }
+  if (!sessionId || (!text.trim() && !attachmentDraftId) || text.includes('\0') || text.length > 100_000) return invalid()
+  let inputParts: AgentSendInput['inputParts']
+  try { inputParts = parseAgentInputParts(input.inputParts, text) } catch { return invalid() }
+  return { sessionId, text, ...(inputParts ? { inputParts } : {}), ...(attachmentDraftId ? { attachmentDraftId } : {}), ...(imageModelConsent ? { imageModelConsent } : {}) }
 }
 
 function parsePermissionResponse(value: unknown): AgentPermissionResponse {
@@ -250,6 +265,7 @@ function parseAskUserResponse(value: unknown): AgentAskUserResponse {
 }
 
 function failed(error: unknown): AgentSendResult {
+  if (error instanceof AgentAttachmentError) return { success: false, code: 'invalid_input', message: error.message }
   if (error instanceof AgentServiceError) {
     return { success: false, code: error.code, message: error.message }
   }
@@ -267,6 +283,7 @@ export class AgentRunCoordinator {
   private readonly unsubscribeRuns: () => void
   private readonly queue = new AgentQueueCoordinator()
   private readonly queuedContexts = new Map<string, CoordinatorRunContext>()
+  private readonly attachmentCleanupFailures: unknown[] = []
   private readonly queueListeners = new Set<(snapshot: AgentQueueSnapshot) => void>()
   private readonly ownershipReleaseWaiters = new Map<string, Set<() => void>>()
   private readonly pauses = new Map<string, AgentPauseSnapshot>()
@@ -668,25 +685,50 @@ export class AgentRunCoordinator {
       if (currentOwnership.owner !== owner || currentOwnership.stopRequested) {
         return failed(new AgentServiceError('already_active', '该 Agent 会话正在其他客户端运行或正在停止'))
       }
-      const queuedMessage = this.queue.enqueue(input)
-      if (!queuedMessage) return failed(new AgentServiceError('queue_full', '该 Agent 会话的消息队列已满'))
-      this.queuedContexts.set(queuedMessage.id, { ...context })
-      this.emitQueueSnapshot(sessionId)
-      return { success: true, disposition: 'queued', queuedMessage }
+      let attachmentLease: AgentAttachmentLease | undefined
+      try {
+        attachmentLease = this.takeAttachments(owner, input, context)
+        const prepared = attachmentLease?.prepare()
+        try { validateAgentInputPartReferences(input.inputParts, prepared?.attachments ?? []) }
+        catch (error) { throw new AgentServiceError('invalid_input', error instanceof Error ? error.message : 'Skill 引用无效') }
+        if (prepared?.images?.length) {
+          if (!this.options.agent.validateAttachmentInput) throw new AgentServiceError('invalid_input', '当前宿主没有提供图片模型校验')
+          await this.options.agent.validateAttachmentInput(input, prepared, this.options.clients.getSignal(owner))
+          // 异步模型目录校验不能向已经结束或被停止的旧发送链追加输入。
+          if (this.disposed || !this.options.clients.has(owner) || this.owners.get(sessionId) !== currentOwnership || currentOwnership.stopRequested) {
+            throw new AgentServiceError('already_active', '原执行状态已变化，请重新发送此消息')
+          }
+        }
+        const queuedMessage = this.queue.enqueue(input, prepared?.attachments)
+        if (!queuedMessage) {
+          attachmentLease?.settle()
+          return failed(new AgentServiceError('queue_full', '该 Agent 会话的消息队列已满'))
+        }
+        this.queuedContexts.set(queuedMessage.id, { ...context, ...(attachmentLease ? { attachmentLease } : {}) })
+        this.emitQueueSnapshot(sessionId)
+        return { success: true, disposition: 'queued', queuedMessage }
+      } catch (error) { attachmentLease?.settle(); return failed(error) }
     }
     if (this.options.agent.isActive(sessionId)) {
       return failed(new AgentServiceError('already_active', '该 Agent 会话正在运行'))
     }
 
+    try {
+      const attachmentLease = this.takeAttachments(owner, input, context)
+      if (attachmentLease) context = { ...context, attachmentLease }
+    } catch (error) { return failed(error) }
+
     const ownership: RunOwner = { owner, emit, stopRequested: false, workflowId: context.workflowId }
     this.owners.set(sessionId, ownership)
     if (this.options.permissions && !this.options.permissions.bindOwner(sessionId, owner)) {
       this.owners.delete(sessionId)
+      context.attachmentLease?.settle()
       return failed(new AgentServiceError('already_active', '该 Agent 会话已属于其他客户端'))
     }
     if (this.options.askUsers && !this.options.askUsers.bindOwner(sessionId, owner)) {
       this.options.permissions?.unbindOwner(sessionId, owner)
       this.owners.delete(sessionId)
+      context.attachmentLease?.settle()
       return failed(new AgentServiceError('already_active', '该 Agent 会话的追问通道已属于其他客户端'))
     }
     const unsubscribeRun = this.options.events.subscribe((event) => {
@@ -711,8 +753,10 @@ export class AgentRunCoordinator {
       let nextContext = context
       let nextContinuation = continuation
       while (nextInput) {
-        if (nextContinuation) await this.options.agent.continueMessage!(nextContinuation, nextContext)
-        else await this.options.agent.sendMessage(nextInput, nextContext)
+        try {
+          if (nextContinuation) await this.options.agent.continueMessage!(nextContinuation, nextContext)
+          else await this.options.agent.sendMessage(nextInput, nextContext)
+        } finally { nextContext.attachmentLease?.settle() }
         nextContinuation = undefined
         // 用户停止表示放弃当前发送链；等待消息不能在停止后意外继续执行。
         if (ownership.stopRequested) {
@@ -726,13 +770,17 @@ export class AgentRunCoordinator {
           this.queuedContexts.delete(queued.id)
           this.emitQueueSnapshot(sessionId)
         }
-        nextInput = queued ? { sessionId: queued.sessionId, text: queued.text } : undefined
+        nextInput = queued ? { sessionId: queued.sessionId, text: queued.text,
+          ...(queued.inputParts ? { inputParts: queued.inputParts } : {}),
+          ...(queued.attachmentDraftId ? { attachmentDraftId: queued.attachmentDraftId } : {}),
+          ...(queued.imageModelConsent ? { imageModelConsent: queued.imageModelConsent } : {}) } : undefined
       }
       return { success: true, disposition: 'started' }
     } catch (error) {
       this.clearQueue(sessionId)
       return failed(error)
     } finally {
+      context.attachmentLease?.settle()
       unsubscribeRun()
       unsubscribePermission()
       unsubscribeAskUser()
@@ -745,6 +793,15 @@ export class AgentRunCoordinator {
         this.emitPauseChanged(sessionId)
       }
     }
+  }
+
+  /** 草稿只由可信发送链解析；内部续跑不能伪装成附件用户输入。 */
+  private takeAttachments(owner: string, input: AgentSendInput, context: CoordinatorRunContext) {
+    if (!input.attachmentDraftId) return undefined
+    if (context.synthetic || context.workflowId || context.attachmentLease || !this.options.attachments) {
+      throw new AgentServiceError('invalid_input', '当前输入入口不支持附件')
+    }
+    return this.options.attachments.takeDraft(owner, input.sessionId, input.attachmentDraftId)
   }
 
   /** 后台 Task 完成后等待父会话空闲，再以隐藏 system reminder 自动续跑主 Agent。 */
@@ -828,8 +885,9 @@ export class AgentRunCoordinator {
     if (!this.options.clients.has(owner) || this.owners.get(input.sessionId)?.owner !== owner) return false
     const changed = this.queue.cancel(input)
     if (changed) {
+      const lease = this.queuedContexts.get(input.messageId)?.attachmentLease
       this.queuedContexts.delete(input.messageId)
-      this.emitQueueSnapshot(input.sessionId)
+      try { lease?.cancel() } finally { this.emitQueueSnapshot(input.sessionId) }
     }
     return changed
   }
@@ -932,8 +990,11 @@ export class AgentRunCoordinator {
   }
 
   /** 入口释放后等待发送、建会话预检和后台等待完成；真实 adapter 清理由下层负责。 */
-  async drain(): Promise<void> { await Promise.all([this.work.drain(), this.workflows.drain(),
-    ...(this.options.sessionFactory ? [] : [this.sessionFactory.drain()])]) }
+  async drain(): Promise<void> {
+    await Promise.all([this.work.drain(), this.workflows.drain(),
+      ...(this.options.sessionFactory ? [] : [this.sessionFactory.drain()])])
+    if (this.attachmentCleanupFailures.length) throw new AggregateError(this.attachmentCleanupFailures, '排队附件清理失败')
+  }
 
   private emitQueueSnapshot(sessionId: string): void {
     const snapshot = { sessionId, messages: this.queue.list(sessionId) }
@@ -972,8 +1033,16 @@ export class AgentRunCoordinator {
   }
 
   private clearQueue(sessionId: string): void {
-    for (const message of this.queue.list(sessionId)) this.queuedContexts.delete(message.id)
+    const failures: unknown[] = []
+    for (const message of this.queue.list(sessionId)) {
+      try { this.queuedContexts.get(message.id)?.attachmentLease?.cancel() } catch (error) { failures.push(error) }
+      this.queuedContexts.delete(message.id)
+    }
     if (this.queue.clear(sessionId) > 0) this.emitQueueSnapshot(sessionId)
+    if (failures.length) {
+      this.attachmentCleanupFailures.push(...failures)
+      console.warn('[Agent 附件] 排队副本清理失败，已保留异常目录；停止流程继续收束')
+    }
   }
 
   /** 同时等待 AgentService 运行与 owner 链释放；断开时移除等待者，不能迟到启动通知。 */

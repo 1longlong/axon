@@ -71,7 +71,7 @@ export function AgentViewShell({ sessionId, isActive = true, compact = false, qu
         <AskUserBanner sessionId={session.id} />
         <PermissionBanner sessionId={session.id} />
       </>}
-      <QuickComposer key={quick.resetEpoch} sessionType="agent" sessionId={session.id} expanded={quick.expanded} onSent={quick.onSent} />
+      <QuickComposer key={`${session.id}:${quick.resetEpoch}`} sessionType="agent" sessionId={session.id} expanded={quick.expanded} onSent={quick.onSent} />
     </>}
   />
   return <div className="flex h-full min-h-0 bg-[hsl(var(--tab-surface))]">
@@ -86,7 +86,7 @@ export function AgentViewShell({ sessionId, isActive = true, compact = false, qu
       <AskUserBanner sessionId={session.id} />
       <AgentMessages sessionId={session.id} />
       <PermissionBanner sessionId={session.id} />
-      <AgentInput sessionId={session.id} />
+      <AgentInput key={session.id} sessionId={session.id} />
     </main>
     {!compact && <AgentSidePanel
       isActive={isActive}

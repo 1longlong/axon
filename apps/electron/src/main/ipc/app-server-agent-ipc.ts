@@ -1,8 +1,9 @@
 /** Agent 固定 IPC 代理；业务和授权仅由独立后端处理，不创建桌面服务实例。 */
 import type { IpcMainInvokeEvent, WebContents } from 'electron'
 import { AppServerHistoryClient, toWireValue } from '@axon/app-server'
-import { AGENT_IPC_CHANNELS as channels, APP_SERVER_METHODS as methods } from '@axon/shared'
+import { AGENT_IPC_CHANNELS as channels, AGENT_ATTACHMENT_IPC_CHANNELS, APP_SERVER_METHODS as methods } from '@axon/shared'
 import type { RpcJsonValue } from '@axon/shared'
+import { holdQuickChatNativeDialog } from '../lib/desktop/quick-chat-window-owner'
 import type { AppServerProcess } from '../lib/desktop/app-server-process'
 import type { AppServerWindowClients } from '../lib/desktop/app-server-window-clients'
 import type { AppServerEvents } from '../lib/desktop/app-server-events'
@@ -17,6 +18,7 @@ export interface AppServerAgentIpcOptions {
   backend: Pick<AppServerProcess, 'request' | 'readyPeer'>
   clients: Pick<AppServerWindowClients, 'get' | 'getClientSignal'>
   interactions: Pick<AppServerEvents, 'respondPermission' | 'respondAskUser'>
+  pickAttachments?: (sender: WebContents) => Promise<string[]>
 }
 type BusinessMethod = Parameters<AppServerProcess['request']>[1]
 function parseId(value: unknown): string {
@@ -54,6 +56,24 @@ export function registerAppServerAgentIpcHandlers(ipc: AppServerAgentIpcRegistra
     stop.throwIfAborted()
     return options.backend.request(client.clientId, method, value, { signal: stop, ...(long ? { timeoutMs: 0 } : {}) })
   }
+  /** 原生选择和 File 路径桥捕获原身份，等待后不能用 get 重新登记到重载页面。 */
+  const attachmentOwner = async (sender: WebContents, draftId: string) => {
+    const client = await options.clients.get(sender), page = options.clients.getClientSignal(client.clientId)
+    if (!page || page.aborted) throw new Error('附件页面已失效')
+    const signal = AbortSignal.any([page, lifetime.signal])
+    signal.throwIfAborted()
+    const draft = await options.backend.request(client.clientId, methods.AGENT_ATTACHMENT_COMMAND, { action: 'getDraft', draftId }, { signal })
+    if (!draft || typeof draft !== 'object' || Array.isArray(draft) || typeof draft.sessionId !== 'string' || draft.status !== 'draft') {
+      throw new Error('附件草稿已失效或已经发送')
+    }
+    isQuickChatSend(sender.id, 'agent', draft.sessionId)
+    const check = (): void => {
+      signal.throwIfAborted()
+      if (sender.isDestroyed() || options.clients.getClientSignal(client.clientId) !== page) throw new Error('附件的原页面已失效')
+    }
+    check()
+    return { clientId: client.clientId, signal, check }
+  }
   let disposed = false
   /** 代理释放不注销共享页面或停止已接纳业务；那些资源由窗口/后端生命周期收束。 */
   const dispose = (): void => {
@@ -67,6 +87,35 @@ export function registerAppServerAgentIpcHandlers(ipc: AppServerAgentIpcRegistra
     handle(channels.LIST_ACTIVE_RUNS, 0, 0, (sender) => call(sender, methods.AGENT_LIST_ACTIVE_RUNS))
     handle(channels.GET_OWNED_RUN, 1, 1, (sender, value) => call(sender, methods.AGENT_GET_RUN, parseId(value)))
     handle(channels.GET_SESSION, 1, 1, (sender, value) => call(sender, methods.AGENT_GET_SESSION, parseId(value)))
+    handle(AGENT_ATTACHMENT_IPC_CHANNELS.COMMAND, 1, 1, (sender, value) => {
+      // 快捷入口创建草稿也必须对应其绑定会话，后续命令由后端复核草稿 owner。
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const input = value as { action?: unknown; sessionId?: unknown; source?: { kind?: unknown; sessionId?: unknown } }
+        if (input.action === 'createDraft' || input.action === 'getImageCapability' || input.action === 'listSkills') isQuickChatSend(sender.id, 'agent', input.sessionId)
+        if (input.action === 'readImage' && input.source?.kind === 'history') isQuickChatSend(sender.id, 'agent', input.source.sessionId)
+      }
+      return call(sender, methods.AGENT_ATTACHMENT_COMMAND, value, true)
+    })
+    handle(AGENT_ATTACHMENT_IPC_CHANNELS.PICK, 1, 1, async (sender, value) => {
+      const draftId = parseId(value)
+      if (!options.pickAttachments) throw new Error('附件选择方式不可用')
+      const owner = await attachmentOwner(sender, draftId)
+      const releaseDialog = holdQuickChatNativeDialog(sender.id)
+      let paths: string[]
+      try { paths = await options.pickAttachments(sender) } finally { releaseDialog() }
+      owner.check()
+      if (paths.length === 0) return null
+      return options.backend.request(owner.clientId, methods.AGENT_ATTACHMENT_REGISTER_LOCAL, { draftId, paths }, { signal: owner.signal, timeoutMs: 0 })
+    })
+    handle(AGENT_ATTACHMENT_IPC_CHANNELS.ADD_NATIVE_FILES, 2, 2, async (sender, value, paths) => {
+      // 此路径列表只由 preload 对真实 File 调用 webUtils 得到；页面没有该原始 IPC 方法。
+      const draftId = parseId(value), owner = await attachmentOwner(sender, draftId)
+      if (!Array.isArray(paths) || paths.length === 0 || paths.length > 10 || paths.some((path) => typeof path !== 'string')) {
+        throw new Error('附件文件来源无效')
+      }
+      owner.check()
+      return options.backend.request(owner.clientId, methods.AGENT_ATTACHMENT_REGISTER_LOCAL, toWireValue({ draftId, paths }), { signal: owner.signal, timeoutMs: 0 })
+    })
     handle(channels.CREATE_SESSION, 0, 1, (sender, input = {}) => call(sender, methods.AGENT_CREATE_SESSION, input, true))
     handle(channels.UPDATE_SESSION, 2, 2, (sender, value, update) => call(sender, methods.AGENT_UPDATE_SESSION, { sessionId: parseId(value), update }))
     handle(channels.DELETE_SESSION, 1, 1, (sender, value) => call(sender, methods.AGENT_DELETE_SESSION, parseId(value)))

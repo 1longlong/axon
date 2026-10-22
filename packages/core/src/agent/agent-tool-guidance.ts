@@ -4,14 +4,14 @@ import type { AgentSubagentType } from '@axon/shared'
 
 const READ_GUIDANCE = `## 文件与命令工具
 - 已知文件路径且需要查看正文时，优先调用 read；大文件用 offset/limit 分段读取。不要默认用 bash 的 cat、sed、head 或 tail 代替普通文件读取。
-- 读取项目指令 AGENTS.md 或 Skill 的 SKILL.md 时也使用 read，以便加载对应的上下文规则。`
+- 项目指令 AGENTS.md 使用 read。可用 Skills 的入口与引用文件使用 SkillRead；若本轮已提供用户明确选择的 <skill> 正文，可直接遵循，不重复读取入口。`
 
 const READ_ONLY_GUIDANCE = `## 文件工具
 - 已知文件路径且需要查看正文时，优先调用 read；大文件用 offset/limit 分段读取。
-- 读取项目指令 AGENTS.md 或 Skill 的 SKILL.md 时也使用 read，以便加载对应的上下文规则。`
+- 项目指令 AGENTS.md 使用 read。可用 Skills 的入口与引用文件使用 SkillRead；若本轮已提供用户明确选择的 <skill> 正文，可直接遵循，不重复读取入口。`
 
 const BASH_SEARCH_GUIDANCE = `
-- 当前没有独立的文件搜索或目录列表工具；查找路径用 bash 执行 rg --files 或 find，搜索内容用 rg -n，列目录用 ls。不要因为 bash 能运行 cat，就把它当作读取普通文件的默认工具。`
+- 当前提供专用路径搜索、正文搜索或目录列表工具时，优先使用相应工具；没有对应工具时，才用 bash 执行 rg --files、find、rg -n 或 ls。不要因为 bash 能运行 cat，就把它当作读取普通文件的默认工具。`
 
 const BASH_EXEC_GUIDANCE = `
 - bash 还用于运行测试、构建、Git 命令及其他确实需要 shell 的操作；命令输出或 read 无法处理的特殊内容也可通过 bash 查看。`

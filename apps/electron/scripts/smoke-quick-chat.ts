@@ -156,21 +156,21 @@ void app.whenReady().then(async () => {
     return !!quickWindow && !quickWindow.isDestroyed()
   }, '快捷浮窗创建')
   const quick = quickWindow!
-  await waitFor(async () => Boolean(await run(quick, "document.querySelector('input[data-quick-composer]')")), '快捷输入框挂载')
+  await waitFor(async () => Boolean(await run(quick, "document.querySelector('textarea[data-quick-composer]')")), '快捷输入框挂载')
   if (quick.getBounds().height !== 104) throw new Error('快捷浮窗初始高度不是紧凑态')
   await assert(quick, "document.body.textContent.includes('快捷验收会话')")
-  await assert(quick, "document.querySelector('input[data-quick-composer]').getAttribute('placeholder') === '请输入'")
+  await assert(quick, "document.querySelector('textarea[data-quick-composer]').getAttribute('placeholder') === '请输入'")
   await assert(quick, "getComputedStyle(document.querySelector('[data-quick-window-drag]')).getPropertyValue('-webkit-app-region') === 'drag'")
-  // 从真实 input 发起阈值手势，验证紧凑胶囊不是只有标题可以拖动。
+  // 从真实 textarea 发起阈值手势，验证紧凑胶囊不是只有标题可以拖动。
   const initialBounds = quick.getBounds()
   const workArea = screen.getDisplayMatching(initialBounds).workArea
   const dragDeltaX = initialBounds.x + initialBounds.width + 32 < workArea.x + workArea.width ? 24 : -24
   const inputPoint = await run(quick, `(() => {
-    const bounds = document.querySelector('input[data-quick-composer]').getBoundingClientRect();
+    const bounds = document.querySelector('textarea[data-quick-composer]').getBoundingClientRect();
     return { x: Math.round(bounds.left + bounds.width / 2), y: Math.round(bounds.top + bounds.height / 2) };
   })()`) as { x: number; y: number }
   const pointerEvent = (type: string, clientX: number, screenX: number): string => `(() => {
-    const input = document.querySelector('input[data-quick-composer]');
+    const input = document.querySelector('textarea[data-quick-composer]');
     input.dispatchEvent(new PointerEvent('${type}', { bubbles: true, pointerId: 7, isPrimary: true, button: 0, clientX: ${clientX}, clientY: ${inputPoint.y}, screenX: ${screenX}, screenY: 300 }));
   })()`
   await run(quick, pointerEvent('pointerdown', inputPoint.x, 400))
@@ -182,8 +182,8 @@ void app.whenReady().then(async () => {
   const draggedBounds = quick.getBounds()
 
   await run(quick, `(() => {
-    const input = document.querySelector('input[data-quick-composer]');
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '来自快捷浮窗');
+    const input = document.querySelector('textarea[data-quick-composer]');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '来自快捷浮窗');
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   })()`)
@@ -200,8 +200,8 @@ void app.whenReady().then(async () => {
 
   // 失焦取消本次唤起；再次触发必须恢复紧凑态并丢弃未发送草稿。
   await run(quick, `(() => {
-    const input = document.querySelector('input[data-quick-composer]');
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '不应保留的草稿');
+    const input = document.querySelector('textarea[data-quick-composer]');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, '不应保留的草稿');
     input.dispatchEvent(new Event('input', { bubbles: true }));
   })()`)
   quick.emit('blur')
@@ -211,7 +211,7 @@ void app.whenReady().then(async () => {
   if (quick.getBounds().x !== draggedBounds.x || quick.getBounds().y !== draggedBounds.y) {
     throw new Error('快捷浮窗再次唤起后未保留拖拽位置')
   }
-  await waitFor(async () => (await run(quick, "document.querySelector('input[data-quick-composer]').value")) === '', '再次唤起清空草稿')
+  await waitFor(async () => (await run(quick, "document.querySelector('textarea[data-quick-composer]').value")) === '', '再次唤起清空草稿')
   const compactCapture = await quick.webContents.capturePage()
   const compactBitmap = compactCapture.toBitmap()
   const compactSize = compactCapture.getSize()

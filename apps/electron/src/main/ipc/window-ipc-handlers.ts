@@ -60,15 +60,19 @@ export function registerWindowIpcHandlers(): () => void {
       }
     })
     /** 只允许已登记的快捷浮窗改变自身高度；保持底边位置，让上下文向上展开。 */
-    handle(DESKTOP_IPC_CHANNELS.QUICK_CHAT_EXPANDED, (event, expanded: unknown) => {
+    handle(DESKTOP_IPC_CHANNELS.QUICK_CHAT_EXPANDED, (event, value: unknown) => {
       assertMainFrame(event, '快捷窗口尺寸调整')
-      if (!isQuickChatWindowOwner(event.sender.id) || typeof expanded !== 'boolean') {
+      if (!isQuickChatWindowOwner(event.sender.id) || !value || typeof value !== 'object' || Array.isArray(value)
+        || Object.keys(value).some((key) => key !== 'expanded' && key !== 'composerExtraHeight')) {
         throw new Error('快捷窗口尺寸请求无效')
       }
+      const input = value as Record<string, unknown>
+      if (typeof input.expanded !== 'boolean' || input.composerExtraHeight !== undefined
+        && (typeof input.composerExtraHeight !== 'number' || !Number.isInteger(input.composerExtraHeight) || input.composerExtraHeight < 0 || input.composerExtraHeight > 200)) throw new Error('快捷窗口尺寸请求无效')
       const win = BrowserWindow.fromWebContents(event.sender)
       if (!win || win.isDestroyed()) return
       // 原生窗口动画与大消息列表收起叠加会产生明显拖尾；尺寸直接切换。
-      setQuickChatWindowExpanded(win, expanded)
+      setQuickChatWindowExpanded(win, input.expanded, input.composerExtraHeight as number | undefined)
     })
     ipcMain.on(DESKTOP_IPC_CHANNELS.QUICK_CHAT_DRAG, dragHandler)
     dragRegistered = true

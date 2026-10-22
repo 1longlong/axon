@@ -1,6 +1,6 @@
 {
   "name": "@axon/electron",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Axon - 本地优先的 Electron AI 桌面 Agent",
   "main": "dist/main.cjs",
   "private": true,
@@ -22,6 +22,7 @@
     "test:chat:smoke": "bun run build && esbuild scripts/smoke-chat.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-chat.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-chat.cjs",
     "test:quick-chat:smoke": "bun run build && esbuild scripts/smoke-quick-chat.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-quick-chat.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-quick-chat.cjs",
     "test:agent:smoke": "bun run build && bun run scripts/build-smoke-backends.ts agent && esbuild scripts/smoke-agent.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-agent.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-agent.cjs",
+    "test:agent:attachments:smoke": "bun run build && esbuild scripts/smoke-agent-attachments.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-agent-attachments.cjs --external:electron --external:sharp && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-agent-attachments.cjs",
     "test:agent:shell:smoke": "bun run scripts/build-smoke-backends.ts shell && esbuild scripts/smoke-agent-shell.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-agent-shell.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-agent-shell.cjs",
     "test:agent:zima:live": "bun run scripts/build-smoke-backends.ts zima && esbuild scripts/smoke-zima-live.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-zima-live.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-zima-live.cjs",
     "test:desktop:smoke": "bun run build:main && esbuild scripts/smoke-desktop.ts --bundle --platform=node --format=cjs --outfile=dist/smoke-desktop.cjs --external:electron && env -u ELECTRON_RUN_AS_NODE electron dist/smoke-desktop.cjs",

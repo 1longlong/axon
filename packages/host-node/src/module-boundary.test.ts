@@ -44,12 +44,13 @@ describe('宿主模块单向依赖', () => {
     }
   })
 
-  test('生产源码只依赖包内模块、标准库、core 与 shared', () => {
+  test('生产源码只依赖包内模块、标准库、core/shared；图片准备单独允许 Sharp', () => {
     const violations: string[] = []
     for (const file of productionFiles(sourceRoot)) {
       const name = relative(sourceRoot, file)
       for (const dependency of dependencies(file)) {
         if (dependency.startsWith('node:') || dependency === '@axon/core' || dependency === '@axon/shared') continue
+        if (name === 'agent-image-preparation.ts' && dependency === 'sharp') continue
         if (dependency.startsWith('.')) {
           const path = relative(sourceRoot, resolve(dirname(file), dependency))
           if (path !== '..' && !path.startsWith('../')) continue

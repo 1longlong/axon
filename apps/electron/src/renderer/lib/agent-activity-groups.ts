@@ -82,7 +82,7 @@ export function groupAgentActivities(messages: readonly SDKMessage[], options: G
       const interrupted = isAgentUserStoppedResult(message)
       flush(true, interrupted)
       if (message.subtype !== 'success' && !interrupted) parts.push({ kind: 'notice', key: messageKey, message })
-    } else if (message.type === 'system' && message.subtype === 'permission_denied') {
+    } else if (message.type === 'system' && ['permission_denied', 'axon_attachment_warning'].includes(String(message.subtype))) {
       flush(true)
       parts.push({ kind: 'notice', key: messageKey, message })
     }

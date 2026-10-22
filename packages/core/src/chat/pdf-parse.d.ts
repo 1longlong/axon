@@ -10,3 +10,9 @@ declare module 'pdf-parse/lib/pdf-parse.js' {
   function pdfParse(buffer: Buffer): Promise<PdfParseResult>
   export default pdfParse
 }
+
+/** 已固定版本的纯文字解析器配置；只关闭求值/字体执行，不修改依赖源码。 */
+declare module 'pdf-parse/lib/pdf.js/v1.10.100/build/pdf.js' {
+  const pdfjs: { PDFJS: { isEvalSupported: boolean; disableFontFace: boolean; disableWorker: boolean; verbosity: number } }
+  export default pdfjs
+}

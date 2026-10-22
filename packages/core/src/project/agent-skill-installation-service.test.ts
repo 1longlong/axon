@@ -100,14 +100,16 @@ describe('AgentSkillInstallationService', () => {
     expect(service.getState()).toEqual({ version: 1, installed: result.installed })
   })
 
-  test('相同内容幂等跳过，版本变化原子替换；磁盘损坏时按期望状态修复', () => {
+  test('相同内容幂等跳过，修改副本须明确确认后修复，版本变化原子替换', () => {
     const service = createService()
     const first = service.reconcile({ packages: [skillPackage()] }, ['official/review-code'])
     expect(service.reconcile({ packages: [skillPackage()] }).installed).toEqual(first.installed)
 
     const entry = join(directory, '.axon', 'skills', 'review-code', 'SKILL.md')
     writeFileSync(entry, '损坏内容')
-    service.reconcile({ packages: [skillPackage()] })
+    expect(service.reconcile({ packages: [skillPackage()] }).failures[0]?.requiresConfirmation).toBe(true)
+    expect(readFileSync(entry, 'utf8')).toBe('损坏内容')
+    service.reconcile({ packages: [skillPackage()] }, ['official/review-code'], ['official/review-code'])
     expect(readFileSync(entry, 'utf8')).toContain('# 审查步骤')
 
     const updated = service.reconcile(
@@ -116,6 +118,19 @@ describe('AgentSkillInstallationService', () => {
     )
     expect(updated.installed[0]?.version).toBe('2.0.0')
     expect(readFileSync(entry, 'utf8')).toContain('# 新审查步骤')
+  })
+
+  test('新增文件和空目录也视为修改，卸载确认只作用于确切 ID', () => {
+    const service = createService(), catalog = { packages: [skillPackage()] }
+    service.reconcile(catalog, ['official/review-code'])
+    const target = join(directory, '.axon', 'skills', 'review-code')
+    writeFileSync(join(target, 'manual.md'), '手动资料'); mkdirSync(join(target, 'empty'))
+    const refusal = service.reconcile(catalog, [])
+    expect(refusal.installed).toHaveLength(1); expect(refusal.failures[0]?.requiresConfirmation).toBe(true)
+    expect(readFileSync(join(target, 'manual.md'), 'utf8')).toBe('手动资料')
+    expect(() => service.reconcile(catalog, [], ['unknown'])).toThrow('未知')
+    expect(service.reconcile(catalog, [], ['official/review-code']).installed).toEqual([])
+    expect(existsSync(target)).toBe(false)
   })
 
   test('取消选择只卸载清单登记项，未知目录保持原样', () => {

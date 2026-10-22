@@ -1,6 +1,6 @@
 {
   "name": "@axon/shared",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Axon 共享类型、常量与通用工具",
   "type": "module",
   "main": "./src/index.ts",

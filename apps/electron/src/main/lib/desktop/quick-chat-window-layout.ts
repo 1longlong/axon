@@ -8,6 +8,7 @@ interface QuickChatWindowLayoutState {
   expandedBounds?: Rectangle
   expandedHeight?: number
   expanded: boolean
+  composerExtraHeight?: number
 }
 
 const layoutStates = new WeakMap<BrowserWindow, QuickChatWindowLayoutState>()
@@ -16,12 +17,12 @@ function samePositionAndWidth(left: Rectangle, right: Rectangle): boolean {
   return left.x === right.x && left.y === right.y && left.width === right.width
 }
 
-function clampCompactBounds(bounds: Rectangle, workArea: Rectangle): Rectangle {
+function clampCompactBounds(bounds: Rectangle, workArea: Rectangle, height: number): Rectangle {
   return {
     x: Math.max(workArea.x, Math.min(bounds.x, workArea.x + workArea.width - bounds.width)),
-    y: Math.max(workArea.y, Math.min(bounds.y, workArea.y + workArea.height - QUICK_CHAT_COMPACT_HEIGHT)),
+    y: Math.max(workArea.y, Math.min(bounds.y, workArea.y + workArea.height - height)),
     width: bounds.width,
-    height: QUICK_CHAT_COMPACT_HEIGHT,
+    height,
   }
 }
 
@@ -29,14 +30,35 @@ function clampCompactBounds(bounds: Rectangle, workArea: Rectangle): Rectangle {
  * 在紧凑态与展开态之间切换，并区分屏幕边界校正和用户主动拖动。
  * 上游由窗口 IPC/再次唤起调用，下游只修改对应快捷浮窗的原生 bounds。
  */
-export function setQuickChatWindowExpanded(window: BrowserWindow, expanded: boolean): void {
+export function setQuickChatWindowExpanded(window: BrowserWindow, expanded: boolean, composerExtraHeight?: number): void {
   if (window.isDestroyed()) return
   const current = window.getBounds()
   const state = layoutStates.get(window) ?? { expanded: current.height > QUICK_CHAT_COMPACT_HEIGHT }
   const workArea = screen.getDisplayMatching(current).workArea
+  if (composerExtraHeight !== undefined) {
+    const oldHeight = QUICK_CHAT_COMPACT_HEIGHT + (state.composerExtraHeight ?? 0)
+    state.composerExtraHeight = Math.max(0, Math.min(200, composerExtraHeight))
+    if (state.compactBounds) {
+      const height = QUICK_CHAT_COMPACT_HEIGHT + state.composerExtraHeight
+      state.compactBounds = { ...state.compactBounds, y: state.compactBounds.y + oldHeight - height, height }
+    }
+  }
+  const compactHeight = QUICK_CHAT_COMPACT_HEIGHT + (state.composerExtraHeight ?? 0)
+  const minimumHeight = Math.min(workArea.height, expanded ? Math.max(300, compactHeight + 120) : compactHeight)
+  window.setMinimumSize(800, minimumHeight)
 
   if (expanded) {
-    if (state.expanded) return
+    if (state.expanded) {
+      if (current.height < minimumHeight) {
+        const stillAtAutomaticPosition = state.expandedBounds && samePositionAndWidth(current, state.expandedBounds)
+        window.setBounds({ ...current, height: minimumHeight,
+          y: Math.max(workArea.y, Math.min(current.y + current.height - minimumHeight, workArea.y + workArea.height - minimumHeight)),
+        }, false)
+        if (stillAtAutomaticPosition) state.expandedBounds = window.getBounds()
+      }
+      layoutStates.set(window, state)
+      return
+    }
     state.compactBounds = current
     const height = Math.min(state.expandedHeight ?? DEFAULT_EXPANDED_HEIGHT, workArea.height)
     const target = {
@@ -58,8 +80,8 @@ export function setQuickChatWindowExpanded(window: BrowserWindow, expanded: bool
     && state.expandedBounds !== undefined
     && !samePositionAndWidth(current, state.expandedBounds)
   const target = state.expanded && !userMovedExpandedWindow && state.compactBounds
-    ? clampCompactBounds(state.compactBounds, workArea)
-    : clampCompactBounds({ ...current, y: current.y + current.height - QUICK_CHAT_COMPACT_HEIGHT }, workArea)
+    ? clampCompactBounds(state.compactBounds, workArea, compactHeight)
+    : clampCompactBounds({ ...current, y: current.y + current.height - compactHeight }, workArea, compactHeight)
   window.setBounds(target, false)
   state.compactBounds = window.getBounds()
   state.expandedBounds = undefined

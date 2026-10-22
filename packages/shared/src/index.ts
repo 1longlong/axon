@@ -7,3 +7,4 @@
 
 export * from './types/index'
 export { parseFrontMatter, artifactMeta } from './loop-artifact-metadata'
+export { parseAgentInputParts, validateAgentInputPartReferences, agentInputDisplayText, agentInputPromptText } from './agent-input-parts'

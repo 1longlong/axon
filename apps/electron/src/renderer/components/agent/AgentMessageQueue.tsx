@@ -2,6 +2,8 @@ import * as React from 'react'
 import { Clock3, X } from 'lucide-react'
 import type { AgentQueuedMessage } from '@axon/shared'
 import { useAgentController } from './AgentStateProvider'
+import { agentInputDisplayText } from '@axon/shared'
+import { AgentInputText } from './AgentInputText'
 
 /** 将后端等待队列投影为输入区上方的单行胶囊；取消后用权威快照校准。 */
 export function AgentMessageQueue({
@@ -18,7 +20,8 @@ export function AgentMessageQueue({
     {messages.map((message) => <div key={message.id} role="listitem" data-queued-message={message.id}
       className="flex h-7 max-w-64 shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/30 pl-2.5 pr-1 text-xs text-muted-foreground">
       <Clock3 size={12} aria-hidden="true" className="shrink-0" />
-      <span className="min-w-0 truncate" title={message.text}>{message.text}</span>
+      <span className="min-w-0 truncate" title={agentInputDisplayText(message.text, message.inputParts, message.attachments) || message.attachments?.map((item) => item.name).join('、')}><AgentInputText text={message.text || (message.inputParts ? '' : message.attachments?.map((item) => item.name).join('、') ?? '')} parts={message.inputParts} attachments={message.attachments} /></span>
+      {message.attachments?.length ? <span className="shrink-0 text-[10px]">{message.attachments.length} 个附件</span> : null}
       <button type="button" aria-label="取消等待消息" title="取消这条等待消息"
         onClick={() => void controller.cancelQueuedMessage({ sessionId, messageId: message.id })}
         className="flex size-5 shrink-0 items-center justify-center rounded-full hover:bg-muted hover:text-destructive"><X size={12} aria-hidden="true" /></button>

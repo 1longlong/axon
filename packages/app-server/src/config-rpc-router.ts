@@ -59,10 +59,11 @@ export class ConfigRpcRouter {
     }
     handle(methods.SKILLS_GET_SETTINGS, [], (context, signal) => context.backend.skills.getSnapshot(skillsSignal(context, signal)))
     handle(methods.SKILLS_APPLY_SETTINGS, ['input'], async (context, signal) => {
+      const input = configObject(context.input, ['catalogIds', 'confirmedCatalogIds'])
       const previous = context.backend.settings.get().agentSkillCatalogIds
       let reconciled = false
       try {
-        const snapshot = await context.backend.skills.apply(context.input, skillsSignal(context, signal))
+        const snapshot = await context.backend.skills.apply(input.catalogIds, skillsSignal(context, signal), input.confirmedCatalogIds)
         reconciled = true
         return snapshot
       } finally {

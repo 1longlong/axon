@@ -17,3 +17,6 @@ export { acquireBackendDirectoryLease, BackendDirectoryLeaseError, BACKEND_DIREC
 export type { BackendDirectoryLease } from './backend-directory-lease'
 export { LoopPrecheckRunner, LoopPrecheckPermissionError } from './loop-precheck-runner'
 export type { LoopPrecheckInput, LoopPrecheckResult } from './loop-precheck-runner'
+export { AgentDocumentCommandEnvironment } from './agent-document-command'
+export type { AgentDocumentCommandOptions } from './agent-document-command'
+export { prepareAgentImage } from './agent-image-preparation'

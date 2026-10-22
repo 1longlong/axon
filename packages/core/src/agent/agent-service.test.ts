@@ -13,6 +13,8 @@ import type {
   SDKAssistantMessage,
   SDKToolResultBlock,
   SDKUserMessage,
+  AgentImageCapability,
+  AgentInputPart,
 } from '@axon/shared'
 import { AgentRuntimeCleanupError } from '@axon/shared'
 import { AgentEventBus } from './agent-event-bus'
@@ -28,6 +30,11 @@ import { discoverProjectSkills, type AgentSkillCatalog } from '../project/projec
 import type { AgentMemoryContext } from '../memory/agent-memory-tools'
 import type { AgentTitleGenerator } from './agent-title-generator'
 import { withAgentToolSearch } from './agent-tool-search'
+import { AgentAttachmentService } from './agent-attachment-service'
+import { BackendClientRegistry } from '../backend-client-registry'
+import { AgentInputSkills } from '../project/agent-input-skills'
+import { buildRecoveryPrompt } from './agent-session-context-prompt'
+import type { AgentAttachmentDraft, AgentAttachmentUpload } from '@axon/shared'
 
 let directory: string
 let sessions: AgentSessionManager
@@ -65,6 +72,8 @@ function resolvedChannel(overrides: Partial<ResolvedChannel> = {}): ResolvedChan
 }
 
 class FakeAdapter implements AgentProviderAdapter {
+  imageCapability: AgentImageCapability = { support: 'unknown' }
+  getImageCapability(): AgentImageCapability { return this.imageCapability }
   input?: AgentQueryInput
   aborted: string[] = []
   stream: AgentStreamPayload[] = []
@@ -161,6 +170,112 @@ function createService(
   })
   return { service, events }
 }
+
+describe('Agent 附件请求编排', () => {
+  test('混合顺序校验先于落盘/模型，重启使用原顺序和当时 Skill 正文', async () => {
+    const session = sessions.create({ channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1' })
+    for (const name of ['first', 'second']) {
+      const root = join(directory, '.axon', 'skills', name)
+      mkdirSync(root, { recursive: true })
+      writeFileSync(join(root, 'SKILL.md'), `---\nname: ${name}\ndescription: 顺序验证\n---\n原始-${name}`)
+    }
+    const skills = new AgentInputSkills(() => discoverProjectSkills({ projectRoot: realpathSync(directory) }))
+    const clients = new BackendClientRegistry(), owner = clients.register()
+    const attachments = new AgentAttachmentService({ attachmentsDir: join(directory, 'attachments'), clients, skills,
+      getSession: (id) => sessions.get(id), getMessages: (id) => sessions.getMessages(id) })
+    const adapter = new FakeAdapter()
+    adapter.stream = [{ kind: 'sdk_message', message: { type: 'result', subtype: 'success' } }]
+    const { service } = createService(adapter)
+    let lease: ReturnType<AgentAttachmentService['takeDraft']> | undefined
+    try {
+      let draft = attachments.command(owner, { action: 'createDraft', sessionId: session.id }) as AgentAttachmentDraft
+      for (const name of ['second', 'first']) draft = attachments.command(owner, { action: 'addSkill', draftId: draft.id,
+        sourceId: skills.list(session).find((item) => item.name === name)!.sourceId }) as AgentAttachmentDraft
+      const first = draft.attachments.find((item) => item.name === 'first')!.id
+      const second = draft.attachments.find((item) => item.name === 'second')!.id
+      const inputParts: AgentInputPart[] = [{ type: 'text', text: '前' }, { type: 'skill', attachmentId: first },
+        { type: 'text', text: '中' }, { type: 'skill', attachmentId: second }, { type: 'text', text: '后' }]
+      lease = attachments.takeDraft(owner, session.id, draft.id)
+      for (const invalid of [undefined, inputParts.filter((part) => part.type !== 'skill'),
+        [...inputParts, { type: 'skill' as const, attachmentId: first }],
+        inputParts.map((part) => part.type === 'skill' ? { ...part, attachmentId: 'foreign' } : part)]) {
+        await expectServiceError(() => service.sendMessage({ sessionId: session.id, text: '前中后', inputParts: invalid, attachmentDraftId: draft.id }, { attachmentLease: lease }), 'invalid_input')
+        expect(sessions.getMessages(session.id)).toEqual([])
+        expect(adapter.input).toBeUndefined()
+      }
+      await service.sendMessage({ sessionId: session.id, text: '前中后', inputParts, attachmentDraftId: draft.id }, { attachmentLease: lease })
+      expect(adapter.input?.prompt).toStartWith(`前【Skill ${JSON.stringify({ attachmentId: first, name: 'first' })}】中【Skill ${JSON.stringify({ attachmentId: second, name: 'second' })}】后`)
+      writeFileSync(join(directory, '.axon', 'skills', 'first', 'SKILL.md'), '后续修改，不得改写历史')
+      const restarted = new AgentSessionManager({ indexPath: join(directory, 'agent-sessions.json'), sessionsDir: join(directory, 'messages') })
+      const users = restarted.getMessages(session.id).filter((item): item is SDKUserMessage => item.type === 'user')
+      expect(users[0]?.inputParts).toEqual(inputParts)
+      expect(users[0]?.message?.content).toEqual([{ type: 'text', text: '前中后' }])
+      const recovery = buildRecoveryPrompt(users)
+      expect(recovery).toContain(`前【Skill ${JSON.stringify({ attachmentId: first, name: 'first' })}】中`)
+      expect(recovery).toContain('原始-first')
+      expect(recovery).not.toContain('后续修改，不得改写历史')
+    } finally { lease?.settle(); service.dispose(); await service.drain(); attachments.dispose(); await attachments.drain(); clients.dispose() }
+  })
+  test('仅显式 Skill 输入只落一条用户消息，正文不进 system，不伪造 SkillRead', async () => {
+    const session = sessions.create({ channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1' })
+    const skillRoot = join(directory, '.axon', 'skills', 'selected')
+    mkdirSync(skillRoot, { recursive: true }); writeFileSync(join(skillRoot, 'SKILL.md'), '---\nname: selected\ndescription: 本轮指引\n---\n# 明确选择的正文')
+    const inputSkills = new AgentInputSkills(() => discoverProjectSkills({ projectRoot: realpathSync(directory) }))
+    const clients = new BackendClientRegistry(), owner = clients.register()
+    const attachments = new AgentAttachmentService({ attachmentsDir: join(directory, 'attachments'), clients, skills: inputSkills,
+      getSession: (id) => sessions.get(id), getMessages: (id) => sessions.getMessages(id) })
+    const adapter = new FakeAdapter()
+    adapter.stream = [{ kind: 'sdk_message', message: { type: 'result', subtype: 'success', usage: {} } }]
+    const { service } = createService(adapter, resolvedChannel(), { discoverAgentSkills: (root) => discoverProjectSkills({ projectRoot: root }) })
+    let lease: ReturnType<AgentAttachmentService['takeDraft']> | undefined
+    try {
+      const draft = attachments.command(owner, { action: 'createDraft', sessionId: session.id }) as AgentAttachmentDraft
+      const choice = inputSkills.list(session)[0]!
+      const selected = attachments.command(owner, { action: 'addSkill', draftId: draft.id, sourceId: choice.sourceId }) as AgentAttachmentDraft
+      lease = attachments.takeDraft(owner, session.id, draft.id)
+      const inputParts = [{ type: 'skill' as const, attachmentId: selected.attachments[0]!.id }]
+      await service.sendMessage({ sessionId: session.id, text: '', inputParts, attachmentDraftId: draft.id }, { attachmentLease: lease })
+      const history = sessions.getMessages(session.id), users = history.filter((message) => message.type === 'user') as SDKUserMessage[]
+      expect(users).toHaveLength(1); expect(users[0]?.message?.content).toEqual([{ type: 'text', text: '' }])
+      expect(users[0]?.attachmentContext).toContain('# 明确选择的正文')
+      expect(adapter.input?.prompt).toContain('<skill>'); expect(adapter.input?.systemPrompt).not.toContain('# 明确选择的正文')
+      expect(history.some((message) => message.type === 'assistant')).toBe(false)
+      expect(history.at(-1)).toMatchObject({ type: 'result', skill_activations: [{ name: 'selected', sources: ['explicit'] }] })
+      expect(users[0]?.explicitSkillActivations?.[0]?.sources).toEqual(['explicit'])
+      expect(users[0]?.inputParts).toEqual(inputParts)
+    } finally { lease?.settle(); service.dispose(); await service.drain(); attachments.dispose(); await attachments.drain(); clients.dispose() }
+  })
+  test('图片未知确认与已知拒绝都在用户落盘前校验，成功才传中立图片', async () => {
+    const session = sessions.create({ channelId: 'channel-1', modelId: 'model-1', projectId: 'project-1' })
+    const clients = new BackendClientRegistry(), owner = clients.register()
+    const attachments = new AgentAttachmentService({ attachmentsDir: join(directory, 'attachments'), clients,
+      getSession: (id) => sessions.get(id), prepareImage: async () => ({ bytes: Buffer.from('prepared'), originalMediaType: 'image/png', mediaType: 'image/png', width: 1, height: 1,
+        thumbnail: { bytes: Buffer.from('thumb'), width: 1, height: 1 } }) })
+    const adapter = new FakeAdapter(); adapter.stream = [{ kind: 'sdk_message', message: { type: 'result', subtype: 'success', usage: {} } }]
+    const { service } = createService(adapter)
+    const draft = attachments.command(owner, { action: 'createDraft', sessionId: session.id }) as AgentAttachmentDraft
+    const pending = attachments.command(owner, { action: 'beginUpload', draftId: draft.id, kind: 'image', name: 'image.png', mediaType: 'image/png', size: 1 }) as AgentAttachmentUpload
+    attachments.command(owner, { action: 'uploadChunk', uploadId: pending.id, offset: 0, data: 'eA==' })
+    await attachments.command(owner, { action: 'finishUpload', uploadId: pending.id })
+    let lease: ReturnType<AgentAttachmentService['takeDraft']> | undefined
+    try {
+      for (const support of ['unsupported', 'unknown'] as const) {
+        adapter.imageCapability = { support }; lease = attachments.takeDraft(owner, session.id, draft.id)
+        await expectServiceError(() => service.sendMessage({ sessionId: session.id, text: '看图', attachmentDraftId: draft.id }, { attachmentLease: lease }), 'invalid_input')
+        expect(sessions.getMessages(session.id)).toEqual([]); expect(adapter.input).toBeUndefined()
+        lease.settle()
+      }
+      lease = attachments.takeDraft(owner, session.id, draft.id)
+      await service.sendMessage({ sessionId: session.id, text: '  看图\n', attachmentDraftId: draft.id,
+        imageModelConsent: { channelId: 'channel-1', modelId: 'model-1' } }, { attachmentLease: lease })
+      expect(adapter.input?.images).toEqual([{ attachmentId: pending.id, data: Buffer.from('prepared').toString('base64'), mediaType: 'image/png' }])
+      const user = sessions.getMessages(session.id)[0] as SDKUserMessage
+      expect(user.message?.content).toEqual([{ type: 'text', text: '  看图\n' }])
+      expect(user.imageModelSelection).toEqual({ channelId: 'channel-1', modelId: 'model-1' })
+      expect(JSON.stringify(user)).not.toContain(Buffer.from('prepared').toString('base64'))
+    } finally { lease?.settle(); service.dispose(); await service.drain(); attachments.dispose(); await attachments.drain(); clients.dispose() }
+  })
+})
 
 async function expectServiceError(action: () => Promise<unknown>, code: AgentServiceError['code']): Promise<void> {
   try {

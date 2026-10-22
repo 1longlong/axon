@@ -100,7 +100,7 @@ apps/app-server：独立装配入口 → packages/core → runtime-adapters / ho
 - [x] 迭代 17：Zima Agent Runtime 接入（2026-09-17；默认 Pi、创建时可选 Zima、独立 artifact、工具授权、停止、恢复、真实模型及 Electron 冒烟通过；子目录 AGENTS.md 自动加载受 Zima v1 协议限制，受控 Python 分发待完成）
 - [x] 迭代 18：全局快捷唤起现有会话（2026-09-27；多快捷键绑定、轻量浮窗、共享历史、来源标记与真实 GUI 验收完成）
 - [x] 迭代 20：ToolSearch 与工具懒加载（2026-09-20；仅 Pi 下官方 Anthropic Messages tool reference 与模型目录明确支持的 OpenAI Responses 动态工具启用；其他协议/runtime 保持 MCP eager，检索、能力协商、权限及恢复契约完成）
-- [x] 迭代 21：多级 Skills 与 Axon 管理安装（2026-09-21；完成四级优先级发现、统一 `SkillRead`、受控原子安装、专用 IPC、Agent Skills 设置 UI、主/子 Agent 继承与真实 Electron 验证；catalog provider 按计划保留为空，远程/市场来源后置）
+- [x] 迭代 21：多级 Skills 与 Axon 管理安装（2026-09-21；完成四级优先级发现、统一 `SkillRead`、受控原子安装、专用 IPC、Agent Skills 设置 UI、主/子 Agent 继承与真实 Electron 验证；随包本地来源在迭代 28 接入，远程/市场来源后置）
 - [x] 迭代 22：macOS Seatbelt 工具沙箱与细粒度审批（2026-09-27；Pi 内置工具宿主委托、不可用时拒绝原生回退、命令规则、精确 Grant、按实际执行来源审批、只读子 Agent 边界、权限 UI 与真实 Electron 验收完成；Zima 沙箱、完全自动和域名网络代理按计划后置）
 - [x] 迭代 23：Agent Shell 文件快照执行（2026-10-04；完成会话异步预热、私有文件发布、条件选择、沙箱内恢复、原始命令归因、主/子会话释放和遗留清理；全仓检查、真实 Seatbelt 与 Electron 冒烟通过）
 - [x] 迭代 24：后端模块化与独立 app-server（2026-10-08；七阶段源码实现、真实 stdio/SDK/Seatbelt、Electron 桥接/组合退出和集中回归完成；按用户要求不验收打包后 GUI/Keychain，已知偶发就绪超时保留诊断，TUI/exec/daemon 后置）
@@ -116,6 +116,14 @@ apps/app-server：独立装配入口 → packages/core → runtime-adapters / ho
   导航使用顶部 Agent/Chat/Loop 三模块与独立 Loop 任务侧栏；会话类型仍只有 Agent/Chat。切模块保留内容视图和本窗口最近位置，不控制后端运行；Loop 表单未保存确认、保存中拒绝离开。2026-10-18 完成新导航完整源码桌面复验，覆盖切页后台继续、取消和新 PID 恢复，证据见 PROGRESS。
 
   目录解耦：项目、Loop 与 CLI 共用 AgentSessionFactory 创建根会话，同用 AgentService/完整工作流与持久化；不再提供 createLoopSession。执行层通过宿主端口取得可信工作目录、逐轮工具/记忆及私有工具环境，不按 projectId/creationOrigin 分支；业务归属/列表/恢复资格留在后端上层。普通 Agent RPC 不允许自报可信路径或来源。Loop 创建直接选择独立本地目录，不绑定或创建项目，真实根创建后固定、执行前复核；子会话回查根，AGENTS/Skills/沙箱按目录装配，不继承项目记忆/MCP。Loop MCP 按任务 ID 独立加密保存，独立连接池，复用现有编辑/测试与原页面精确取消；新建先保存草稿再准备，失败或退出不自动执行半份配置。修改服务器先撤销旧工具白名单，保存期间禁止本 Loop 运行/更新/删除，运行或排队时禁止改配置；删除 Loop 不删除用户目录。现行定义直接使用 workspacePath，不迁移或自动删除旧记录。验证证据见 PROGRESS。
+
+- [x] 迭代 28：Pi Agent 分类附件与多模态输入（2026-10-20 完成，2026-10-23 含输入后续复验；主窗/浮窗分类输入、租约/队列/历史、图片准备/能力/真实请求/预览、有界恢复、长粘贴/片段/显式 Skill、原生 PDF/Documents 指引及真实沙箱文档命令完成。全仓 1540 通过/2 项 Zima 条件跳过、九 workspace 类型、源码 Electron/独立 CLI 构建及真实桌面新 PID/图片降级/暂停继续/自动压缩验收通过，证据见 PROGRESS。桌面构建按后端清单复制独立运行依赖，不依赖开发遗留链接。未复制外部专有 Skill，未新增插件体系或 AttachmentRead，未修改 Pi SDK；Zima、远程上传/安装源、截图采集及新的 MCP resource 输入不在范围）
+
+  输入收敛：主窗/浮窗用一个回形针，在同一 macOS 原生面板选择文件或文件夹，后端按真实类型区分；Skill 选择器不含文本片段表单。文本直接粘贴，长文本自动命名/保存，不要求用户填写来源、文件名或行号，也不猜测普通剪贴板文本的来源。
+
+  斜杠候选：Pi Agent 主窗/浮窗首行输入 `/` 即在整个输入框上方显示命令与有效 Skill，逐字匹配名称/描述。选 Skill 直接插入行内胶囊，`/skills` 保留完整选择器入口；不发送命令、不提前加载 Skill 正文，来源复核与正文加载沿用发送链路。
+
+  行内编辑、本地命令与顺序贯通已实现：Agent 主窗/浮窗共用轻量 Tiptap 编辑核心，Skill 在文字中形成原子胶囊，普通附件仍在上方。删除/撤销先改本地编辑文档，发送前串行对齐后端草稿，失败不发半份选择；来源复核/正文加载继续归 core。中立 inputParts 只引用原草稿真实 Skill，与正文逐字对应，拒绝重复/遗漏/伪造；队列深复制并在派发复核，应用 JSONL 保存顺序与当时上下文，历史/复制/模型引用/恢复顺序一致。压缩不删应用记录，恢复不重读新版 Skill。接纳后重置编辑历史，取消/切会话不转移选择。Pi Agent 首行 `/skills` 通过本地候选/Enter/Tab/点击/发送按钮打开原选择器，不发模型或历史；正文/附件保留，IME/粘贴不自动执行，未知命令保留并提示。浮窗 Esc 先关菜单/选择器再取消唤起。验证证据见 PROGRESS；Chat、Pi SDK 和 Zima 附件范围不变。
 
 ## 可扩展功能迭代（暂不实现）
 

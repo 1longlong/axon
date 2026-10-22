@@ -4,14 +4,15 @@ import { createHash } from 'node:crypto'
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
-  statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import type {
   AgentSkillInstallationState,
   AgentSkillReconcileResult,
@@ -32,7 +33,7 @@ const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 /** 只有 Axon 明确生成的领域原因可交给设置页，文件系统异常另行脱敏。 */
 export class AgentSkillInstallationError extends Error {
-  constructor(readonly code: 'invalid_selection' | 'operation_failed', message: string) {
+  constructor(readonly code: 'invalid_selection' | 'operation_failed', message: string, readonly requiresConfirmation = false) {
     super(message)
     this.name = 'AgentSkillInstallationError'
   }
@@ -187,16 +188,36 @@ function sameInstalledContent(root: string, installed: InstalledAgentSkill): boo
   const target = join(root, installed.name)
   if (!existsSync(target)) return false
   try {
+    if (!lstatSync(target).isDirectory() || lstatSync(target).isSymbolicLink()) return false
     const canonicalRoot = realpathSync.native(target)
+    const expected = new Map(installed.files.map((file) => [file.path, file]))
+    const directories = new Set<string>()
     for (const file of installed.files) {
-      const candidate = realpathSync.native(resolve(canonicalRoot, file.path))
-      const pathRelative = relative(canonicalRoot, candidate)
-      const metadata = statSync(candidate)
-      if (pathRelative.startsWith('..') || isAbsolute(pathRelative) || !metadata.isFile()) return false
-      const hash = createHash('sha256').update(readFileSync(candidate)).digest('hex')
-      if (hash !== file.sha256 || Boolean(metadata.mode & 0o111) !== Boolean(file.executable)) return false
+      validateRelativePath(file.path)
+      const parts = file.path.split('/')
+      for (let index = 1; index < parts.length; index += 1) directories.add(parts.slice(0, index).join('/'))
     }
-    return true
+    let count = 0, bytes = 0
+    // 连新增文件和空目录也核对；只校验清单中的旧文件会漏掉用户补充的资料。
+    const visit = (directory: string, prefix: string): boolean => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        const path = prefix ? `${prefix}/${entry.name}` : entry.name
+        if (entry.isSymbolicLink()) return false
+        if (entry.isDirectory()) {
+          if (!directories.has(path) || !visit(join(directory, entry.name), path)) return false
+          continue
+        }
+        const file = expected.get(path)
+        if (!entry.isFile() || !file || ++count > MAX_PACKAGE_FILES) return false
+        const candidate = join(directory, entry.name), metadata = lstatSync(candidate)
+        bytes += metadata.size
+        if (!metadata.isFile() || metadata.size > MAX_FILE_BYTES || bytes > MAX_PACKAGE_BYTES) return false
+        const hash = createHash('sha256').update(readFileSync(candidate)).digest('hex')
+        if (hash !== file.sha256 || Boolean(metadata.mode & 0o111) !== Boolean(file.executable)) return false
+      }
+      return true
+    }
+    return visit(canonicalRoot, '') && count === expected.size
   } catch {
     return false
   }
@@ -226,7 +247,7 @@ export class AgentSkillInstallationService {
    * 先持久化期望 catalog ID，再逐项安装/更新并移除不再期望的受管项。
    * 单项失败不会伪造 installed 记录，返回失败供设置页展示并允许下次核对重试。
    */
-  reconcile(catalog: InstallableSkillCatalog, requestedIds = this.getDesiredCatalogIds()): AgentSkillReconcileResult {
+  reconcile(catalog: InstallableSkillCatalog, requestedIds = this.getDesiredCatalogIds(), confirmedIds: readonly string[] = []): AgentSkillReconcileResult {
     const packages = new Map<string, ValidatedPackage>()
     for (const entry of catalog.packages) {
       const validated = validateInstallableSkillPackage(entry)
@@ -244,28 +265,32 @@ export class AgentSkillInstallationService {
       desiredNames.add(name)
     }
 
+    let state = this.getState()
+    const knownIds = new Set([...packages.keys(), ...state.installed.map((item) => item.catalogId)])
+    if (confirmedIds.some((id) => !knownIds.has(id))) throw new AgentSkillInstallationError('invalid_selection', '确认列表包含未知 Skill')
     this.options.setDesiredCatalogIds(desired)
     mkdirSync(this.options.managedSkillsRoot, { recursive: true })
     mkdirSync(dirname(this.options.statePath), { recursive: true })
-    let state = this.getState()
     const failures: AgentSkillReconcileResult['failures'] = []
 
     for (const id of desired) {
       const skillPackage = packages.get(id)!
-      try { state = this.install(skillPackage, state) }
+      try { state = this.install(skillPackage, state, confirmedIds.includes(id)) }
       catch (error) {
         failures.push({ catalogId: id, message: error instanceof AgentSkillInstallationError
-          ? error.message : 'Skill 安装失败，请检查管理目录权限和安装状态' })
+          ? error.message : 'Skill 安装失败，请检查管理目录权限和安装状态',
+          ...(error instanceof AgentSkillInstallationError && error.requiresConfirmation ? { requiresConfirmation: true } : {}) })
       }
     }
     for (const installed of [...state.installed]) {
       if (desired.includes(installed.catalogId)) continue
-      try { state = this.uninstall(installed, state) }
+      try { state = this.uninstall(installed, state, confirmedIds.includes(installed.catalogId)) }
       catch (error) {
         failures.push({
           catalogId: installed.catalogId,
           message: error instanceof AgentSkillInstallationError
             ? error.message : 'Skill 卸载失败，请检查管理目录权限和安装状态',
+          ...(error instanceof AgentSkillInstallationError && error.requiresConfirmation ? { requiresConfirmation: true } : {}),
         })
       }
     }
@@ -273,7 +298,7 @@ export class AgentSkillInstallationService {
   }
 
   /** 暂存完整文件集合，成功替换目录并写清单后才删除旧版本备份。 */
-  private install(skillPackage: ValidatedPackage, state: AgentSkillInstallationState): AgentSkillInstallationState {
+  private install(skillPackage: ValidatedPackage, state: AgentSkillInstallationState, confirmed: boolean): AgentSkillInstallationState {
     const definition = skillPackage.definition
     const existing = state.installed.find((item) => item.name === definition.name)
     const expectedFiles = skillPackage.files.map((file) => ({
@@ -291,6 +316,7 @@ export class AgentSkillInstallationService {
 
     const target = join(this.options.managedSkillsRoot, definition.name)
     if (existsSync(target) && !existing) throw new AgentSkillInstallationError('operation_failed', '目标目录已存在但不属于 Axon 安装清单')
+    if (existsSync(target)) this.checkReplacement(target, existing!, confirmed, '更新')
     const stagingRoot = join(dirname(this.options.managedSkillsRoot), '.skill-install-staging')
     mkdirSync(stagingRoot, { recursive: true })
     const staging = mkdtempSync(join(stagingRoot, `${definition.name}-`))
@@ -350,8 +376,9 @@ export class AgentSkillInstallationService {
   }
 
   /** 先把受管目录移入备份，清单写成功后再删除；未登记目录永远不会进入这里。 */
-  private uninstall(installed: InstalledAgentSkill, state: AgentSkillInstallationState): AgentSkillInstallationState {
+  private uninstall(installed: InstalledAgentSkill, state: AgentSkillInstallationState, confirmed: boolean): AgentSkillInstallationState {
     const target = join(this.options.managedSkillsRoot, installed.name)
+    if (existsSync(target)) this.checkReplacement(target, installed, confirmed, '卸载')
     const stagingRoot = join(dirname(this.options.managedSkillsRoot), '.skill-install-staging')
     mkdirSync(stagingRoot, { recursive: true })
     const backup = join(stagingRoot, `${installed.name}-remove-${this.now()}`)
@@ -377,6 +404,17 @@ export class AgentSkillInstallationService {
       if (committed) throw error
       if (moved) renameIfDestinationAbsentWithRetry(backup, target)
       throw error
+    }
+  }
+
+  /** 确认只允许处理已登记的真实目录；符号链接不作为可认领的安装副本。 */
+  private checkReplacement(target: string, installed: InstalledAgentSkill, confirmed: boolean, operation: string): void {
+    const metadata = lstatSync(target)
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new AgentSkillInstallationError('operation_failed', '受管 Skill 目录已被替换，请先检查本地目录')
+    }
+    if (!confirmed && !sameInstalledContent(this.options.managedSkillsRoot, installed)) {
+      throw new AgentSkillInstallationError('operation_failed', `受管副本存在本地修改，${operation}会移除这些修改，需要明确确认`, true)
     }
   }
 }

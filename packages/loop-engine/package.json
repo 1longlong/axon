@@ -1,6 +1,6 @@
 {
   "name": "@axon/loop-engine",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Axon 独立 Loop 生命周期与调度领域内核",
   "type": "module",
   "main": "./src/index.ts",

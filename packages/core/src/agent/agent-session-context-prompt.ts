@@ -1,4 +1,5 @@
 import type { AgentExecutionPolicy, SDKMessage, SDKResultMessage, SDKUserMessage } from '@axon/shared'
+import { agentInputPromptText } from '@axon/shared'
 
 const MAX_RECOVERY_CONTEXT_CHARS = 60_000
 const MAX_RECOVERY_MESSAGE_CHARS = 8_000
@@ -67,16 +68,20 @@ function stringifyContent(value: unknown): string {
 function recoveryLine(message: SDKMessage): string | undefined {
   if (message.type === 'user') {
     const content = (message as { message?: { content?: unknown[] } }).message?.content ?? []
-    const text = content.map((block) => {
+    const rawText = content.map((block) => {
       if (!block || typeof block !== 'object') return ''
       const item = block as { type?: unknown; text?: unknown; content?: unknown; tool_use_id?: unknown; execution_status?: unknown }
       if (item.type === 'text') return typeof item.text === 'string' ? item.text : ''
       if (item.type === 'tool_result') return `[${item.execution_status === 'unknown' ? '工具状态未知（应用中断记录）' : '工具结果'} ${String(item.tool_use_id ?? '')}] ${stringifyContent(item.content)}`
       return ''
     }).filter(Boolean).join('\n')
+    const user = message as SDKUserMessage
+    const text = [agentInputPromptText(rawText, user.inputParts, user.attachments), user.attachmentContext].filter(Boolean).join('\n')
     const internal = (message as SDKUserMessage).isSynthetic === true && content.some((block) =>
       block && typeof block === 'object' && (block as { type?: unknown }).type === 'text')
-    return text ? `${internal ? '宿主内部输入' : '用户'}：${text.slice(0, MAX_RECOVERY_MESSAGE_CHARS)}` : undefined
+    const clipped = text.length > MAX_RECOVERY_MESSAGE_CHARS
+      ? `${text.slice(0, MAX_RECOVERY_MESSAGE_CHARS)}\n[此历史输入已按恢复预算截断；附件或 Skill 正文可能不完整，不代表本轮重新选择或完整加载。]` : text
+    return text ? `${internal ? '宿主内部输入' : '用户'}：${clipped}` : undefined
   }
   if (message.type === 'assistant') {
     const content = (message as { message?: { content?: unknown[] } }).message?.content ?? []

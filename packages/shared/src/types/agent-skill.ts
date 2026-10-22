@@ -41,6 +41,13 @@ export interface AgentSkillInstallationState {
 export interface AgentSkillInstallationFailure {
   catalogId: string
   message: string
+  requiresConfirmation?: boolean
+}
+
+export interface AgentSkillApplyInput {
+  catalogIds: string[]
+  /** 用户明确同意替换或移除这些受管副本的本地修改；不是目录访问授权。 */
+  confirmedCatalogIds?: string[]
 }
 
 export interface AgentSkillReconcileResult {

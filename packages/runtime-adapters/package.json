@@ -1,6 +1,6 @@
 {
   "name": "@axon/runtime-adapters",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Axon 中立 Agent 契约的 Pi/Zima Runtime 接入",
   "type": "module",
   "main": "./src/index.ts",

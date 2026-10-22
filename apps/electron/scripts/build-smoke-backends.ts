@@ -13,6 +13,6 @@ await build({
   entryPoints: names.map((name) => join(import.meta.dir, '../test-support', entries[name]!)),
   outdir: join(import.meta.dir, '../dist'), outExtension: { '.js': '.mjs' },
   bundle: true, platform: 'node', format: 'esm', target: 'node22',
-  external: ['pdf-parse', 'mammoth', '@earendil-works/pi-coding-agent', '@earendil-works/pi-agent-core', '@earendil-works/pi-ai', '@earendil-works/pi-tui', '@modelcontextprotocol/sdk/*'],
+  external: ['sharp', 'pdf-parse', 'mammoth', '@earendil-works/pi-coding-agent', '@earendil-works/pi-agent-core', '@earendil-works/pi-ai', '@earendil-works/pi-tui', '@modelcontextprotocol/sdk/*'],
   banner: { js: "import { createRequire as axonCreateRequire } from 'node:module'; const require = axonCreateRequire(import.meta.url);" },
 })

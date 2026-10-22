@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -40,6 +40,10 @@ describe('随桌面提供的独立后端启动', () => {
     desktop = new AppServerDesktopSettings({ backend })
     try {
       await buildAppServer(join(buildDirectory, 'app-server.mjs'))
+      // 外置原生包必须随本次构建提供，不能碰巧从开发工作区找到旧链接。
+      expect(realpathSync(join(buildDirectory, 'node_modules/sharp')).startsWith(`${realpathSync(buildDirectory)}/`)).toBe(true)
+      expect(existsSync(join(buildDirectory, 'axon-doc.mjs'))).toBe(true)
+      expect(existsSync(join(buildDirectory, 'resources/builtin-skills/pdf/SKILL.md'))).toBe(true)
       await backend.start()
       expect(backend.pid).not.toBe(process.pid)
       expect(await desktop.readSettings()).toMatchObject({ quickChatShortcuts: [] })

@@ -87,7 +87,7 @@ export function AgentSkillSettings(): React.ReactElement {
             </label>
           })}
         </div> : <p className="mt-2 rounded-md border border-dashed px-3 py-4 text-xs text-muted-foreground">
-          暂无可安装 Skills。安装来源将在后续接入。
+          当前宿主没有提供可安装的 Skills。
         </p>}
       </div>
 
@@ -114,7 +114,15 @@ export function AgentSkillSettings(): React.ReactElement {
 
       {failures.length ? <div className="mt-3 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
         <p className="mb-1">最近一次应用结果</p>
-        {failures.map((failure) => <p key={failure.catalogId}>{failure.catalogId}：{failure.message}</p>)}
+        {failures.map((failure) => <div key={failure.catalogId} className="mt-2">
+          <p>{failure.catalogId}：{failure.message}</p>
+          {failure.requiresConfirmation && <button
+            type="button"
+            disabled={saving || refreshing || state.readFailed}
+            onClick={() => void controller.current?.apply([failure.catalogId])}
+            className="mt-2 rounded border border-destructive/40 px-2 py-1 hover:bg-destructive/10 disabled:opacity-50"
+          >确认{selected.includes(failure.catalogId) ? '覆盖' : '卸载'}此 Skill，丢弃本地修改</button>}
+        </div>)}
       </div> : null}
 
       <div className="mt-4 flex flex-wrap items-center gap-3">

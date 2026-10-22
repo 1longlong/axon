@@ -136,6 +136,9 @@ export const APP_SERVER_METHODS = {
   AGENT_UPDATE_SESSION: 'axon/agent/session/update',
   AGENT_DELETE_SESSION: 'axon/agent/session/delete',
   AGENT_SEND: 'axon/agent/send',
+  AGENT_ATTACHMENT_COMMAND: 'axon/agent/attachments/command',
+  /** 仅固定桌面 picker/真实 File 桥调用，不映射为页面可自报路径的命令。 */
+  AGENT_ATTACHMENT_REGISTER_LOCAL: 'axon/agent/attachments/register-local',
   AGENT_EXECUTE_WORKFLOW: 'axon/agent/workflow/execute',
   AGENT_GET_WORKFLOW: 'axon/agent/workflow/get',
   AGENT_CANCEL_WORKFLOW: 'axon/agent/workflow/cancel',

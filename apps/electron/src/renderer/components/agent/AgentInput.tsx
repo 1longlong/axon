@@ -1,16 +1,24 @@
 import * as React from 'react'
-import { ChevronDown, Loader2, Settings } from 'lucide-react'
+import { useAgentImageCapability } from '@/hooks/useAgentImageCapability'
+import { AgentImageCapabilityNotice } from './AgentImageCapabilityNotice'
+import { AgentSkillPicker } from './AgentSkillPicker'
+import { AGENT_PASTED_TEXT_THRESHOLD } from '@axon/shared'
+import { ChevronDown, Loader2, Paperclip, Settings } from 'lucide-react'
 import { agentStateAtom } from '@/atoms/agent-state'
 import { chatStateAtom } from '@/atoms/chat-state'
 import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { buildChatModelOptions, decodeChatModelOption, encodeChatModelOption } from '@/lib/chat-model-options'
 import { useAgentController } from './AgentStateProvider'
-import { RichTextInput } from '@/components/chat/RichTextInput'
+import { AgentComposerEditor } from './AgentComposerEditor'
+import type { AgentComposerEditorHandle } from './AgentComposerEditor'
+import type { AgentComposerValue } from '@/lib/agent-composer-document'
 import { ContextUsageIndicator } from './ContextUsageIndicator'
 import { AgentMessageQueue } from './AgentMessageQueue'
 import { AgentPermissionMenu } from './AgentPermissionMenu'
 import { AgentRunControl } from './AgentRunControl'
+import { AgentAttachmentTags } from './AgentAttachmentTags'
+import { useAgentAttachments } from '@/hooks/useAgentAttachments'
 import type { AgentPermissionProfile } from './AgentPermissionMenu'
 import { AGENT_RUNTIME_CAPABILITIES } from '@axon/shared'
 import type { AgentReasoningCapability, AgentThinkingLevel } from '@axon/shared'
@@ -38,7 +46,19 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
   const chatState = useAtomValue(chatStateAtom)
   const setSettingsOpen = useSetAtom(settingsOpenAtom)
   const setSettingsTab = useSetAtom(settingsTabAtom)
-  const [value, setValue] = React.useState('')
+  const [draft, setDraft] = React.useState<AgentComposerValue>({ text: '', skills: [], parts: [] })
+  const [editorEpoch, resetEditor] = React.useReducer((value: number) => value + 1, 0)
+  const [focusOnReset, setFocusOnReset] = React.useState(false)
+  const [skillPickerOpen, setSkillPickerOpen] = React.useState(false)
+  const editorRef = React.useRef<AgentComposerEditorHandle>(null)
+  const composerRef = React.useRef<HTMLDivElement>(null)
+  const value = draft.text
+  const clearInput = React.useCallback(() => {
+    setFocusOnReset(editorRef.current?.isFocused() === true)
+    setDraft({ text: '', skills: [], parts: [] })
+    // 接纳后重新创建编辑历史，Cmd+Z 不应恢复上一条已发送内容。
+    resetEditor()
+  }, [])
   const [savingModel, setSavingModel] = React.useState(false)
   const [savingThinkingLevel, setSavingThinkingLevel] = React.useState(false)
   const [modelError, setModelError] = React.useState<string | undefined>(undefined)
@@ -55,6 +75,11 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
   const externalRunning = runSource === 'external'
   const queuedMessages = state.queuedMessagesBySession[sessionId] ?? []
   const session = state.sessions.find((item) => item.id === sessionId)
+  const attachments = useAgentAttachments(sessionId, session?.runtimeId === 'pi')
+  const fileAttachments = attachments.draft?.attachments.filter((item) => item.kind !== 'skill') ?? []
+  const hasAttachments = fileAttachments.length > 0 || draft.skills.length > 0
+  const hasImages = attachments.draft?.attachments.some((attachment) => attachment.kind === 'image') === true
+  const imageCapability = useAgentImageCapability(sessionId, session?.channelId, session?.modelId, hasImages)
   const runtimeCapabilities = session ? AGENT_RUNTIME_CAPABILITIES[session.runtimeId] : undefined
   const messages = state.messagesBySession[sessionId] ?? []
   const modelOptions = React.useMemo(() => buildChatModelOptions(
@@ -122,22 +147,64 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
   }
 
   const send = React.useCallback(() => {
-    const text = value.trim()
-    if (!text || text.length > MAX_AGENT_INPUT_LENGTH || observedOnly || pausing || submittingContinue || externalRunning || savingModel || savingThinkingLevel || unavailable) return
-    setValue('')
+    if (editorRef.current?.handleLocalCommand()) return
+    const text = value
+    if ((!text.trim() && !hasAttachments) || !imageCapability.canSend || text.length > MAX_AGENT_INPUT_LENGTH || attachments.busy || observedOnly || pausing || submittingContinue || externalRunning || savingModel || savingThinkingLevel || unavailable) return
+    if (hasAttachments || attachments.draft) {
+      void attachments.submitWithSkills(draft, (input) => controller.send(input), clearInput, imageCapability.consent)
+      return
+    }
+    clearInput()
     void controller.send({ sessionId, text })
-  }, [controller, observedOnly, pausing, submittingContinue, externalRunning, savingModel, savingThinkingLevel, sessionId, unavailable, value])
+  }, [controller, observedOnly, pausing, submittingContinue, externalRunning, savingModel, savingThinkingLevel, sessionId, unavailable, value, draft, clearInput, attachments, hasAttachments, imageCapability])
 
-  const inputError = modelError ?? thinkingLevelError ?? (value.length > MAX_AGENT_INPUT_LENGTH ? `输入超过 ${MAX_AGENT_INPUT_LENGTH.toLocaleString()} 字` : undefined)
+  const inputError = attachments.error ?? modelError ?? thinkingLevelError ?? (value.length > MAX_AGENT_INPUT_LENGTH ? `输入超过 ${MAX_AGENT_INPUT_LENGTH.toLocaleString()} 字` : undefined)
+  const attachmentDisabled = attachments.busy || observedOnly || pausing || submittingContinue || externalRunning || unavailable
 
   return <div className="shrink-0 px-5 pb-3 pt-2">
     <AgentMessageQueue sessionId={sessionId} messages={queuedMessages} />
-    <div className="mx-auto max-w-3xl rounded-[12px] border border-border bg-[hsl(var(--input-surface))] px-3 py-2 shadow-sm focus-within:border-ring/50 focus-within:ring-1 focus-within:ring-ring/15">
+    <div ref={composerRef} data-agent-composer-surface className="mx-auto max-w-3xl rounded-[12px] border border-border bg-[hsl(var(--input-surface))] px-3 py-2 shadow-sm focus-within:border-ring/50 focus-within:ring-1 focus-within:ring-ring/15"
+      onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault() }}
+      onDropCapture={(event) => {
+        if (event.target instanceof Element && event.target.closest('[data-agent-context-dialog]')) return
+        const files = Array.from(event.dataTransfer.files)
+        if (!files.length) return
+        event.preventDefault(); event.stopPropagation()
+        if (session?.runtimeId === 'pi' && !attachmentDisabled) void attachments.addFiles(files)
+      }}
+      onPasteCapture={(event) => {
+        if (!(event.target instanceof Element) || !event.target.closest('.chat-rich-input')) return
+        const files = Array.from(event.clipboardData.files)
+        if (session?.runtimeId !== 'pi') return
+        if (files.length) {
+          event.preventDefault(); event.stopPropagation()
+          if (!attachmentDisabled) void attachments.addFiles(files)
+          return
+        }
+        const text = event.clipboardData.getData('text/plain')
+        if (text.length > AGENT_PASTED_TEXT_THRESHOLD) {
+          event.preventDefault(); event.stopPropagation()
+          if (!attachmentDisabled) void attachments.addPastedText(text)
+        }
+      }}>
+      {fileAttachments.length > 0 && <div className="pb-1.5"><AgentAttachmentTags attachments={fileAttachments}
+        imageSource={{ kind: 'draft', draftId: attachments.draft!.id }} disabled={attachments.busy} onRemove={(id) => void attachments.remove(id)}
+        canRestoreText={attachments.canRestorePastedText} onRestoreText={(id) => void attachments.restorePastedText(id, (text) => editorRef.current?.appendText(text))} /></div>}
+      {hasImages && <AgentImageCapabilityNotice state={imageCapability} disabled={attachmentDisabled} />}
       <div className="[&_.chat-rich-input]:min-h-12 [&_.chat-rich-input]:px-1 [&_.chat-rich-input]:text-[13px]">
-        <RichTextInput value={value} disabled={pausing || submittingContinue || externalRunning || unavailable} onChange={setValue} onSubmit={send} />
+        <AgentComposerEditor key={`${sessionId}:${editorEpoch}`} sessionId={sessionId} ref={editorRef} commandMenuAnchor={composerRef} autoFocus={focusOnReset} disabled={attachments.busy || pausing || submittingContinue || externalRunning || unavailable}
+          onCommand={session?.runtimeId === 'pi' && !attachmentDisabled ? () => setSkillPickerOpen(true) : undefined} onChange={setDraft} onSubmit={send} />
       </div>
       <div className="flex items-center justify-between gap-2 pt-2">
-        <div className="flex min-w-0 max-w-[25%] shrink-0 items-center gap-1.5">
+        <div className="flex min-w-0 max-w-[40%] shrink-0 items-center gap-1.5">
+          {session?.runtimeId === 'pi' && <>
+            <AgentSkillPicker sessionId={sessionId} disabled={attachmentDisabled} open={skillPickerOpen} onOpenChange={setSkillPickerOpen}
+              onSkill={async (skill) => { if (!editorRef.current) throw new Error('输入区尚未就绪'); editorRef.current.insertSkill(skill) }}
+              onClose={() => editorRef.current?.focus()} />
+            <button type="button" aria-label="添加附件" title="添加文件或文件夹" disabled={attachmentDisabled}
+              onClick={() => void attachments.pick()} className="rounded p-1 text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-40"><Paperclip size={14} /></button>
+          </>}
+          {attachments.busy && <Loader2 size={12} className="shrink-0 animate-spin" aria-label="正在准备附件" />}
           <ContextUsageIndicator messages={messages} draft={value} appearance="workbench" />
           <span className="min-w-0 truncate text-[11px] text-destructive" title={inputError}>{inputError}</span>
         </div>
@@ -146,17 +213,17 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
             aria-label="选择 Agent 思考等级"
             title="选择 Agent 思考等级"
             value={visibleThinkingLevel(thinkingLevel, capability.levels)}
-            disabled={pausing || submittingContinue || running || savingModel || savingThinkingLevel}
+            disabled={attachments.busy || pausing || submittingContinue || running || savingModel || savingThinkingLevel}
             onChange={(event) => void selectThinkingLevel(event.target.value as AgentThinkingLevel)}
             className="h-7 w-full appearance-none rounded bg-transparent pl-1.5 pr-5 font-mono text-[11px] text-muted-foreground outline-none hover:bg-muted/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
           >
             {capability.levels.map((level) => <option key={level} value={level}>{level}</option>)}
           </select><ChevronDown size={10} strokeWidth={2.5} aria-hidden="true" className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground" /></div> : null}
-          <AgentPermissionMenu profile={permissionProfile} disabled={pausing || submittingContinue || running || savingModel || savingThinkingLevel} supportsSandbox={session?.runtimeId !== 'zima'} />
+          <AgentPermissionMenu profile={permissionProfile} disabled={attachments.busy || pausing || submittingContinue || running || savingModel || savingThinkingLevel} supportsSandbox={session?.runtimeId !== 'zima'} />
           {modelOptions.length > 0 ? <div className="relative min-w-0 max-w-48 flex-1"><select
             aria-label="选择 Agent 渠道和模型"
             value={hasModel ? currentModel : ''}
-            disabled={pausing || submittingContinue || running || savingModel || savingThinkingLevel}
+            disabled={attachments.busy || pausing || submittingContinue || running || savingModel || savingThinkingLevel}
             onChange={(event) => void selectModel(event.target.value)}
             className="h-7 w-full min-w-0 appearance-none rounded bg-transparent pl-1.5 pr-5 text-xs text-muted-foreground outline-none hover:bg-muted/60 hover:text-foreground focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
           >
@@ -173,8 +240,8 @@ export function AgentInput({ sessionId }: { sessionId: string }): React.ReactEle
           {running && externalRunning
             ? <span className="flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-2 text-xs text-muted-foreground"><Loader2 size={12} className="animate-spin" />外部运行中</span>
             : <AgentRunControl sessionId={sessionId} disabled={savingModel || savingThinkingLevel || unavailable}
-              onSend={send} hasDraft={Boolean(value.trim())}
-              sendDisabled={pausing || submittingContinue || !value.trim() || value.length > MAX_AGENT_INPUT_LENGTH || savingModel || savingThinkingLevel || unavailable} />}
+              onSend={send} hasDraft={Boolean(value.trim()) || hasAttachments}
+              sendDisabled={attachments.busy || !imageCapability.canSend || pausing || submittingContinue || (!value.trim() && !hasAttachments) || value.length > MAX_AGENT_INPUT_LENGTH || savingModel || savingThinkingLevel || unavailable} />}
         </div>
       </div>
     </div>

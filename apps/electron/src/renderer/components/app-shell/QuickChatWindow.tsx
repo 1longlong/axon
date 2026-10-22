@@ -78,11 +78,11 @@ export function QuickChatWindow(): React.ReactElement {
 
   React.useEffect(() => {
     const focusInput = (): void => {
-      const editor = document.querySelector<HTMLElement>('input[data-quick-composer]')
+      const editor = document.querySelector<HTMLElement>('[data-quick-composer]')
       editor?.focus()
     }
     const observer = new MutationObserver(() => {
-      if (document.querySelector('input[data-quick-composer]')) {
+      if (document.querySelector('[data-quick-composer]')) {
         observer.disconnect()
         focusInput()
       }

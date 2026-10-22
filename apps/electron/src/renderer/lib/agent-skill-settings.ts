@@ -4,7 +4,7 @@ import type { AgentSkillInstallationFailure, AgentSkillSettingsSnapshot } from '
 export interface RendererSkillSettingsApi {
   agentSkills: {
     getSettings(): Promise<AgentSkillSettingsSnapshot>
-    applySettings(ids: string[]): Promise<AgentSkillSettingsSnapshot>
+    applySettings(ids: string[], confirmedIds?: string[]): Promise<AgentSkillSettingsSnapshot>
   }
   settings: { onChanged(callback: () => void): () => void }
 }
@@ -95,7 +95,7 @@ export class RendererSkillSettings {
   /** 新的已保存状态不覆盖脏草稿；installed 始终取后端清单，而不是勾选框。 */
   private accept(snapshot: AgentSkillSettingsSnapshot): void {
     const selected = skillSettingsDirty(this.state) ? this.state.selected : [...snapshot.desiredCatalogIds]
-    this.publish({ snapshot, selected, readFailed: false, ...(this.state.message === '读取 Skills 状态失败，请刷新状态' ? { message: null } : {}) })
+    this.publish({ snapshot, selected, failures: snapshot.failures, readFailed: false, ...(this.state.message === '读取 Skills 状态失败，请刷新状态' ? { message: null } : {}) })
   }
   select(catalogId: string, checked: boolean): void {
     if (this.disposed || this.state.saving) return
@@ -103,12 +103,12 @@ export class RendererSkillSettings {
   }
 
   /** 显式提交一次；新通知优先于旧响应，交付未知只重读，不自动重投或回滚。 */
-  async apply(): Promise<void> {
+  async apply(confirmedIds: string[] = []): Promise<void> {
     if (this.disposed || !skillSettingsCanApply(this.state)) return
     const revision = this.revision, ids = [...this.state.selected]
     this.publish({ saving: true, message: null, failures: [] })
     try {
-      const snapshot = await this.api.agentSkills.applySettings(ids)
+      const snapshot = await this.api.agentSkills.applySettings(ids, confirmedIds)
       if (this.disposed) return
       if (revision === this.revision) this.accept(snapshot)
       else this.refresh()

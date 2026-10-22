@@ -60,7 +60,7 @@ describe('Electron 独立后端边界', () => {
     expect(manifest.dependencies['@axon/app-server-app']).toBe('workspace:*')
     expect(manifest.dependencies['@axon/app-server']).toBe('workspace:*')
     for (const name of ['@axon/host-node', '@axon/runtime-adapters', '@earendil-works/pi-agent-core',
-      '@earendil-works/pi-ai', '@earendil-works/pi-coding-agent', '@modelcontextprotocol/sdk', 'pdf-parse', 'mammoth']) {
+      '@earendil-works/pi-ai', '@earendil-works/pi-coding-agent', '@modelcontextprotocol/sdk', 'pdf-parse', 'mammoth', 'sharp']) {
       expect(manifest.dependencies[name]).toBeUndefined()
     }
     expect(manifest.devDependencies['@axon/host-node']).toBe('workspace:*')

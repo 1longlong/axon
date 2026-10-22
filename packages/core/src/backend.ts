@@ -18,6 +18,8 @@ import type {
   AgentRuntimeId,
   AgentSessionCreateInput,
   AgentSessionMeta,
+  AgentToolEnvironment,
+  InstalledAgentSkill,
   BackendAgentConfiguration,
   RuntimeChannelDefinition,
   AppSettings,
@@ -46,6 +48,9 @@ import type { CredentialCodec } from './channel/credential-codec'
 import { MessageHistoryController } from './storage/message-history-controller'
 import { AttachmentService } from './chat/attachment-service'
 import { AttachmentController } from './chat/attachment-controller'
+import { AgentAttachmentService } from './agent/agent-attachment-service'
+import type { AgentAttachmentServiceOptions } from './agent/agent-attachment-service'
+import { AgentInputSkills } from './project/agent-input-skills'
 import { ChatService } from './chat/chat-service'
 import { ChatRunCoordinator } from './chat/chat-run-coordinator'
 import type { ChatStreamExecutor } from './chat/chat-service'
@@ -99,6 +104,11 @@ export interface BackendOptions {
   providerStream?: ChatStreamExecutor
   connectMcpServer?: McpToolProviderOptions['connectServer']
   skillCatalog?: AgentSkillCatalogProvider
+  /** 随宿主提供的受管命令环境；仅可信装配可配置，不来自页面或会话设置。 */
+  agentToolEnvironment?: AgentToolEnvironment
+  protectedToolRoots?: readonly string[]
+  isManagedSkillAvailable?: (session: AgentSessionMeta, skill: InstalledAgentSkill) => boolean
+  prepareAgentImage?: AgentAttachmentServiceOptions['prepareImage']
   /** 仅可信装配入口提供；不暴露为普通会话更新或设置 RPC。 */
   agentConfiguration?: BackendAgentConfiguration
   /** 只在可信 exec 装配中设置；不能由业务参数变更。 */
@@ -120,6 +130,7 @@ export interface AxonBackend {
   conversations: ConversationManager
   attachments: AttachmentService
   attachmentController: AttachmentController
+  agentAttachments: AgentAttachmentService
   projects: AgentProjectManager
   projectController: AgentProjectController
   sessions: AgentSessionManager
@@ -236,6 +247,24 @@ export function createBackend(options: BackendOptions): AxonBackend {
   const agentCapabilities = new AgentCapabilityController({ sessions, channels, projects, resolveAdapter: getAdapter,
     checkEnvironment: options.checkEnvironment })
   const clients = new BackendClientRegistry()
+  const discoverSkills: AgentServiceOptions['discoverAgentSkills'] = features.skills ? (projectRoot, session) => {
+    const unavailable = new Set(installations.getState().installed
+      .filter((skill) => options.isManagedSkillAvailable?.(session, skill) === false).map((skill) => skill.name))
+    return discoverAgentSkills({ projectRoot, ...globalSkillRoots,
+      filterSkill: (skill) => skill.directoryKind !== 'builtin' || !unavailable.has(skill.name) })
+  } : undefined
+  const inputSkills = discoverSkills ? new AgentInputSkills((session) => {
+    const context = resolveBackendAgentContext(session, { getSession: (id) => sessions.get(id), resolveProjectCwd: (id) => projects.resolveProjectCwd(id) })
+    return discoverSkills(context.workspacePath, session)
+  }) : undefined
+  const agentAttachments = new AgentAttachmentService({ attachmentsDir: paths.attachmentsDir, clients,
+    getSession: (id) => sessions.get(id), getMessages: (id) => sessions.getMessages(id), prepareImage: options.prepareAgentImage,
+    skills: inputSkills,
+    getImageCapability: async (session) => {
+      const channel = session.channelId ? channels.get(session.channelId) : undefined
+      if (!channel?.enabled || !session.modelId || !channel.models.some((model) => model.enabled && model.id === session.modelId)) return { support: 'unknown' }
+      return await getAdapter(session.runtimeId).getImageCapability?.({ provider: channel.provider, model: session.modelId }) ?? { support: 'unknown' }
+    } })
   const taskController = new AgentTaskController({ clients, sessions, tasks, events })
   const histories = new MessageHistoryController({ clients, sessions, conversations, tasks: taskController })
   const channelController = new ChannelController(channels)
@@ -253,18 +282,25 @@ export function createBackend(options: BackendOptions): AxonBackend {
   let loopExecutor: AxonLoopExecutor | undefined
   const resolveExecutionContext = (session: AgentSessionMeta) => {
     const context = resolveBackendAgentContext(session, { getSession: (id) => sessions.get(id), resolveProjectCwd: (id) => projects.resolveProjectCwd(id) })
-    return { ...context, toolEnvironment: loopExecutor?.getContext(session.id) ?? {
+    const local: AgentToolEnvironment = loopExecutor?.getContext(session.id) ?? {
       // 普通任务清除本应用的临时业务变量，不能让旧 Shell 快照带回已过期凭据。
       environmentOverrides: { AXON_LOOP_SOCKET: undefined, AXON_LOOP_TOKEN: undefined },
+    }
+    const prepend = [...(options.agentToolEnvironment?.pathPrepend ?? []), ...(local.pathPrepend ?? [])]
+    return { ...context, toolEnvironment: { ...local,
+      environmentOverrides: { ...options.agentToolEnvironment?.environmentOverrides, ...local.environmentOverrides },
+      ...(prepend.length ? { pathPrepend: prepend } : {}),
     } }
   }
   const agent = new AgentService({
     adapter: getAdapter('pi'), resolveAdapter: getAdapter, validateRuntimeSession: options.validateRuntimeSession,
     channelManager: channels, sessionManager: sessions, eventBus: events,
     runtimeConfigDir: paths.runtimeConfigDir, runtimeSessionDir: paths.runtimeSessionsDir,
+    protectedToolRoots: [...agentAttachments.readOnlyRoots, ...(options.protectedToolRoots ?? [])],
+    prepareRecoveryAttachments: (session, messages, capability) => agentAttachments.prepareHistoryImages(session, messages, capability),
     resolveExecutionContext,
     resolveProjectInstructions: (projectRoot) => resolveProjectInstructions({ projectRoot }),
-    discoverAgentSkills: features.skills ? (projectRoot) => discoverAgentSkills({ projectRoot, ...globalSkillRoots }) : undefined,
+    discoverAgentSkills: discoverSkills,
     getMemoryContext: features.memory
       ? (session) => session.projectId && projects.get(session.projectId)?.memoryEnabled
         ? resolveAgentMemoryContext(session.projectId, memoryService, session.memoryFileStates) : undefined
@@ -314,7 +350,7 @@ export function createBackend(options: BackendOptions): AxonBackend {
   // 先登记任务状态落盘，再登记客户端投递；UI 收到审批时能读取一致的 blocked 状态。
   unsubscribePermissions = permissions.subscribe((event) => collaboration.handleInteractionEvent(event))
   unsubscribeAskUsers = askUsers.subscribe((event) => collaboration.handleInteractionEvent(event))
-  agentRuns = new AgentRunCoordinator({ clients, sessions, agent, events, permissions, askUsers,
+  agentRuns = new AgentRunCoordinator({ clients, sessions, agent, events, permissions, askUsers, attachments: agentAttachments,
     sessionFactory,
     prepareCreate: options.sessionCreationOrigin ? (input) => {
       if (!input.projectId) throw new Error('CLI 会话必须属于项目')
@@ -400,6 +436,7 @@ export function createBackend(options: BackendOptions): AxonBackend {
     clean(() => chat.dispose())
     clean(() => mcp.dispose())
     clean(() => skills.dispose())
+    clean(() => agentAttachments.dispose())
     clean(() => channelController.dispose())
     clean(() => projectController.dispose())
     clean(() => clients.dispose())
@@ -437,7 +474,8 @@ export function createBackend(options: BackendOptions): AxonBackend {
     return draining ??= Promise.allSettled([
       () => drainRuns(), () => mcp.drain(), () => mcpTools.drain(), () => skills.drain(),
       () => agentCapabilities.drain(), () => channelController.drain(), () => channelNetwork.drain(),
-      () => projectController.drain(), ...[...ownedResources].map((resource) => () => resource.drain()),
+      () => projectController.drain(), () => agentAttachments.drain(),
+      ...[...ownedResources].map((resource) => () => resource.drain()),
     ].map((wait) => Promise.resolve().then(wait))).then((results) => {
       const failures = [...cleanupFailures, ...results.filter((result) => result.status === 'rejected')
         .map(() => new Error('后端异步资源清理失败'))]
@@ -447,7 +485,12 @@ export function createBackend(options: BackendOptions): AxonBackend {
   // 开放服务前登记存储生命周期订阅；失败撤销已装配资源，不返回半初始化后端。
   try {
     unsubscribeDeleted = sessions.onSessionsDeleted((deleted) => {
-      for (const session of deleted) adapters.get(session.runtimeId)?.releaseSession?.(session.id)
+      const failures: unknown[] = []
+      for (const session of deleted) {
+        try { agentAttachments.releaseSession(session.id) } catch (error) { failures.push(error) }
+        try { adapters.get(session.runtimeId)?.releaseSession?.(session.id) } catch (error) { failures.push(error) }
+      }
+      if (failures.length) throw new AggregateError(failures, '会话执行资源清理失败')
     })
   } catch (error) {
     try { dispose() } catch (cleanupError) {
@@ -456,7 +499,7 @@ export function createBackend(options: BackendOptions): AxonBackend {
     throw error
   }
   return {
-    paths, settings, userProfile, channels, channelController, channelNetwork, conversations, attachments, attachmentController,
+    paths, settings, userProfile, channels, channelController, channelNetwork, conversations, attachments, attachmentController, agentAttachments,
     projects, projectController, state, sessions, tasks, taskController, histories, loops, loopArtifacts, sessionFactory,
     events, agent, agentCapabilities, clients, agentRuns, permissions, askUsers, chat, chatRuns, collaboration, mcpTools, memoryService, workspaceWatcher, skills, getAdapter,
     mcp, loopMcp, loopMcpTools,

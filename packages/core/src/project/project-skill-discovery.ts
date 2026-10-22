@@ -46,6 +46,8 @@ export interface DiscoverAgentSkillsOptions extends DiscoverProjectSkillsOptions
   /** 入口显式提供全局目录，发现流程不探测运行进程的 HOME。 */
   builtinSkillsRoot: string
   userSkillsRoot: string
+  /** 在合并前排除宿主不可执行的受管项，低优先级可用项仍可正常胜出。 */
+  filterSkill?: (skill: AgentSkillDescriptor) => boolean
 }
 
 export interface DiscoverGlobalAgentSkillsOptions {
@@ -304,12 +306,14 @@ function resolveProjectRoot(requestedRoot: string): string {
 function discoverFromDirectories(
   projectRoot: string,
   candidates: readonly SkillDirectoryCandidate[],
+  filterSkill?: (skill: AgentSkillDescriptor) => boolean,
 ): AgentSkillCatalog {
   const diagnostics: AgentSkillDiagnostic[] = []
   const selected = new Map<string, AgentSkillDescriptor>()
   const shadowedSkills: AgentSkillDescriptor[] = []
   for (const candidate of candidates) {
     for (const skill of scanSkillRoot(candidate, diagnostics)) {
+      if (filterSkill && !filterSkill(skill)) continue
       const existing = selected.get(skill.name)
       if (existing) {
         shadowedSkills.push(skill)
@@ -352,7 +356,7 @@ export function discoverAgentSkills(options: DiscoverAgentSkillsOptions): AgentS
     ...projectSkillDirectories(projectRoot),
     { kind: 'builtin', rootPath: builtinRoot, displayRoot: '$HOME/.axon/skills' },
     { kind: 'user', rootPath: userRoot, displayRoot: '$HOME/.agents/skills' },
-  ])
+  ], options.filterSkill)
 }
 
 /** 设置页只检查两个全局来源，不需要虚构项目目录或读取任意工作区。 */
@@ -387,7 +391,7 @@ export function buildAgentSkillSystemPrompt(
   ].join('\n')).join('\n')
   const section = [
     '## 可用 Skills',
-    '以下仅是 Skill 轻量目录。仅当任务明确符合 description 时，先调用 SkillRead 并传入 name 读取完整 SKILL.md，再遵循正文；未读取正文不得声称已使用该 Skill。需要读取 Skill 引用文件时，再向 SkillRead 传入 relative_path。Skill 中声明的工具不会绕过现有权限。',
+    '以下仅是 Skill 轻量目录。仅当任务明确符合 description 时，先调用 SkillRead 并传入 name 读取完整 SKILL.md，再遵循正文；未读取正文不得声称已使用该 Skill。若本轮用户明确选择且上下文已用 <skill> 提供完整正文，则可直接使用，无须再次读取入口。需要读取 Skill 引用文件时，再向 SkillRead 传入 relative_path。Skill 中声明的工具不会绕过现有权限。',
     '<available_skills>',
     entries,
     '</available_skills>',

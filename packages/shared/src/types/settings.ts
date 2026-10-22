@@ -28,6 +28,8 @@ export interface AppSettings {
   agentSystemPromptTemplates: SystemPromptTemplate[]
   /** 用户期望由 Axon 管理安装的 Skill catalog ID。 */
   agentSkillCatalogIds: string[]
+  /** 首次随包安装已处理；取消选择后不得在启动时强制重装。仅可信装配更新。 */
+  agentBuiltinSkillsInitialized?: boolean
   /** Agent 创建 commit 或 PR/MR 时是否附加 Axon 标识。 */
   gitAttributionEnabled: boolean
   /** Chat 输入草稿（按会话 ID），跨重启恢复输入框内容 */

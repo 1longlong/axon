@@ -19,6 +19,7 @@ function getDefaultSettings(): AppSettings {
     quickChatShortcuts: [],
     agentSystemPromptTemplates: [],
     agentSkillCatalogIds: [],
+    agentBuiltinSkillsInitialized: false,
   }
 }
 
@@ -100,6 +101,7 @@ export function getSettings(filePath: string): AppSettings {
     ...getDefaultSettings(),
     ...data,
     themeMode: data.themeMode || DEFAULT_THEME_MODE,
+    agentBuiltinSkillsInitialized: data.agentBuiltinSkillsInitialized === true,
     agentSystemPromptTemplates: (() => {
       try { return validateSystemPromptTemplates(data.agentSystemPromptTemplates) }
       catch { return [] }
@@ -121,6 +123,9 @@ export function getSettings(filePath: string): AppSettings {
  * 未提交的字段保留当前文件值，写入失败不能返回成功结果。
  */
 export function updateSettings(updates: Partial<AppSettings>, filePath: string): AppSettings {
+  if (updates.agentBuiltinSkillsInitialized !== undefined && typeof updates.agentBuiltinSkillsInitialized !== 'boolean') {
+    throw new Error('内置 Skills 初始化标记无效')
+  }
   const current = getSettings(filePath)
   const quickChatShortcuts = updates.quickChatShortcuts === undefined
     ? current.quickChatShortcuts

@@ -30,6 +30,8 @@ import type {
   AgentExecutionPolicy,
   AgentHostToolExecutionPort,
   AgentHostShellEnvironment,
+  AgentImageCapability,
+  AgentRecoveryAttachmentInput,
   AgentToolEnvironment,
   AgentProviderAdapter,
   AgentQueryInput,
@@ -171,6 +173,13 @@ async function resolvePiReasoningModel(provider: PiAgentQueryOptions['provider']
     }
   }
   return { reasoning: true }
+}
+
+/** 只认可 SDK 目录的确切协议/模型记录；未知端点仍须由用户明确尝试看图。 */
+export async function getPiImageCapability(provider: PiAgentQueryOptions['provider'], modelId: string): Promise<AgentImageCapability> {
+  const compat = piCompat ?? (piCompat = await loadPiCompat())
+  const model = findPiCatalogModel(compat, provider, modelId)
+  return { support: model ? model.input.includes('image') ? 'supported' : 'unsupported' : 'unknown' }
 }
 
 /** 只向 renderer 公开中立等级清单，不暴露 Pi 模型目录或协议编码。 */
@@ -964,6 +973,7 @@ async function buildRuntimeModel(sdk: PiSdk, input: PiAgentQueryOptions, ensureO
   const api = runtimeApi(input.provider)
   const modelId = input.model?.trim() || 'default'
   const reasoningModel = await resolvePiReasoningModel(input.provider, modelId)
+  const imageCapability = await getPiImageCapability(input.provider, modelId)
   ensureOpen()
   const deferredToolCapability = await resolvePiDeferredToolCapability(input.provider, modelId)
   ensureOpen()
@@ -984,7 +994,8 @@ async function buildRuntimeModel(sdk: PiSdk, input: PiAgentQueryOptions, ensureO
       baseUrl,
       reasoning: reasoningModel.reasoning,
       ...(reasoningModel.thinkingLevelMap ? { thinkingLevelMap: reasoningModel.thinkingLevelMap } : {}),
-      input: ['text', 'image'],
+      // 未知模型由 core 做逐次用户确认；注册能力不能反过来冒充模型目录证据。
+      input: imageCapability.support === 'unsupported' ? ['text'] : ['text', 'image'],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 200_000,
       maxTokens: 64_000,
@@ -1369,6 +1380,15 @@ export class PiAgentAdapter implements AgentProviderAdapter {
     return this.work.run(async () => {
       this.ensureOpen()
       const capability = await getPiReasoningCapability(input.provider, input.model)
+      this.ensureOpen()
+      return capability
+    })
+  }
+
+  getImageCapability(input: AgentReasoningCapabilityInput): Promise<AgentImageCapability> {
+    return this.work.run(async () => {
+      this.ensureOpen()
+      const capability = await getPiImageCapability(input.provider, input.model)
       this.ensureOpen()
       return capability
     })
@@ -1793,6 +1813,19 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       } else {
         promptStarted = true
         pendingPrompt = this.work.run(async () => {
+          let recovered: AgentRecoveryAttachmentInput | undefined
+          if (recoveredRuntimeSession && input.loadRecoveryAttachments) {
+            recovered = await input.loadRecoveryAttachments()
+            if (recovered.warnings.length) emit({ kind: 'sdk_message', message: {
+              type: 'system', subtype: 'axon_attachment_warning', message: recovered.warnings.join('\n'),
+            } })
+          }
+          if (active.abortRequested || input.abortSignal?.aborted) {
+            emit({ kind: 'sdk_message', message: convertStoppedResult([], session.sessionId) })
+            return
+          }
+          const recoveryText = [input.recoveryPrompt, recovered?.context].filter(Boolean).join('\n\n')
+          const recoveryImages = recovered?.images.map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mediaType })) ?? []
           if (continuation) {
             // 自定义上下文入口保留 SDK 的会话级重试/后置压缩；首请求前补公开阈值检查。
             const usage = session.getContextUsage()
@@ -1806,20 +1839,30 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               emit({ kind: 'sdk_message', message: convertStoppedResult([], session.sessionId) })
               return
             }
+            const interruptionText = [
+              recoveredRuntimeSession ? recoveryText : undefined,
+              continuation.interruptionContext,
+            ].filter(Boolean).join('\n\n')
             await session.sendCustomMessage({
               customType: 'axon_interruption',
-              content: [
-                recoveredRuntimeSession ? input.recoveryPrompt : undefined,
-                continuation.interruptionContext,
-              ].filter(Boolean).join('\n\n'),
+              content: recoveryImages.length ? [{ type: 'text', text: interruptionText }, ...recoveryImages] : interruptionText,
               display: false,
               details: { interruptionId: continuation.interruptionId },
             }, { triggerTurn: true })
           } else {
-            const prompt = recoveredRuntimeSession && input.recoveryPrompt
-              ? `${input.recoveryPrompt}\n\n[当前用户消息]\n${input.prompt}`
-              : input.prompt
-            await session.prompt(prompt)
+            if (recoveredRuntimeSession && (recoveryText || recoveryImages.length)) {
+              // 单独的隐藏背景保留图片块，不把背景伪装成第二条人类输入或重复文字前缀。
+              await session.sendCustomMessage({ customType: 'axon_recovery', display: false,
+                content: [{ type: 'text', text: recoveryText }, ...recoveryImages],
+              }, { triggerTurn: false })
+            }
+            if (active.abortRequested || input.abortSignal?.aborted) {
+              emit({ kind: 'sdk_message', message: convertStoppedResult([], session.sessionId) })
+              return
+            }
+            await session.prompt(input.prompt, input.images?.length ? {
+              images: input.images.map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mediaType })),
+            } : undefined)
           }
         })
           .then(() => {

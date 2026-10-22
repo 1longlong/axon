@@ -23,5 +23,9 @@ export function createDesktopAppServerLaunch(options: DesktopAppServerLaunchOpti
     dataDir: options.dataDir, homeDir: options.homeDir, applicationVersion: options.applicationVersion,
     environment: { ...options.environment, ELECTRON_RUN_AS_NODE: '1', NODE_OPTIONS: undefined, NODE_PATH: undefined },
     zimaPython: options.environment.AXON_ZIMA_PYTHON?.trim() || undefined,
+    builtinSkillsRoot: join(options.packaged ? options.resourcesDirectory : join(options.mainDirectory, 'resources'), 'builtin-skills'),
+    documentHelper: options.packaged
+      ? join(options.resourcesDirectory, 'app.asar.unpacked', 'dist', 'axon-doc.mjs')
+      : join(options.mainDirectory, 'axon-doc.mjs'),
   }
 }

@@ -346,3 +346,8 @@
   content: attr(data-placeholder);
   pointer-events: none;
 }
+
+/* Agent 编辑区不渲染富文本段落间距，换行与用户输入保持一致。 */
+.agent-composer-editor p + p {
+  margin-top: 0;
+}

@@ -1,6 +1,6 @@
 {
   "name": "@axon/app-server",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Axon 应用协议与双向 stdio 服务",
   "type": "module",
   "main": "./src/index.ts",

@@ -4,7 +4,7 @@ import type { AppServerProcess } from './lib/desktop/app-server-process'
 import type { AppServerWindowClients } from './lib/desktop/app-server-window-clients'
 import type { AppServerEvents } from './lib/desktop/app-server-events'
 import type { AppServerSettingsTransaction } from './lib/desktop/app-server-settings-transaction'
-import { pickAgentProjectRoot } from './lib/desktop/native-backend-dialogs'
+import { pickAgentProjectRoot, pickAgentAttachments } from './lib/desktop/native-backend-dialogs'
 import { registerAppServerAgentIpcHandlers } from './ipc/app-server-agent-ipc'
 import { registerAppServerChatIpcHandlers } from './ipc/app-server-chat-ipc'
 import { registerAppServerChannelIpcHandlers } from './ipc/app-server-channel-ipc'
@@ -24,6 +24,7 @@ export interface DesktopIpcOptions {
   interactions: AppServerEvents
   transaction: AppServerSettingsTransaction
   pickLocalWorkspace?: (sender: WebContents) => Promise<AgentWorkspaceDirectorySelection>
+  pickAttachments?: (sender: WebContents) => Promise<string[]>
 }
 
 /** 握手成功后一次装配所有领域；部分绑定失败先撤销本次注册，不启动第二套业务后端。 */
@@ -40,7 +41,7 @@ export function registerIpcHandlers(options: DesktopIpcOptions): () => void {
   try {
     releases.push(registerAppServerChannelIpcHandlers(ipcMain, options))
     releases.push(registerAppServerChatIpcHandlers(ipcMain, options))
-    releases.push(registerAppServerAgentIpcHandlers(ipcMain, options))
+    releases.push(registerAppServerAgentIpcHandlers(ipcMain, { ...options, pickAttachments: options.pickAttachments ?? pickAgentAttachments }))
     releases.push(registerAppServerProjectIpcHandlers(ipcMain, { ...options, pickLocalWorkspace: options.pickLocalWorkspace ?? pickAgentProjectRoot }))
     releases.push(registerAppServerMcpIpcHandlers(ipcMain, options))
     releases.push(registerAppServerSkillIpcHandlers(ipcMain, options))

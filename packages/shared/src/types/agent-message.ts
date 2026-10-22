@@ -15,6 +15,8 @@
 
 // ===== 内容块 =====
 
+import type { AgentInputAttachment, AgentInputPart } from './agent-attachment'
+
 export interface SDKTextBlock {
   type: 'text'
   text: string
@@ -105,6 +107,13 @@ export interface SDKAssistantMessage {
 
 export interface SDKUserMessage {
   type: 'user'
+  inputParts?: AgentInputPart[]
+  attachments?: AgentInputAttachment[]
+  /** 当时实际加载的附件/Skill 上下文；仅用于模型恢复，不渲染成用户正文。 */
+  attachmentContext?: string
+  /** 历史图片最初发送的确切模型选择；不携带凭据或工具授权。 */
+  imageModelSelection?: { channelId: string; modelId: string }
+  explicitSkillActivations?: AgentSkillActivation[]
   /** 快捷浮窗用户输入来源；仅用于应用 JSONL 和 UI，不改变 runtime 消息。 */
   inputOrigin?: 'quick'
   /** Axon 首次持久化该完整消息的时间。 */

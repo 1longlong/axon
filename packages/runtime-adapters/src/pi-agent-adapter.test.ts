@@ -22,6 +22,7 @@ import {
   dropTrailingAbortedAssistant,
   getPiAssistantErrorDetails,
   getPiReasoningCapability,
+  getPiImageCapability,
   hasPiAssistantTextContent,
   isSessionNotFoundError,
   PiAgentAdapter,
@@ -508,7 +509,9 @@ interface RuntimeHarness {
   load: NonNullable<ConstructorParameters<typeof PiAgentAdapter>[0]>
   state: {
     prompt?: string
-    customMessage?: { customType: string; content: string; display: boolean; details: { interruptionId: string } }
+    promptImages?: unknown
+    customMessage?: { customType: string; content: string | Array<{ type: string; text?: string; data?: string; mimeType?: string }>; display: boolean; details?: { interruptionId: string } }
+    customMessages?: Array<{ customType: string; content: unknown; triggerTurn: boolean }>
     compactions?: number
     disposed: boolean
     openedSessionFile?: string
@@ -572,14 +575,16 @@ function createRuntimeHarness(options: RuntimeHarnessOptions = {}): RuntimeHarne
       listeners.add(listener)
       return () => { listeners.delete(listener); options.onUnsubscribe?.() }
     },
-    async prompt(prompt: string) {
+    async prompt(prompt: string, input?: { images?: unknown }) {
       state.prompt = prompt
+      state.promptImages = input?.images
       await session.runMessages()
     },
     async sendCustomMessage(message: NonNullable<RuntimeHarness['state']['customMessage']>, options: { triggerTurn: boolean }) {
-      expect(options.triggerTurn).toBe(true)
       state.customMessage = message
-      await session.runMessages()
+      state.customMessages ??= []
+      state.customMessages.push({ customType: message.customType, content: message.content, triggerTurn: options.triggerTurn })
+      if (options.triggerTurn) await session.runMessages()
     },
     getContextUsage() { return options.continuationUsage },
     settingsManager: { getCompactionSettings: () => ({ enabled: true, reserveTokens: 100 }) },
@@ -794,6 +799,63 @@ function continuationInput(query: PiAgentQueryOptions): AgentContinueQueryInput 
   return { ...context, interruptionId: 'pause-1', interruptionContext: '<system-reminder>上一轮被中断，工具可能部分执行。</system-reminder>',
     recoveryPrompt: '[会话恢复上下文]\n原用户任务和此前回复' }
 }
+
+describe('Pi 图片请求与惰性恢复', () => {
+  test('真实目录未知项不冒充支持，当前图片使用公开 images 参数', async () => {
+    expect(await getPiImageCapability('custom', 'axon-nonexistent-image-model')).toEqual({ support: 'unknown' })
+    const f = lifecycleFixture()
+    try {
+      const image = { attachmentId: 'image', mediaType: 'image/png' as const, data: 'aW1hZ2U=' }
+      for await (const _ of f.adapter.query({ ...f.query, images: [image] })) { /* 消费到资源实际结束。 */ }
+      expect(f.harness.state.prompt).toBe('生命周期测试')
+      expect(f.harness.state.promptImages).toEqual([{ type: 'image', mimeType: 'image/png', data: 'aW1hZ2U=' }])
+    } finally { await f.cleanup() }
+  })
+  test('artifact 缺失才惰性读图，背景不重复拼入当前用户文字', async () => {
+    const f = lifecycleFixture(); let loads = 0
+    try {
+      const payloads: AgentStreamPayload[] = []
+      for await (const payload of f.adapter.query({ ...f.query, runtimeSessionFile: join(f.query.runtimeSessionDir, 'missing.jsonl'), recoveryPrompt: '旧文字背景',
+        loadRecoveryAttachments: async () => { loads += 1; return { context: '旧图片说明', images: [{ attachmentId: 'old', mediaType: 'image/png', data: 'b2xk' }], warnings: ['一张历史图缺失'] } },
+      })) payloads.push(payload)
+      expect(loads).toBe(1)
+      expect(f.harness.state.customMessages).toEqual([{ customType: 'axon_recovery', triggerTurn: false, content: [
+        { type: 'text', text: '旧文字背景\n\n旧图片说明' }, { type: 'image', mimeType: 'image/png', data: 'b2xk' },
+      ] }])
+      expect(f.harness.state.prompt).toBe('生命周期测试')
+      expect(payloads.some((payload) => payload.kind === 'sdk_message' && payload.message.type === 'system' && payload.message.subtype === 'axon_attachment_warning')).toBe(true)
+      expect(payloads.filter((payload) => payload.kind === 'sdk_message' && payload.message.type === 'user')).toHaveLength(0)
+    } finally { await f.cleanup() }
+  })
+  test('精确 artifact 已打开时不读应用历史图片，不重复注入', async () => {
+    const f = lifecycleFixture(); let loads = 0
+    try {
+      mkdirSync(f.query.runtimeSessionDir, { recursive: true })
+      const path = join(f.query.runtimeSessionDir, 'exact.jsonl')
+      await Bun.write(path, '{}\n')
+      for await (const _ of f.adapter.query({ ...f.query, runtimeSessionFile: path, recoveryPrompt: '备用文字',
+        loadRecoveryAttachments: async () => { loads += 1; throw new Error('不应调用') },
+      })) { /* 夹具 open 明确成功，验证适配器选择而非 SDK 文件格式。 */ }
+      expect(loads).toBe(0); expect(f.harness.state.openedSessionFile).toBe(path)
+      expect(f.harness.state.customMessages).toBeUndefined()
+    } finally { await f.cleanup() }
+  })
+  test('无用户输入继续将恢复图片合入一次宿主上下文，不再发普通 prompt', async () => {
+    const f = lifecycleFixture()
+    try {
+      for await (const _ of f.adapter.continueQuery({ ...continuationInput(f.query), loadRecoveryAttachments: async () => ({
+        context: '历史图片', images: [{ attachmentId: 'old', mediaType: 'image/jpeg', data: 'b2xk' }], warnings: [],
+      }) })) { /* 继续只触发一个上下文消息。 */ }
+      expect(f.harness.state.prompt).toBeUndefined()
+      expect(f.harness.state.customMessages).toHaveLength(1)
+      expect(f.harness.state.customMessages?.[0]?.triggerTurn).toBe(true)
+      expect(f.harness.state.customMessage?.content).toEqual([
+        { type: 'text', text: '[会话恢复上下文]\n原用户任务和此前回复\n\n历史图片\n\n<system-reminder>上一轮被中断，工具可能部分执行。</system-reminder>' },
+        { type: 'image', mimeType: 'image/jpeg', data: 'b2xk' },
+      ])
+    } finally { await f.cleanup() }
+  })
+})
 
 describe('Pi adapter 无新增用户发言的继续入口', () => {
   test('使用公开宿主上下文入口，语义恢复背景不伪装成当前用户消息', async () => {

@@ -19,6 +19,7 @@ import type {
   AgentSandboxPolicy,
 } from './agent-sandbox'
 import type { ProviderType } from './channel'
+import type { AgentImageCapability, AgentPreparedImage, AgentRecoveryAttachmentInput } from './agent-attachment'
 
 /** 会话当前的沙箱与审批语义；实际文件根由 sandboxPolicy 单独物化。 */
 export interface AgentExecutionPolicy {
@@ -164,6 +165,7 @@ export interface AgentQueryInput {
   sessionId: string
   /** 用户 prompt（编排层已完成上下文注入） */
   prompt: string
+  images?: AgentPreparedImage[]
   model?: string
   /** Agent 工作目录 */
   cwd?: string
@@ -187,6 +189,8 @@ export interface AgentQueryInput {
   runtimeSessionFile?: string
   /** runtime artifact 不可恢复时，由编排层从中立历史生成的语义恢复上下文。 */
   recoveryPrompt?: string
+  /** 仅 adapter 确认精确 artifact 不可用后调用，不在每轮读取/重发全部历史图片。 */
+  loadRecoveryAttachments?: () => Promise<AgentRecoveryAttachmentInput>
   /** 路径工具可据此按需激活更深目录的项目指令。 */
   projectInstructionScope?: AgentProjectInstructionScope
   /** 子 Agent 可见的中立内置工具名；缺失表示使用完整默认集合。 */
@@ -224,6 +228,8 @@ export interface AgentReasoningCapabilityInput {
  *   独有的调优项才放进 adapter 扩展输入，上层不得依赖其 SDK 类型。
  */
 export interface AgentProviderAdapter {
+  /** 精确模型目录决定能力；缺失时为未知，不能按 Provider 名称猜测支持。 */
+  getImageCapability?(input: AgentReasoningCapabilityInput): AgentImageCapability | Promise<AgentImageCapability>
   /** 未明确返回 supported 时，编排层不得把 runtime 标记为已受宿主 OS 沙箱保护。 */
   getSandboxCapability?(
     input: AgentSandboxCapabilityInput,

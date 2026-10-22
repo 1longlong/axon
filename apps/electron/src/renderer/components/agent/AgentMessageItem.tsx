@@ -7,6 +7,8 @@ import { ThinkingBlock } from '@/components/chat/ThinkingBlock'
 import { agentMessageText, isAgentUserStoppedResult, stringifyAgentContent } from '@/lib/agent-message'
 import { groupAgentActivities, summarizeAgentActivity } from '@/lib/agent-activity-groups'
 import type { AgentActivityGroup as ActivityGroup, AgentTurnBlock } from '@/lib/agent-activity-groups'
+import { AgentAttachmentTags } from './AgentAttachmentTags'
+import { AgentInputText } from './AgentInputText'
 
 function resolveMessageDate(createdAt: number | undefined): Date | undefined {
   if (createdAt === undefined || !Number.isFinite(createdAt) || createdAt < 0) return undefined
@@ -228,18 +230,22 @@ export function AgentAssistantTurnItem({ messages, renderToolUse, hideToolResult
 }
 
 /** 单条 SDKMessage 通用渲染；根会话可注入 Agent 卡片，子会话复用默认工具块。 */
-export function AgentMessageItem({ message, renderToolUse, hideToolResult, toolResultsById, activeToolUseIds, isStreaming }: {
+export function AgentMessageItem({ message, renderToolUse, hideToolResult, toolResultsById, activeToolUseIds, isStreaming, sessionId }: {
   message: SDKMessage
   renderToolUse?: (block: SDKToolUseBlock) => React.ReactNode
   hideToolResult?: (toolUseId: string) => boolean
   toolResultsById?: ReadonlyMap<string, SDKToolResultBlock>
   activeToolUseIds?: ReadonlySet<string>
   isStreaming?: boolean
+  sessionId?: string
 }): React.ReactElement {
   if (message.type === 'user') {
     if ((message as SDKUserMessage).isSynthetic) return <></>
     const content = (message as SDKUserMessage).message?.content ?? []
     const text = textFromUser(message)
+    const attachments = (message as SDKUserMessage).attachments ?? []
+    const parts = (message as SDKUserMessage).inputParts
+    const files = parts ? attachments.filter((item) => item.kind !== 'skill') : attachments
     const toolResults = content.filter((block): block is SDKToolResultBlock => {
       const toolUseId = (block as { tool_use_id?: unknown }).tool_use_id
       return block.type === 'tool_result'
@@ -247,7 +253,11 @@ export function AgentMessageItem({ message, renderToolUse, hideToolResult, toolR
         && !hideToolResult?.(toolUseId)
     })
     return <>
-      {text && <article className="group/message flex justify-end"><div className="min-w-0 max-w-[85%] space-y-1"><div className="ml-auto w-fit max-w-full whitespace-pre-wrap break-words rounded-lg border border-border/60 bg-muted/80 px-3 py-2 text-sm">{text}</div><MessageMeta message={message} align="right" /></div></article>}
+      {(text || attachments.length > 0) && <article className="group/message flex justify-end"><div className="min-w-0 max-w-[85%] space-y-1">
+        {files.length > 0 && <AgentAttachmentTags attachments={files}
+          imageSource={sessionId && typeof message.uuid === 'string' ? { kind: 'history', sessionId, messageId: message.uuid } : undefined} />}
+        {(text || parts?.length) && <div data-agent-input-body className="ml-auto w-fit max-w-full whitespace-pre-wrap break-words rounded-lg border border-border/60 bg-muted/80 px-3 py-2 text-sm"><AgentInputText text={text} parts={parts} attachments={attachments} /></div>}
+        <MessageMeta message={message} align="right" /></div></article>}
       {toolResults.map((block) => <article key={block.tool_use_id} className="min-w-0"><ToolResult block={block} /></article>)}
     </>
   }
@@ -257,5 +267,6 @@ export function AgentMessageItem({ message, renderToolUse, hideToolResult, toolR
   }
   if (message.type === 'result') return (message as SDKResultMessage).subtype === 'success' ? <></> : <ResultError result={message as SDKResultMessage} />
   if (message.type === 'system' && message.subtype === 'permission_denied') return <p className="text-center text-xs text-muted-foreground">工具权限已拒绝：{String((message as SDKSystemMessage).message ?? '未执行')}</p>
+  if (message.type === 'system' && message.subtype === 'axon_attachment_warning') return <p role="status" className="whitespace-pre-wrap rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">{String((message as SDKSystemMessage).message ?? '部分历史附件未能恢复')}</p>
   return <></>
 }

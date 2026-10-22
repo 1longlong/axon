@@ -15,6 +15,8 @@ export interface AppServerLaunch {
   homeDir: string
   applicationVersion: string
   zimaPython?: string
+  builtinSkillsRoot?: string
+  documentHelper?: string
   cwd?: string
   environment?: NodeJS.ProcessEnv
 }
@@ -76,6 +78,7 @@ export class AppServerProcess {
     if (![launch.executable, launch.dataDir, launch.homeDir].every((path) => isAbsolute(path) && !path.includes('\0'))
       || !launch.applicationVersion.trim() || launch.applicationVersion.length > 100 || /[\r\n\0]/.test(launch.applicationVersion)
       || launch.entryArgs.some((arg) => arg.includes('\0'))
+      || [launch.builtinSkillsRoot, launch.documentHelper].some((path) => path !== undefined && (!isAbsolute(path) || path.includes('\0')))
       || [options.startupTimeoutMs ?? 30_000, options.stopTimeoutMs ?? APP_SERVER_STOP_TIMEOUT_MS].some((ms) => !Number.isSafeInteger(ms) || ms <= 0)) throw new Error('后端启动配置无效')
   }
   get state(): AppServerProcessState { return this.currentState }
@@ -115,7 +118,9 @@ export class AppServerProcess {
     const launch = this.options.launch
     try {
       const child = spawn(launch.executable, [...launch.entryArgs, '--data-dir', launch.dataDir, '--home-dir', launch.homeDir,
-        '--application-version', launch.applicationVersion, ...(launch.zimaPython ? ['--zima-python', launch.zimaPython] : [])],
+        '--application-version', launch.applicationVersion, ...(launch.zimaPython ? ['--zima-python', launch.zimaPython] : []),
+        ...(launch.builtinSkillsRoot ? ['--builtin-skills-root', launch.builtinSkillsRoot] : []),
+        ...(launch.documentHelper ? ['--document-helper', launch.documentHelper] : [])],
       { shell: false, cwd: launch.cwd, env: launch.environment ?? process.env, stdio: 'pipe' })
       this.child = child
       this.exited = new Promise<void>((done) => child.once('close', () => {

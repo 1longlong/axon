@@ -145,7 +145,15 @@ Agent 会读取项目根目录的 `AGENTS.md`。当 Read 工具进入更深的�
 3. Axon 管理目录 `$HOME/.axon/skills/`
 4. 用户全局目录 `$HOME/.agents/skills/`
 
-Agent 设置页用于管理安装到 Axon 目录的 Skills，不修改项目或用户全局目录。可安装目录的来源尚未接入，目前列表为空；也可以自行按上述目录放置 Skill。
+Agent 设置页用于管理安装到 Axon 目录的 Skills，不修改项目或用户全局目录。桌面随包提供原生 `pdf`、`documents` 指引，通过受审批和沙箱约束的 `axon-doc` 命令提取文本型 PDF/DOCX；不提供 OCR、排版渲染或文档编辑。首次默认选择这两项，之后尊重保存的选择。受管副本有本地修改时，更新/卸载必须逐项确认；未知同名目录不覆盖。远程安装源未接入，也可以自行按上述目录放置 Skill。
+
+Pi Agent 主窗和快捷浮窗用同一个回形针入口选择文件或文件夹，由后端按真实类型识别，也支持拖拽或粘贴文件与图片及仅附件发送。图片冻结原件、准备后直接发模型；普通本地文件/目录为实时引用，按需用工具读取。每轮最多 10 项，普通托管文件最多 100 MiB，图片原件最多 20 MiB；模型图片能力未知时须明确确认尝试，已知不支持则不能发送。历史显示附件标签和图片预览，压缩/暂停不删除原文或图片。
+
+可在“添加 Skill”中选择当前有效的 Skill；主窗和快捷浮窗均在光标处插入行内胶囊，普通文件/图片仍在上方。胶囊可整项删除或撤销，发送前按仍存在的选择同步后端草稿，实际来源和正文由后端复核、直接加载到本轮用户上下文，不需要模型再调用 SkillRead；胶囊名称不混进原始问题。自动匹配仍由模型按目录描述调用 SkillRead。文字与 Skill 的排列由中立 `inputParts` 保存到用户 JSONL，排队、历史显示、复制和重启保持同一顺序；Skill 不在上方重复展示。模型收到按顺序编码的引用标记及本次实际加载的正文，历史恢复不重读新版 Skill；正常压缩不删除应用侧记录。
+
+Pi Agent 输入首行 `/`，输入框上方立即显示命令与有效 Skill 的混合列表；继续输入时按 Skill 名称/描述实时过滤。上下方向键选择、Enter/Tab 或点击确认；选择 Skill 直接替换斜杠片段为行内胶囊，不经过第二层弹窗、不发送消息。`/skills` 命令仍可打开完整选择器，下方正文和已有附件保留。候选只读取发现摘要，实际正文在发送时由后端加载。粘贴不会自动执行，未知 `/名称` 或不支持的参数会保留草稿并提示。正文中的斜杠、代码和 `/Users/...` 这样的完整路径不作为命令。浮窗会展开以容纳菜单，Esc 优先关闭菜单/选择器，再按一次才取消唤起。Chat 与 Zima 不接入这些本地命令。
+
+文本片段直接粘贴到输入框，不提供独立上传表单，不要求用户填写来源、文件名或行号，也不从普通剪贴板文字猜测这些信息。超过 8,000 字符的粘贴自动命名并保存完整文本附件，可改回内联（仍受输入框长度限制）。浮窗取消会清理未发送内容，不停止已接管任务或删除历史附件。Zima 仍保持文字输入。
 
 ### MCP
 
@@ -207,7 +215,7 @@ const executor = new AgentSandboxCommandService({ shellSnapshotDirectory: paths.
 const pi = new PiAgentAdapter(undefined, executor)
 const backend = createBackend({
   paths,
-  applicationVersion: '0.1.6',
+  applicationVersion: '0.1.7',
   credentialCodec: createCredentialCodec(), // 无安全后端：拒绝非空凭据，不保存明文。
   resolveAdapter: (runtimeId) => {
     if (runtimeId !== 'pi') throw new Error('本示例只装配 Pi')
@@ -234,7 +242,7 @@ try {
 bun run app-server:dev \
   --data-dir /absolute/axon-data \
   --home-dir /absolute/axon-home \
-  --application-version 0.1.6
+  --application-version 0.1.7
 ```
 
 这是等待父端协议请求的 stdio 服务，不是交互式聊天 CLI。父端应以子进程管道启动它，先握手再登记客户端，之后携带 `clientId` 调用固定业务方法。下面的最小父端示例保存在 `apps/app-server/example-client.ts`，从仓库根目录执行 `bun run apps/app-server/example-client.ts`；不读写桌面正式数据，也不请求模型。
@@ -251,7 +259,7 @@ import type { AppServerClient } from '@axon/shared'
 const directory = mkdtempSync(join(tmpdir(), 'axon-server-example-'))
 const child = spawn(process.execPath, ['run', 'apps/app-server/src/main.ts',
   '--data-dir', join(directory, 'data'), '--home-dir', directory,
-  '--application-version', '0.1.6'], { stdio: ['pipe', 'pipe', 'pipe'] })
+  '--application-version', '0.1.7'], { stdio: ['pipe', 'pipe', 'pipe'] })
 const closed = new Promise<number | null>((resolve, reject) => {
   child.once('close', resolve)
   child.once('error', reject)
@@ -261,7 +269,7 @@ const peer = new JsonRpcPeer(child.stdout, child.stdin, APP_SERVER_RPC_OPTIONS)
 try {
   await peer.request(methods.INITIALIZE, {
     protocolVersion: APP_SERVER_PROTOCOL_VERSION,
-    client: { name: 'axon-example', version: '0.1.6' },
+    client: { name: 'axon-example', version: '0.1.7' },
     hostCapabilities: { credentialStorage: 'unavailable', channelTargetConfirmation: false },
   })
   const client = await peer.request(methods.REGISTER_CLIENT, { kind: 'external' }) as unknown as AppServerClient

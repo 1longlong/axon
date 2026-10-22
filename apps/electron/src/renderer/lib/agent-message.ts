@@ -1,4 +1,5 @@
-import type { SDKMessage, SDKResultMessage } from '@axon/shared'
+import type { SDKMessage, SDKResultMessage, SDKUserMessage } from '@axon/shared'
+import { agentInputDisplayText } from '@axon/shared'
 
 /** 用户主动停止属于执行状态；真正的清理/持久化等失败仍需展示错误。 */
 export function isAgentUserStoppedResult(message: SDKMessage): boolean {
@@ -20,13 +21,15 @@ export function agentMessageText(message: SDKMessage): string {
   if (message.type === 'user') {
     if ((message as { isSynthetic?: unknown }).isSynthetic === true) return ''
     const user = message as { message?: { content?: unknown[] } }
-    return (user.message?.content ?? []).map((block) => {
+    const text = (user.message?.content ?? []).map((block) => {
       if (!block || typeof block !== 'object') return ''
       const item = block as { type?: unknown; text?: unknown; content?: unknown }
       if (item.type === 'text') return typeof item.text === 'string' ? item.text : ''
       if (item.type === 'tool_result') return stringifyAgentContent(item.content)
       return ''
     }).filter(Boolean).join('\n')
+    const input = message as SDKUserMessage
+    return agentInputDisplayText(text, input.inputParts, input.attachments)
   }
   if (message.type === 'assistant') {
     const assistant = message as { message: { content: unknown[] } }

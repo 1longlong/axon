@@ -65,7 +65,7 @@ describe('Skills 设置页面投影', () => {
     const failed = { ...snapshot(['a']), failures: [{ catalogId: 'a', message: '目标目录已存在' }] }
     f.writes[0]!.gate.resolve(failed); await applying
     expect(f.model.getSnapshot()).toMatchObject({ failures: failed.failures, snapshot: { installed: [] }, saving: false })
-    f.notice(); f.reads[1]!.resolve(snapshot(['a'])); await settle()
+    f.notice(); f.reads[1]!.resolve({ ...snapshot(['a']), failures: failed.failures }); await settle()
     expect(f.model.getSnapshot().failures).toEqual(failed.failures)
     expect(skillSettingsCanApply(f.model.getSnapshot())).toBe(true)
     f.model.dispose()

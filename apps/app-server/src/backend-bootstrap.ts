@@ -1,15 +1,20 @@
 /** 独立入口装配实际 Runtime/宿主；业务状态与写盘仍交给 createBackend。 */
 import { accessSync, constants, statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
-import { buildAgentSandboxPolicy, createBackend, createBackendPaths, LoopServiceError } from '@axon/core'
+import { buildAgentSandboxPolicy, createBackend, createBackendPaths, createLocalSkillCatalogProvider, LoopServiceError } from '@axon/core'
 import type { AxonBackend } from '@axon/core'
 import { AppServerBootstrapCleanupError, createExecHostPorts, createPrivateHostPorts, LoopControlServer } from '@axon/app-server'
 import type { AppServerBootstrap, JsonRpcPeer } from '@axon/app-server'
-import { AgentSandboxCommandService, checkAgentEnvironment, LoopPrecheckRunner, LoopPrecheckPermissionError } from '@axon/host-node'
+import { AgentSandboxCommandService, AgentDocumentCommandEnvironment, checkAgentEnvironment, prepareAgentImage, LoopPrecheckRunner, LoopPrecheckPermissionError } from '@axon/host-node'
 import { PiAgentAdapter, ZimaAgentAdapter, assertZimaConnection } from '@axon/runtime-adapters'
 import { AGENT_RUNTIME_CAPABILITIES, APP_SERVER_NOTIFICATIONS } from '@axon/shared'
 import type { AgentRuntimeId, AgentSessionCreateInput, AppServerInitializeInput } from '@axon/shared'
 import type { AppServerStartupConfig } from './startup-config'
+
+const DOCUMENT_SKILLS = [
+  { catalogId: 'axon-builtin/pdf', name: 'pdf', version: '1.0.0' },
+  { catalogId: 'axon-builtin/documents', name: 'documents', version: '1.0.0' },
+]
 
 /** configured 只表示受控解释器文件可执行，实际 Runtime 版本握手仍由 adapter 在运行时检查。 */
 function configuredPython(value: string | undefined): value is string {
@@ -41,6 +46,7 @@ export async function bootstrapAppServerBackend(
   const zima = new ZimaAgentAdapter(config.zimaPython ?? '', config.applicationVersion)
   const loopControl = new LoopControlServer()
   const loopPrecheck = new LoopPrecheckRunner(executor)
+  let documents: AgentDocumentCommandEnvironment | undefined
   const resolveAdapter = (runtimeId: AgentRuntimeId) => {
     if (runtimeId === 'pi') return pi
     if (!configuredPython(config.zimaPython)) throw new Error('Zima Runtime 受控解释器未配置或不可用')
@@ -55,11 +61,27 @@ export async function bootstrapAppServerBackend(
     assertZimaConnection(channel)
   }
   try {
+    if (!execHost && config.documentHelper && config.builtinSkillsRoot) {
+      documents = new AgentDocumentCommandEnvironment({ executable: process.execPath, entry: config.documentHelper,
+        runtime: process.versions.electron ? 'electron' : process.versions.bun ? 'bun' : 'node',
+        waitUntilUnused: async () => {
+          const results = await Promise.allSettled([executor.drain(), ...(backend ? [backend.drainRuns()] : [])])
+          if (results.some((result) => result.status === 'rejected')) throw new Error('文档命令使用者清理失败，已保留命令目录')
+        } })
+    }
     backend = createBackend({ paths, applicationVersion: config.applicationVersion, credentialCodec: host.credentialCodec,
       ...(execHost ? { sessionCreationOrigin: 'exec' as const, agentConfiguration: execHost.bootstrap.agent, runtimeChannels: execHost.bootstrap.channels,
         resolveRuntimeCredential: execHost.resolveRuntimeCredential } : {}),
       confirmChannelTarget: host.confirmChannelTarget, resolveAdapter, checkEnvironment: checkAgentEnvironment,
-      ownedResources: [pi, zima, loopPrecheck, executor, loopControl],
+      ...(!execHost ? { prepareAgentImage } : {}),
+      ownedResources: [pi, zima, loopPrecheck, executor, loopControl, ...(documents ? [documents] : [])],
+      ...(documents ? {
+        skillCatalog: createLocalSkillCatalogProvider(config.builtinSkillsRoot!, DOCUMENT_SKILLS),
+        agentToolEnvironment: { pathPrepend: [documents.commandDirectory], environmentOverrides: {} },
+        protectedToolRoots: documents.readOnlyRoots,
+      } : {}),
+      isManagedSkillAvailable: (session, skill) => !DOCUMENT_SKILLS.some((item) => item.catalogId === skill.catalogId)
+        || Boolean(documents && session.runtimeId === 'pi'),
       onLoopNotification: (event) => { if (!peer.closed) peer.notify(APP_SERVER_NOTIFICATIONS.LOOP_NOTIFICATION, event) },
       loopPrecheck: async (request) => {
         try {
@@ -72,6 +94,13 @@ export async function bootstrapAppServerBackend(
         }
       },
       validateCreate: validateRuntime, validateRuntimeSession: validateRuntime })
+    // 首次只处理一次默认选择；之后即使用户取消安装，也不能在启动时替用户改回。
+    if (documents && backend.settings.get().agentBuiltinSkillsInitialized !== true) {
+      const snapshot = await backend.skills.apply(DOCUMENT_SKILLS.map((skill) => skill.catalogId), signal)
+      signal.throwIfAborted()
+      backend.settings.update({ agentBuiltinSkillsInitialized: true })
+      if (snapshot.failures.length) console.warn('[内置 Skills] 默认安装未全部完成，请在 Skills 设置中查看并确认')
+    }
     // 服务开始接收会话请求前收敛上次中断的子任务，不能让 UI 恢复伪运行态。
     backend.tasks.markRunningDelegationsAsInterrupted()
     signal.throwIfAborted()
@@ -92,7 +121,7 @@ export async function bootstrapAppServerBackend(
       try { backend.dispose() } catch { /* 仍须等待其他资源，不泄露底层异常。 */ }
       try { await backend.drain() } catch { throw new AppServerBootstrapCleanupError() }
     } else {
-      const resources = [pi, zima, loopPrecheck, executor, loopControl]
+      const resources = [pi, zima, loopPrecheck, executor, loopControl, ...(documents ? [documents] : [])]
       let cleanupFailed = false
       for (const resource of resources) {
         try { resource.dispose() } catch { cleanupFailed = true }

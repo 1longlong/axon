@@ -51,8 +51,8 @@ async function open(getCatalog?: NonNullable<BackendOptions['skillCatalog']>['ge
   })
   const request = (method: string, input?: RpcJsonValue, client = main, signal?: AbortSignal) => parent.request(method,
     { clientId: client.clientId, ...(input === undefined ? {} : { input }) }, { timeoutMs: 0, signal })
-  const apply = async (ids: RpcJsonValue = ['fixture/review-code'], client = main, signal?: AbortSignal) =>
-    await request(methods.SKILLS_APPLY_SETTINGS, ids, client, signal) as unknown as AgentSkillSettingsSnapshot
+  const apply = async (ids: RpcJsonValue = ['fixture/review-code'], client = main, signal?: AbortSignal, confirmedCatalogIds: string[] = []) =>
+    await request(methods.SKILLS_APPLY_SETTINGS, { catalogIds: ids, confirmedCatalogIds }, client, signal) as unknown as AgentSkillSettingsSnapshot
   return { directory, parent, connection, backend: backend!, main, quick, request, apply, events, persisted,
     setCatalog(value: InstallableSkillCatalog) { catalog = value }, disconnect() { upstream.destroy(); downstream.destroy() } }
 }
@@ -97,7 +97,10 @@ describe('Skills 设置应用协议', () => {
     expect(JSON.stringify(first)).not.toContain('# 审查正文')
     expect((await f.apply()).installed).toEqual(first.installed)
     writeFileSync(instruction, '损坏内容')
-    await f.apply(); expect(readFileSync(instruction, 'utf8')).toContain('# 审查正文')
+    expect((await f.apply()).failures[0]).toMatchObject({ requiresConfirmation: true })
+    expect(readFileSync(instruction, 'utf8')).toBe('损坏内容')
+    await f.apply(undefined, f.main, undefined, ['fixture/review-code'])
+    expect(readFileSync(instruction, 'utf8')).toContain('# 审查正文')
     f.setCatalog({ packages: [skill('2.0.0', '# 更新正文')] })
     expect((await f.apply()).installed[0]?.version).toBe('2.0.0')
     expect(readFileSync(instruction, 'utf8')).toContain('# 更新正文')

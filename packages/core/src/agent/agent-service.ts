@@ -11,6 +11,10 @@ import type {
   AgentMemoryFileStates,
   AgentTypedError,
   AgentProviderAdapter,
+  AgentPreparedAttachmentInput,
+  AgentImageCapability,
+  AgentRecoveryAttachmentInput,
+  AgentSkillActivation,
   AgentQueryInput,
   AgentRunSource,
   AgentRuntimeId,
@@ -53,6 +57,9 @@ import type { AgentTitleGenerationInput, AgentTitleGenerator } from './agent-tit
 import { AsyncWorkTracker } from '../async/async-work-tracker'
 import { AgentInterruptedHistory } from './agent-interrupted-history'
 import type { AgentExecutionContext } from './agent-execution-context'
+import type { AgentAttachmentLease } from './agent-attachment-lease'
+import { AgentAttachmentError } from './agent-attachment-service'
+import { parseAgentInputParts, validateAgentInputPartReferences, agentInputPromptText } from '@axon/shared'
 
 const MAX_AGENT_INPUT_LENGTH = 100_000
 
@@ -77,13 +84,16 @@ export interface AgentServiceOptions {
   eventBus: AgentEventBus
   runtimeConfigDir: string
   runtimeSessionDir: string
+  /** 托管原件与受管命令资源始终只读，不随用户工作区扩大写权限。 */
+  protectedToolRoots?: readonly string[]
+  prepareRecoveryAttachments?: (session: AgentSessionMeta, messages: readonly SDKMessage[], capability: AgentImageCapability) => AgentRecoveryAttachmentInput
   /** 宿主按业务归属解析可信上下文；执行层不自行选择项目或任务目录。 */
   resolveExecutionContext: (session: AgentSessionMeta) => AgentExecutionContext
   getSystemPrompt?: (session: AgentSessionMeta) => string
   /** 只从已解析的可信项目根读取指令；失败时本轮降级为无项目指令。 */
   resolveProjectInstructions?: (projectRoot: string) => ProjectInstructionManifest
   /** 按固定优先级发现项目、内置与用户 Skill；失败时本轮降级为无 Skills。 */
-  discoverAgentSkills?: (projectRoot: string) => AgentSkillCatalog
+  discoverAgentSkills?: (projectRoot: string, session: AgentSessionMeta) => AgentSkillCatalog
   /** 宿主按当前配置解析记忆；执行层不感知记忆属于项目还是其他来源。 */
   getMemoryContext?: (session: AgentSessionMeta) => { prompt: string; fileStates: AgentMemoryFileStates; shouldPersistStates: boolean } | undefined
   getCustomTools?: (context: AgentCustomToolContext) =>
@@ -126,6 +136,8 @@ export interface AgentRunContext {
   inputOrigin?: 'quick'
   /** 宿主内部续跑提示仍需进入 JSONL/runtime 上下文，但不显示成用户气泡。 */
   synthetic?: boolean
+  /** 仅可信协调器传递；不是可由页面提交的字段或跨进程对象。 */
+  attachmentLease?: AgentAttachmentLease
 }
 
 /** 仅协调层核验暂停后调用，不属于用户发送 DTO。 */
@@ -145,17 +157,27 @@ export interface AgentRunOutcome {
   finalText?: string
 }
 
-/** 标识可规范化，正文仅校验非空与容量；CLI/桌面原始空白共同进入模型和历史。 */
+/** 标识可规范化，正文与顺序须逐字对应；CLI/桌面原始空白共同进入模型和历史。 */
 function normalizeSendInput(value: AgentSendInput): AgentSendInput {
   if (!value || typeof value !== 'object') {
     throw new AgentServiceError('invalid_input', 'Agent 请求格式无效')
   }
   const sessionId = typeof value.sessionId === 'string' ? value.sessionId.trim() : ''
   const text = typeof value.text === 'string' ? value.text : ''
-  if (!sessionId || !text.trim() || text.includes('\0') || text.length > MAX_AGENT_INPUT_LENGTH) {
+  const attachmentDraftId = value.attachmentDraftId
+  if (attachmentDraftId !== undefined && (typeof attachmentDraftId !== 'string' || !attachmentDraftId.trim())) {
+    throw new AgentServiceError('invalid_input', '附件草稿标识无效')
+  }
+  if (!sessionId || (!text.trim() && !attachmentDraftId) || text.includes('\0') || text.length > MAX_AGENT_INPUT_LENGTH) {
     throw new AgentServiceError('invalid_input', 'Agent 会话 ID 或消息正文无效')
   }
-  return { sessionId, text }
+  const consent = value.imageModelConsent
+  if (consent !== undefined && (!consent || typeof consent !== 'object' || Array.isArray(consent)
+    || typeof consent.channelId !== 'string' || typeof consent.modelId !== 'string')) throw new AgentServiceError('invalid_input', '图片模型确认无效')
+  let inputParts: AgentSendInput['inputParts']
+  try { inputParts = parseAgentInputParts(value.inputParts, text) }
+  catch (error) { throw new AgentServiceError('invalid_input', error instanceof Error ? error.message : '消息片段无效') }
+  return { sessionId, text, ...(inputParts ? { inputParts } : {}), ...(attachmentDraftId ? { attachmentDraftId } : {}), ...(consent ? { imageModelConsent: consent } : {}) }
 }
 
 function shouldPersistMessage(message: SDKMessage): boolean {
@@ -165,12 +187,16 @@ function shouldPersistMessage(message: SDKMessage): boolean {
 /** 把本轮宿主工具记录的 Skill 激活并入唯一 result，随后按普通中立消息落盘。 */
 function withSkillActivations(
   result: SDKResultMessage,
-  scope: AgentSkillReadScope,
+  scope: AgentSkillReadScope | undefined,
+  explicit: readonly AgentSkillActivation[] = [],
 ): SDKResultMessage {
-  const activated = scope.getActivations()
+  const activated = [...explicit, ...(scope?.getActivations() ?? [])]
   if (activated.length === 0) return result
   const merged = new Map((result.skill_activations ?? []).map((item) => [item.name, item]))
-  for (const item of activated) merged.set(item.name, item)
+  for (const item of activated) {
+    const previous = merged.get(item.name)
+    merged.set(item.name, { ...item, sources: [...new Set([...(previous?.sources ?? []), ...item.sources])] })
+  }
   return { ...result, skill_activations: [...merged.values()] }
 }
 
@@ -194,12 +220,16 @@ function allowedSubagentBuiltinTools(type: AgentSubagentType | undefined, sandbo
   return undefined
 }
 
-function createUserMessage(text: string, uuid: string, synthetic = false, inputOrigin?: 'quick'): SDKMessage {
+/** 将已验证的原文/顺序与本次加载上下文合为唯一用户历史，模型协议不覆盖这些 UI 元数据。 */
+function createUserMessage(text: string, uuid: string, synthetic = false, inputOrigin?: 'quick', prepared?: AgentPreparedAttachmentInput, inputParts?: AgentSendInput['inputParts']): SDKMessage {
   return {
     type: 'user',
     message: { content: [{ type: 'text', text }] },
     parent_tool_use_id: null,
     uuid,
+    ...(inputParts ? { inputParts } : {}),
+    ...(prepared ? { attachments: prepared.attachments, attachmentContext: prepared.context } : {}),
+    ...(prepared?.skillActivations?.length ? { explicitSkillActivations: prepared.skillActivations } : {}),
     ...(synthetic ? { isSynthetic: true } : {}),
     ...(inputOrigin === 'quick' ? { inputOrigin } : {}),
   }
@@ -268,6 +298,30 @@ export class AgentService {
     this.now = options.now ?? Date.now
   }
 
+  /** 入队前和实际派发各校验一次；未知能力确认只绑定确切模型，不是文件访问授权。 */
+  validateAttachmentInput(input: AgentSendInput, prepared: AgentPreparedAttachmentInput, signal?: AbortSignal): Promise<void> {
+    return this.work.run(async () => {
+      if (!prepared.images?.length) return
+      const stop = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal
+      stop.throwIfAborted()
+      const session = this.options.sessionManager.get(input.sessionId)
+      if (!session?.channelId || !session.modelId) throw new AgentAttachmentError('invalid_input', '请先选择可用模型')
+      const adapter = this.options.resolveAdapter?.(session.runtimeId) ?? this.options.adapter
+      const channel = await waitWithSignal(this.work.run(() => this.options.channelManager.resolve(session.channelId!)), stop)
+      if (!channel.enabled || !channel.models.some((model) => model.enabled && model.id === session.modelId)) throw new AgentAttachmentError('invalid_input', '当前模型不可用')
+      const capability = await waitWithSignal(this.work.run(async () => await adapter.getImageCapability?.({ provider: channel.provider, model: session.modelId! }) ?? { support: 'unknown' as const }), stop)
+      const current = this.options.sessionManager.get(input.sessionId)
+      if (!current || current.channelId !== session.channelId || current.modelId !== session.modelId || current.runtimeId !== session.runtimeId) throw new AgentAttachmentError('invalid_input', '模型选择已变化，请重新发送')
+      const consent = input.imageModelConsent
+      if (capability.support === 'unsupported') throw new AgentAttachmentError('invalid_input', '此模型已知不支持图片，请更换模型或移除图片')
+      if (capability.support === 'unknown' && (consent?.channelId !== session.channelId || consent.modelId !== session.modelId)) throw new AgentAttachmentError('invalid_input', '模型图片能力未知，请明确确认尝试后再发送')
+      const sizes = prepared.images.map((image) => Buffer.byteLength(image.data, 'base64'))
+      if (capability.maxImages !== undefined && sizes.length > capability.maxImages
+        || capability.maxImageBytes !== undefined && sizes.some((size) => size > capability.maxImageBytes!)
+        || capability.maxTotalBytes !== undefined && sizes.reduce((sum, size) => sum + size, 0) > capability.maxTotalBytes) throw new AgentAttachmentError('too_large', '图片数量或大小超过当前模型限制')
+    })
+  }
+
   /**
    * 执行一轮 Agent：用户消息先落盘，再解析渠道并消费 adapter 流；delta 仅广播，
    * 完整消息及停止时冻结的部分检查点先落盘后广播，终态可从 JSONL 恢复；同时直接返回
@@ -295,6 +349,10 @@ export class AgentService {
     }
     const session = this.options.sessionManager.get(input.sessionId)
     if (!session) throw new AgentServiceError('not_found', 'Agent 会话不存在')
+    const draftId = request.kind === 'message' ? (input as AgentSendInput).attachmentDraftId : undefined
+    if (draftId !== context.attachmentLease?.draftId || context.attachmentLease && context.attachmentLease.sessionId !== input.sessionId) {
+      throw new AgentServiceError('invalid_input', '附件输入未经过后端接管')
+    }
     // adapter 在用户消息落盘前解析；缺失 runtime 不能留下无法交付的半轮历史。
     let adapter: AgentProviderAdapter
     try {
@@ -346,13 +404,23 @@ export class AgentService {
     }
     this.activeRuns.set(input.sessionId, active)
     if (this.lifetime.signal.aborted) active.controller.abort()
+    let preparedInput: AgentPreparedAttachmentInput | undefined
     // 在第一个异步边界前登记运行，凭据校验期间同样能停止且不能重复发送。
     try {
       await waitWithSignal(this.work.run(async () => this.options.validateRuntimeSession?.(session)), active.controller.signal)
       active.controller.signal.throwIfAborted()
+      // 排队派发后再核对原件；失败不追加用户消息或虚构一轮错误历史。
+      preparedInput = context.attachmentLease?.prepare()
+      if (request.kind === 'message') {
+        try { validateAgentInputPartReferences((input as AgentSendInput).inputParts, preparedInput?.attachments ?? []) }
+        catch (error) { throw new AgentAttachmentError('invalid_input', error instanceof Error ? error.message : 'Skill 引用无效') }
+      }
+      if (preparedInput) await this.validateAttachmentInput(input as AgentSendInput, preparedInput, active.controller.signal)
+      context.attachmentLease?.reserveForHistory()
     } catch (error) {
       if (this.activeRuns.get(input.sessionId) === active) this.activeRuns.delete(input.sessionId)
       this.resolveIdleWaiters(input.sessionId)
+      if (error instanceof AgentAttachmentError) throw new AgentServiceError('invalid_input', error.message)
       throw new AgentServiceError('runtime_error', error instanceof Error ? error.message : 'Agent Runtime 不可用')
     }
     let terminalReceived = false
@@ -382,7 +450,12 @@ export class AgentService {
         resumed_pause_id: continuation.pauseId, stopped_result_uuid: pausedMarker!.stopped_result_uuid,
         run_id: active.runId, run_started_at: active.runStartedAt,
         ...(context.inputOrigin ? { input_origin: context.inputOrigin } : {}),
-      } : createUserMessage(userText!, active.turnId, context.synthetic === true, context.inputOrigin))
+      } : {
+        ...createUserMessage(userText!, active.turnId, context.synthetic === true, context.inputOrigin, preparedInput, (input as AgentSendInput).inputParts),
+        ...(preparedInput?.images?.length && session.channelId && session.modelId
+          ? { imageModelSelection: { channelId: session.channelId, modelId: session.modelId } } : {}),
+      })
+      context.attachmentLease?.commit()
       this.options.eventBus.emit({
         type: 'run_started', sessionId: input.sessionId,
         runStartedAt: active.runStartedAt, source: active.source,
@@ -406,7 +479,7 @@ export class AgentService {
       if (!continuation) titleInput = {
         channel,
         modelId: session.modelId,
-        userText: userText!,
+        userText: userText?.trim() ? userText : preparedInput?.attachments.map((attachment) => attachment.name).join('、') ?? '',
         assistantText: '',
         signal: active.controller.signal,
       }
@@ -433,6 +506,9 @@ export class AgentService {
           projectRoot: resolvedCwd,
           mode: executionPolicy.sandboxMode,
         })
+        sandboxPolicy.protectedReadOnlyRoots = [...new Set([
+          ...sandboxPolicy.protectedReadOnlyRoots, ...(this.options.protectedToolRoots ?? []),
+        ])]
       }
 
       const toolEnvironment = executionContext.toolEnvironment
@@ -454,13 +530,15 @@ export class AgentService {
         }
       }
 
-      // Skills 目录只注入元数据；正文统一由宿主 SkillRead 读取，不依赖 runtime 的文件工具。
+      // 自动匹配仍只注入目录；显式正文已随本轮用户输入准备，引用读取绑定同一来源。
       let skillReadScope: AgentSkillReadScope | undefined
       if (this.options.discoverAgentSkills) {
         try {
-          const catalog = this.options.discoverAgentSkills(resolvedCwd)
+          const catalog = this.options.discoverAgentSkills(resolvedCwd, session)
           systemPrompt = buildAgentSkillSystemPrompt(systemPrompt, catalog)
-          if (catalog.skills.length > 0) skillReadScope = createAgentSkillReadScope(catalog)
+          const sources = new Map(catalog.skills.map((skill) => [skill.name, skill]))
+          for (const skill of preparedInput?.explicitSkillSources ?? []) sources.set(skill.name, skill)
+          if (sources.size > 0) skillReadScope = createAgentSkillReadScope({ ...catalog, skills: [...sources.values()] }, preparedInput?.skillActivations)
           for (const diagnostic of catalog.diagnostics) {
             console.warn(`[Agent Skills] ${diagnostic.path}: ${diagnostic.message}`)
           }
@@ -529,6 +607,7 @@ export class AgentService {
       const query: Omit<AgentQueryInput, 'prompt'> = {
         sessionId: input.sessionId,
         model: session.modelId,
+        ...(preparedInput?.images?.length ? { images: preparedInput.images } : {}),
         cwd: resolvedCwd,
         abortSignal: active.controller.signal,
         connection: {
@@ -568,6 +647,14 @@ export class AgentService {
         ...((session.sdkSessionId || session.runtimeSessionFile || recoveryPrompt)
           ? { recoveryPrompt }
           : {}),
+        ...(this.options.prepareRecoveryAttachments && session.runtimeId === 'pi' ? {
+          loadRecoveryAttachments: () => this.work.run(async () => {
+            active.controller.signal.throwIfAborted()
+            const capability = await adapter.getImageCapability?.({ provider: channel.provider, model: session.modelId! }) ?? { support: 'unknown' as const }
+            active.controller.signal.throwIfAborted()
+            return this.options.prepareRecoveryAttachments!(session, historyBeforeRun, capability)
+          }),
+        } : {}),
         ...(customTools ? { customTools } : {}),
         ...(this.options.createCanUseTool
           ? {
@@ -590,7 +677,7 @@ export class AgentService {
       const stream = continuation
         ? adapter.continueQuery!({ ...query, interruptionId: continuation.pauseId,
             interruptionContext: buildAgentContinuationPrompt() })
-        : adapter.query({ ...query, prompt: userText! })
+        : adapter.query({ ...query, prompt: [agentInputPromptText(userText!, (input as AgentSendInput).inputParts, preparedInput?.attachments), preparedInput?.context].filter(Boolean).join('\n\n') })
       for await (const incomingPayload of stream) {
         // token 引用是停止/未来替换运行后的 stale 防线；迟到事件不得污染新一轮。
         if (this.activeRuns.get(input.sessionId) !== active) continue
@@ -609,8 +696,8 @@ export class AgentService {
           continue
         }
         // Skill 激活属于应用中立历史；adapter 只负责模型协议，不再各自观察 Read。
-        const neutralMessage = payload.message.type === 'result' && skillReadScope
-          ? withSkillActivations(payload.message as SDKResultMessage, skillReadScope)
+        const neutralMessage = payload.message.type === 'result'
+          ? withSkillActivations(payload.message as SDKResultMessage, skillReadScope, preparedInput?.skillActivations)
           : payload.message
         // adapter 的唯一 result 已等资源清理；部分输出和未知工具状态必须先于停止终态落盘。
         if (neutralMessage.type === 'result') persistInterruptedHistory()

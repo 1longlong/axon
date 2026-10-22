@@ -4,6 +4,7 @@ import { DESKTOP_IPC_CHANNELS } from '../../../types'
 import type { QuickChatShortcutBinding } from '@axon/shared'
 import { getIsQuitting } from './app-lifecycle'
 import { registerQuickChatWindowOwner, unregisterQuickChatWindowOwner } from './quick-chat-window-owner'
+import { isQuickChatNativeDialogOpen } from './quick-chat-window-owner'
 import { QUICK_CHAT_COMPACT_HEIGHT, setQuickChatWindowExpanded } from './quick-chat-window-layout'
 
 export interface QuickChatWindowManagerOptions {
@@ -21,7 +22,7 @@ export class QuickChatWindowManager {
     const key = `${binding.sessionType}:${binding.sessionId}`
     const existing = this.windows.get(key)
     if (existing && !existing.isDestroyed()) {
-      setQuickChatWindowExpanded(existing, false)
+      setQuickChatWindowExpanded(existing, false, 0)
       if (existing.isMinimized()) existing.restore()
       existing.webContents.send(DESKTOP_IPC_CHANNELS.QUICK_CHAT_OPENED)
       existing.show()
@@ -67,7 +68,8 @@ export class QuickChatWindowManager {
       window.hide()
     }
     window.on('blur', () => {
-      if (window.isVisible()) cancelAndHide()
+      // 只豁免本窗口的原生 picker；完成后恢复普通失焦语义，不用延时猜测焦点。
+      if (window.isVisible() && !isQuickChatNativeDialogOpen(webContentsId)) cancelAndHide()
     })
     window.on('close', (event) => {
       if (getIsQuitting()) return

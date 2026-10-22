@@ -3,6 +3,7 @@
 import type {
   AgentSkillDiscoverySummary,
   AgentSkillSettingsSnapshot,
+  AgentSkillInstallationFailure,
   InstallableSkillCatalog,
 } from '@axon/shared'
 import type { AgentSkillCatalogProvider } from './agent-skill-catalog'
@@ -50,6 +51,7 @@ function parseDesiredIds(value: unknown): string[] {
 export class AgentSkillSettingsController {
   private readonly lifetime = new AbortController()
   private readonly work = new AsyncWorkTracker()
+  private failures: AgentSkillInstallationFailure[] = []
   constructor(private readonly options: AgentSkillSettingsControllerOptions) {}
 
   /** 可取消地读取目录，再返回安全摘要；不暴露正文、绝对路径或暂存状态。 */
@@ -68,22 +70,24 @@ export class AgentSkillSettingsController {
       desiredCatalogIds: this.options.installations.getDesiredCatalogIds(),
       installed: state.installed,
       discovered: discoveredSummaries(this.options.discoverGlobalSkills()),
-      failures: [],
+      failures: this.failures,
     }
   }
 
   /** 目录读取可取消；写盘前复核信号，同步核对开始后不把取消等待伪装成回滚。 */
-  apply(rawIds: unknown, signal?: AbortSignal): Promise<AgentSkillSettingsSnapshot> {
-    return this.work.run(() => this.applySelection(rawIds, this.signal(signal)))
+  apply(rawIds: unknown, signal?: AbortSignal, rawConfirmedIds: unknown = []): Promise<AgentSkillSettingsSnapshot> {
+    return this.work.run(() => this.applySelection(rawIds, this.signal(signal), rawConfirmedIds))
   }
 
   /** 退出发生在目录等待时禁止安装；已进入同步 reconcile 的写盘段仍完整执行。 */
-  private async applySelection(rawIds: unknown, signal: AbortSignal): Promise<AgentSkillSettingsSnapshot> {
+  private async applySelection(rawIds: unknown, signal: AbortSignal, rawConfirmedIds: unknown): Promise<AgentSkillSettingsSnapshot> {
     this.ensureActive(signal)
     const desiredIds = parseDesiredIds(rawIds)
+    const confirmedIds = parseDesiredIds(rawConfirmedIds)
     const catalog = await waitWithSignal(this.work.run(() => Promise.resolve(this.options.catalog.getCatalog())), signal)
     this.ensureActive(signal)
-    const result = this.options.installations.reconcile(catalog, desiredIds)
+    const result = this.options.installations.reconcile(catalog, desiredIds, confirmedIds)
+    this.failures = result.failures
     return {
       available: availableSummaries(catalog),
       desiredCatalogIds: result.desiredCatalogIds,

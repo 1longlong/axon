@@ -4,6 +4,8 @@ productName: Axon
 asar: true
 asarUnpack:
   - dist/app-server.mjs
+  - dist/axon-doc.mjs
+  - dist/node_modules/**/*
   - node_modules/**/*
 electronDist: node_modules/electron/dist
 
@@ -14,6 +16,8 @@ directories:
 files:
   - dist/main.cjs
   - dist/app-server.mjs
+  - dist/axon-doc.mjs
+  - dist/node_modules/**/*
   - dist/preload.cjs
   - dist/THIRD_PARTY_NOTICES.md
   - dist/renderer/**/*

@@ -51,7 +51,7 @@ function open() {
     getClientSignal: () => page.signal, detachClient: async () => { page.abort(); return true },
   } })
   const backend: AppServerSkillIpcOptions['backend'] = { request: async (clientId, method, input, options = {}) => {
-    calls.push({ clientId, method, input, options }); return { installed: [], desiredCatalogIds: input ?? [], failures: [] }
+    calls.push({ clientId, method, input, options }); return { installed: [], desiredCatalogIds: input && typeof input === 'object' && !Array.isArray(input) ? input.catalogIds ?? [] : [], failures: [] }
   } }
   const dispose = registerAppServerSkillIpcHandlers(ipc, { backend, clients })
   cleanups.push(() => { dispose(); clients.dispose() })
@@ -74,9 +74,9 @@ describe('Skills 固定 IPC 代理', () => {
     const f = open()
     expect([...f.ipc.handlers.keys()].sort()).toEqual(Object.values(channels).sort())
     await f.ipc.invoke(channels.GET_SETTINGS, f.main.event())
-    expect(await f.ipc.invoke(channels.APPLY_SETTINGS, f.main.event(), [' fixture/skill '])).toEqual({ installed: [], desiredCatalogIds: ['fixture/skill'], failures: [] })
+    expect(await f.ipc.invoke(channels.APPLY_SETTINGS, f.main.event(), { catalogIds: [' fixture/skill '], confirmedCatalogIds: [' fixture/skill '] })).toEqual({ installed: [], desiredCatalogIds: ['fixture/skill'], failures: [] })
     expect(f.calls.map(({ method, input }) => ({ method, input }))).toEqual([
-      { method: methods.SKILLS_GET_SETTINGS, input: undefined }, { method: methods.SKILLS_APPLY_SETTINGS, input: ['fixture/skill'] },
+      { method: methods.SKILLS_GET_SETTINGS, input: undefined }, { method: methods.SKILLS_APPLY_SETTINGS, input: { catalogIds: ['fixture/skill'], confirmedCatalogIds: ['fixture/skill'] } },
     ])
     expect(f.calls.every((call) => call.clientId === 'owner' && call.options.timeoutMs === 0 && !call.options.signal?.aborted)).toBe(true)
     expect(f.registrations()).toBe(1)
@@ -86,7 +86,7 @@ describe('Skills 固定 IPC 代理', () => {
     const f = open()
     for (const channel of f.ipc.handlers.keys()) await expect(f.ipc.invoke(channel, f.main.event(true))).rejects.toThrow('子框架')
     await expect(f.ipc.invoke(channels.GET_SETTINGS, f.main.event(), '/path')).rejects.toThrow('数量')
-    for (const input of [null, 'id', [1], new Array(1), [''], ['x'.repeat(201)], Array.from({ length: 201 }, () => 'id'), { catalogId: 'id', files: [] }]) {
+    for (const input of [null, 'id', [], { catalogIds: [1] }, { catalogIds: new Array(1) }, { catalogIds: [''] }, { catalogIds: ['x'.repeat(201)] }, { catalogIds: Array.from({ length: 201 }, () => 'id') }, { catalogId: 'id', files: [] }, { catalogIds: [], confirmedCatalogIds: [false] }]) {
       await expect(f.ipc.invoke(channels.APPLY_SETTINGS, f.main.event(), input)).rejects.toThrow('参数')
     }
     await expect(f.ipc.invoke(channels.GET_SETTINGS, f.unknown.event())).rejects.toThrow('已登记')
@@ -96,7 +96,7 @@ describe('Skills 固定 IPC 代理', () => {
   test('页面重载/代理释放撤销等待，非配合后端迟到成功也不交付，不重发', async () => {
     const f = open(), entered = Promise.withResolvers<AbortSignal>(), gate = Promise.withResolvers<RpcJsonValue>()
     f.backend.request = async (_client, _method, _input, options = {}) => { entered.resolve(options.signal!); return await gate.promise }
-    const outcome = f.ipc.invoke(channels.APPLY_SETTINGS, f.main.event(), []).catch((error: unknown) => error)
+    const outcome = f.ipc.invoke(channels.APPLY_SETTINGS, f.main.event(), { catalogIds: [] }).catch((error: unknown) => error)
     const signal = await entered.promise
     f.main.emit('did-start-loading'); f.dispose(); f.dispose()
     expect(signal.aborted).toBe(true)
@@ -113,7 +113,7 @@ describe('Skills 固定 IPC 代理', () => {
     const dispose = registerAppServerSkillIpcHandlers(fresh, { backend: f.backend, clients: {
       get: async (sender) => { const client = await f.clients.get(sender); await gate.promise; return client }, getClientSignal: (id) => f.clients.getClientSignal(id),
     } })
-    const outcome = fresh.invoke(channels.APPLY_SETTINGS, f.main.event(), []).catch((error: unknown) => error)
+    const outcome = fresh.invoke(channels.APPLY_SETTINGS, f.main.event(), { catalogIds: [] }).catch((error: unknown) => error)
     dispose(); gate.resolve()
     expect(await outcome).toMatchObject({ name: 'AbortError' }); expect(f.calls).toEqual([])
   })
@@ -138,7 +138,7 @@ describe('Skills 固定 IPC 代理', () => {
     for (const surface of [main, quick]) {
       const model = new RendererSkillSettings({ agentSkills: {
         getSettings: async () => await ipc.invoke(channels.GET_SETTINGS, surface.event()) as AgentSkillSettingsSnapshot,
-        applySettings: async (ids) => await ipc.invoke(channels.APPLY_SETTINGS, surface.event(), ids) as AgentSkillSettingsSnapshot,
+        applySettings: async (ids, confirmedIds = []) => await ipc.invoke(channels.APPLY_SETTINGS, surface.event(), { catalogIds: ids, confirmedCatalogIds: confirmedIds }) as AgentSkillSettingsSnapshot,
       }, settings: { onChanged: (callback) => { surface.on(SETTINGS_IPC_CHANNELS.CHANGED, callback); return () => { surface.off(SETTINGS_IPC_CHANNELS.CHANGED, callback) } } } }, () => {})
       models.push(model); model.start()
     }
@@ -158,7 +158,7 @@ describe('Skills 固定 IPC 代理', () => {
     expect(JSON.parse(readFileSync(paths.settingsPath, 'utf8'))).toMatchObject({ themeMode: 'dark', agentSystemPrompt: '用户规则', agentSkillCatalogIds: [] })
     for (const surface of [main, quick]) expect(surface.deliveries.filter((item) => item.channel === SETTINGS_IPC_CHANNELS.CHANGED).at(-1)?.value as AppSettings).toMatchObject({ agentSkillCatalogIds: [] })
     // 当前生产来源为空，不能通过 renderer 上传包或指定目录来恢复安装。
-    await expect(ipc.invoke(channels.APPLY_SETTINGS, main.event(), ['fixture/skill'])).rejects.toMatchObject({ code: -32602 })
+    await expect(ipc.invoke(channels.APPLY_SETTINGS, main.event(), { catalogIds: ['fixture/skill'] })).rejects.toMatchObject({ code: -32602 })
     expect(JSON.parse(readFileSync(paths.settingsPath, 'utf8')).agentSkillCatalogIds).toEqual([])
   }, 15_000)
 })

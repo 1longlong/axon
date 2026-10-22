@@ -18,7 +18,7 @@ export function groupAgentTurns(messages: readonly SDKMessage[]): AgentDisplayGr
   const flush = (resultIndex?: number): void => {
     const visible = reply.some((message) => message.type === 'assistant'
       || (message.type === 'result' && message.subtype !== 'success' && !isAgentUserStoppedResult(message))
-      || (message.type === 'system' && message.subtype === 'permission_denied')
+      || (message.type === 'system' && ['permission_denied', 'axon_attachment_warning'].includes(String(message.subtype)))
       || (message.type === 'user' && ((message as SDKUserMessage).message?.content ?? []).some((block) => block.type === 'tool_result')))
     if (visible) groups.push({ kind: 'reply', messages: reply, ...(resultIndex === undefined ? {} : { resultIndex }),
       ...(turnId ? { turnId } : {}) })
@@ -55,7 +55,7 @@ export function groupAgentTurns(messages: readonly SDKMessage[]): AgentDisplayGr
       message.type !== 'assistant'
       && message.type !== 'result'
       && message.type !== 'user'
-      && !(message.type === 'system' && message.subtype === 'permission_denied')
+      && !(message.type === 'system' && ['permission_denied', 'axon_attachment_warning'].includes(String(message.subtype)))
     ) continue
     if (message.type === 'result' && message.isSyntheticCompactionResult === true) continue
     reply.push(message)
@@ -77,6 +77,6 @@ export function hasActiveAgentTurnOutput(groups: readonly AgentDisplayGroup[]): 
       return block.type !== 'unknown'
     })
     if (message.type === 'user') return ((message as SDKUserMessage).message?.content ?? []).some((block) => block.type === 'tool_result')
-    return message.type === 'system' && message.subtype === 'permission_denied'
+    return message.type === 'system' && ['permission_denied', 'axon_attachment_warning'].includes(String(message.subtype))
   })
 }
